@@ -178,7 +178,7 @@ int main(void)
     	//HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, GPIO_PIN_SET);
     	//HAL_Delay(0.1);
     	//HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, GPIO_PIN_RESET);
-    	//HAL_Delay(100);
+    	HAL_Delay(100);
         /* Мигание светодиодом каждые 500 мс */
         if (HAL_GetTick() - last_debug_time >= 500)
         {
@@ -370,65 +370,66 @@ void reset_capture(void)
 /**
   * @brief  Вывод результатов измерения частоты
   */
-void print_results(void)
-{
-    /* Периоды в тиках */
-    uint32_t period1_ticks = capture_times[1] - capture_times[0];
-    uint32_t period2_ticks = capture_times[2] - capture_times[1];
-
-    /* Разрешение таймера: 1/(72MHz/(PSC+1)) = 1/10.2857MHz = 0.09722 мкс */
-    float tick_duration_us = 1000000.0f / (TIMER_CLOCK_HZ / 7.0f);
-    float period1_us = period1_ticks * tick_duration_us;
-    float period2_us = period2_ticks * tick_duration_us;
-
-    USART2_Print("\r\n--- FREQUENCY MEASUREMENT ---\r\n");
-
-    /* Отладочный вывод тиков */
-    USART2_Print("Period1: ");
-    USART2_PrintNum(period1_ticks);
-    USART2_Print(" ticks, Period2: ");
-    USART2_PrintNum(period2_ticks);
-    USART2_Print(" ticks\r\n");
-
-    /* Проверка на минимальную паузу 1.5 мкс */
-    USART2_Print("Period 1-2: ");
-    if (period1_us < 1.5f) {
-        USART2_Print("<1.5 us (");
-        float_to_str(period1_us, float_buffer, 3);
-        USART2_Print(float_buffer);
-        USART2_Print(" us)\r\n");
-    } else {
-        float_to_str(period1_us, float_buffer, 3);
-        USART2_Print(float_buffer);
-        USART2_Print(" us\r\n");
-    }
-
-    USART2_Print("Period 2-3: ");
-    if (period2_us < 1.5f) {
-        USART2_Print("<1.5 us (");
-        float_to_str(period2_us, float_buffer, 3);
-        USART2_Print(float_buffer);
-        USART2_Print(" us)\r\n");
-    } else {
-        float_to_str(period2_us, float_buffer, 3);
-        USART2_Print(float_buffer);
-        USART2_Print(" us\r\n");
-    }
-
-    /* Средний период (только если обе паузы >= 1.5 мкс) */
-    if (period1_us >= 1.5f && period2_us >= 1.5f) {
-        float avg_period_us = (period1_us + period2_us) / 2.0f;
-        if (avg_period_us > 0.0f) {
-            float avg_freq_MHz = 1.0f / (avg_period_us * 0.000001f);
-            USART2_Print("Avg frequency: ");
-            float_to_str(avg_freq_MHz, float_buffer, 3);
-            USART2_Print(float_buffer);
-            USART2_Print(" MHz\r\n");
-        }
-    } else {
-        USART2_Print("Avg frequency: NOT CALCULATED (period < 1.5 us)\r\n");
-    }
-}
+//void print_results(void)
+//{
+//    /* Периоды в тиках */
+//    uint32_t period1_ticks = capture_times[1] - capture_times[0];
+//    uint32_t period2_ticks = capture_times[2] - capture_times[1];
+//
+//    /* Разрешение таймера: 1/(72MHz/(PSC+1)) = 1/10.2857MHz = 0.09722 мкс */
+//    float tick_duration_us = 1000000.0f / (TIMER_CLOCK_HZ / 7.0f);
+//    float period1_us = period1_ticks * tick_duration_us;
+//    float period2_us = period2_ticks * tick_duration_us;
+//
+//    USART2_Print("\r\n--- FREQUENCY MEASUREMENT ---\r\n");
+//
+//    /* Отладочный вывод тиков */
+//    USART2_Print("Period1: ");
+//    USART2_PrintNum(period1_ticks);
+//    USART2_Print(" ticks, Period2: ");
+//    USART2_PrintNum(period2_ticks);
+//    USART2_Print(" ticks\r\n");
+//
+//    /* Проверка на минимальную паузу 1.5 мкс */
+//    USART2_Print("Period 1-2: ");
+//    if (period1_us < 1.5f) {
+//        USART2_Print("<1.5 us (");
+//        float_to_str(period1_us, float_buffer, 3);
+//        USART2_Print(float_buffer);
+//        USART2_Print(" us)\r\n");
+//    } else {
+//        float_to_str(period1_us, float_buffer, 3);
+//        USART2_Print(float_buffer);
+//        USART2_Print(" us\r\n");
+//    }
+//
+//    USART2_Print("Period 2-3: ");
+//    if (period2_us < 1.5f) {
+//        USART2_Print("<1.5 us (");
+//        float_to_str(period2_us, float_buffer, 3);
+//        USART2_Print(float_buffer);
+//        USART2_Print(" us)\r\n");
+//    } else {
+//        float_to_str(period2_us, float_buffer, 3);
+//        USART2_Print(float_buffer);
+//        USART2_Print(" us\r\n");
+//    }
+//
+//    /* Средний период (только если обе паузы >= 1.5 мкс) */
+//    if (period1_us >= 1.5f && period2_us >= 1.5f) {
+//        float avg_period_us = (period1_us + period2_us) / 2.0f;
+//        if (avg_period_us > 0.0f) {
+//        	float avg_freq_hz = 1.0f / (avg_period_us * 0.000001f);   // Частота в Гц
+//        	float avg_freq_MHz = avg_freq_hz / 1000000.0f;            // Перевод в МГц
+//            USART2_Print("Avg frequency: ");
+//            float_to_str(avg_freq_MHz, float_buffer, 3);
+//            USART2_Print(float_buffer);
+//            USART2_Print(" MHz\r\n");
+//        }
+//    } else {
+//        USART2_Print("Avg frequency: NOT CALCULATED (period < 1.5 us)\r\n");
+//    }
+//}
 
 /**
   * @brief  ПРОСТАЯ инициализация TIM4 для генерации импульсов на PB5

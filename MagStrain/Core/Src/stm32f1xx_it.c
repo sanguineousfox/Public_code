@@ -103,31 +103,32 @@ void EXTI1_IRQHandler(void)
 
 void TIM3_IRQHandler(void)
 {
-    if (TIM3->SR & TIM_SR_CC4IF)
-    {
-        uint16_t current_capture = TIM3->CCR4;
-        uint32_t delta;
+    /* Проверка флага захвата канала 4 */
+    if (TIM3->SR & TIM_SR_CC4IF) {
+        /* Чтение значения захвата */
+        uint16_t capture = TIM3->CCR4;
 
-        // Вычисляем разницу с учетом переполнения
-        if (current_capture >= last_capture) {
-            delta = current_capture - last_capture;
-        } else {
-            delta = (0xFFFF - last_capture) + current_capture;
-        }
-
+        /* Сохранение времени захвата */
         if (capture_index < 3) {
-            capture_times[capture_index] = delta;
+            capture_times[capture_index] = capture;
             capture_index++;
-            last_capture = current_capture;
 
+            /* Проверка завершения измерения (3 импульса) */
             if (capture_index >= 3) {
                 measurement_done = 1;
-                TIM3->CR1 &= ~TIM_CR1_CEN;        // Останавливаем таймер
-                TIM3->DIER &= ~TIM_DIER_CC4IE;    // Отключаем прерывание захвата
+                TIM3->CR1 &= ~TIM_CR1_CEN;  // Остановка таймера
+                TIM3->DIER &= ~TIM_DIER_CC4IE;  // Отключение прерывания
             }
         }
 
-        TIM3->SR &= ~TIM_SR_CC4IF;  // Очищаем флаг прерывания
+        /* Сброс флага прерывания */
+        TIM3->SR &= ~TIM_SR_CC4IF;
+    }
+
+    /* Обработка переполнения (если нужно для длинных периодов) */
+    if (TIM3->SR & TIM_SR_UIF) {
+        last_capture += 0x10000;  // Учёт переполнения 16-битного счётчика
+        TIM3->SR &= ~TIM_SR_UIF;
     }
 }
 
