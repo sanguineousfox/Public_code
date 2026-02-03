@@ -1,0 +1,7 @@
+../Core/Src/config.c:13:17:CalculateCRC32	32	static
+../Core/Src/config.c:35:6:Config_Init	16	static
+../Core/Src/config.c:58:9:Config_GetAddress	4	static
+../Core/Src/config.c:66:6:Config_SetAddress	16	static
+../Core/Src/config.c:83:6:Config_SaveToFlash	48	static
+../Core/Src/config.c:116:6:Config_LoadFromFlash	16	static
+../Core/Src/config.c:125:6:Config_FactoryReset	8	static
