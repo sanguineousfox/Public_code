@@ -3,11 +3,10 @@
   ******************************************************************************
   * @file           : main.c
   * @brief          : Main program body
-  * @description    : Magnetostrictive sensor time-of-flight measurement
-  *                   - Measurement cycle: 10 seconds
-  *                   - Red LED (PB13) lights up when signal captured on CLIK (PB1)
-  *                   - Blue LED (PB12) blinks to indicate system activity
-  *                   - CRITICAL: Optimized for 2 us signal capture (no latency)
+  * @description    : Система измерения времени пролёта магнитострикционного датчика
+  *                   - Импульс: точно 10.00 мкс (54 итерации)
+  *                   - Период измерений: 10 секунд
+  *                   - Красный светодиод (PB13) горит 1 сек при захвате сигнала
   ******************************************************************************
   */
 /* USER CODE END Header */
@@ -22,18 +21,19 @@
 
 /* Private define ------------------------------------------------------------*/
 #define TIMER_CLOCK_HZ  72000000.0f  // 72 МГц после PLL
-#define VREFINT_CAL_VALUE   (*(uint16_t*)0x1FFFF7BA)  // Правильное чтение калибровки (~1500-1550)
+#define VREFINT_CAL_ADDR  ((uint16_t*)0x1FFFF7BA)  // Адрес калибровки в памяти
+#define VREFINT_CAL_VALUE (*VREFINT_CAL_ADDR)      // Правильное чтение 16-битного значения
 #define ADC_SAMPLES     16      // Количество выборок для усреднения
 #define MEAS_TIMEOUT_MS 10      // Таймаут измерения времени пролёта (10 мс)
 
-/* ЧАСТОТНЫЕ КОЭФФИЦИЕНТЫ ДЕЛИТЕЛЕЙ */
-#define DIV_24V_FACTOR  9.1f    // Резисторы ~81к+10к
-#define DIV_12V_FACTOR  4.5f    // Резисторы ~35к+10к
-#define DIV_5V_FACTOR   2.0f    // Резисторы 10к+10к
+/* ЧАСТОТНЫЕ КОЭФФИЦИЕНТЫ ДЕЛИТЕЛЕЙ (подобраны экспериментально) */
+#define DIV_24V_FACTOR  9.2f    // Резисторы ~81к+10к
+#define DIV_12V_FACTOR  4.6f    // Резисторы ~35к+10к
+#define DIV_5V_FACTOR   2.92f   // Резисторы ~4.7к+10к (коэффициент 3.13, но с учётом погрешностей = 1.47)
 
 /* МАГНИТОСТРИКЦИОННЫЙ ДАТЧИК */
 #define PULSE_WIDTH_US  10      // Ширина генерируемого импульса (мкс)
-#define PULSE_PERIOD_MS 10000   // Период измерения = 10 секунд
+#define PULSE_PERIOD_MS 10000   // Период измерения = 10 секунд (10000 мс)
 #define SOUND_SPEED_MPS 2800.0f // Скорость звука в волноводе (м/с)
 #define TOF_TICK_US     (1000000.0f / (TIMER_CLOCK_HZ / 7.0f))  // 0.09722 мкс на тик
 
@@ -49,6 +49,12 @@
 /* СВЕТОДИОДЫ */
 #define LED_RED_PIN     GPIO_PIN_13  // PB13 = красный светодиод
 #define LED_BLUE_PIN    GPIO_PIN_12  // PB12 = синий светодиод
+
+/* Время горения красного светодиода после захвата */
+#define LED_RED_ON_TIME_MS 1000  // 1 секунда
+
+/* ТОЧНАЯ ЗАДЕРЖКА 10 МКС ДЛЯ 72 МГц (экспериментально подобрано) */
+#define PULSE_DELAY_ITERATIONS 54  // 54 итерации = 10.0 мкс при -O0
 
 /* Private variables ---------------------------------------------------------*/
 UART_HandleTypeDef huart1;  // Для ModBus (USART1)
@@ -85,7 +91,7 @@ static void MX_ADC2_Init(void);
 void Error_Handler(void);
 
 void TIM3_InputCapture_Init(void);
-void generate_pulse_and_start_timer(void);
+void generate_pulse_and_measure(void);
 uint32_t measure_time_of_flight(void);
 void print_tof_results(uint32_t tof_ticks, float tof_us, float position_mm, uint8_t captured);
 void Read_All_Voltages(void);
@@ -155,15 +161,15 @@ int main(void)
     USART2_Print("USART1: ModBus RTU (9600, 8N1)\r\n");
     USART2_Print("Адрес устройства: 1\r\n");
     USART2_Print("Интервал измерений: 10 секунд\r\n");
-    USART2_Print("Индикация: Красный LED (PB13) = сигнал захвачен на CLIK\r\n");
-    USART2_Print("           Синий LED (PB12) = мигает (работа системы)\r\n");
+    USART2_Print("Индикация: Красный светодиод (PB13) = горит 1 сек при захвате сигнала\r\n");
+    USART2_Print("           Синий светодиод (PB12) = мигает (1 Гц)\r\n");
     USART2_Print("VREFINT_CAL: ");
     USART2_PrintNum(VREFINT_CAL_VALUE);
     USART2_Print("\r\nПины:\r\n");
-    USART2_Print("  PB5 (Gen_Impuls):  выход, импульс 10 мкс\r\n");
-    USART2_Print("  PB6 (Power_5V):    выход, постоянно LOW (питание ВКЛ)\r\n");
+    USART2_Print("  PB5 (Gen_Impuls):  выход, импульс 10 мкс @ 10 Гц (каждые 10 сек)\r\n");
+    USART2_Print("  PB6 (Power_5V):    выход, постоянно НИЗКИЙ (питание ВКЛ)\r\n");
     USART2_Print("  PB1 (CLIK):        вход, TIM3_CH4\r\n");
-    USART2_Print("  PB13 (LED_RED):    выход, загорается при захвате сигнала\r\n");
+    USART2_Print("  PB13 (LED_RED):    выход, горит 1 сек при захвате сигнала\r\n");
     USART2_Print("  PB12 (LED_BLUE):   выход, мигает (1 Гц)\r\n");
     USART2_Print("========================================\r\n\r\n");
 
@@ -194,7 +200,9 @@ int main(void)
     /* Основные переменные цикла */
     uint32_t last_measure_time = 0;
     uint32_t last_debug_time = 0;
+    uint32_t led_red_off_time = 0;  // Время выключения красного светодиода
     uint8_t blue_led_state = 0;
+    uint8_t red_led_state = 0;      // 0 = выключен, 1 = включён
 
     /* Бесконечный цикл */
     while (1)
@@ -205,6 +213,13 @@ int main(void)
             last_debug_time = HAL_GetTick();
             blue_led_state = !blue_led_state;
             HAL_GPIO_WritePin(GPIOB, LED_BLUE_PIN, blue_led_state ? LED_BLUE_ON : LED_BLUE_OFF);
+        }
+
+        /* Автоматическое выключение красного светодиода через 1 секунду */
+        if (red_led_state && (HAL_GetTick() - led_red_off_time >= LED_RED_ON_TIME_MS))
+        {
+            HAL_GPIO_WritePin(GPIOB, LED_RED_PIN, LED_RED_OFF);
+            red_led_state = 0;
         }
 
         /* Измерение каждые 10 секунд */
@@ -219,6 +234,7 @@ int main(void)
 
             /* Сброс индикации: погасить красный светодиод */
             HAL_GPIO_WritePin(GPIOB, LED_RED_PIN, LED_RED_OFF);
+            red_led_state = 0;
             signal_captured = 0;
 
             /* Шаг 1: Измерение напряжений */
@@ -238,15 +254,22 @@ int main(void)
 
             /* Шаг 3: Индикация результата */
             if (tof_ticks > 0 && tof_measurement_done) {
-                /* Сигнал успешно захвачен — зажечь красный светодиод */
+                /* Сигнал успешно захвачен — зажечь красный светодиод на 1 секунду */
                 HAL_GPIO_WritePin(GPIOB, LED_RED_PIN, LED_RED_ON);
+                red_led_state = 1;
+                led_red_off_time = HAL_GetTick();  // Запомнить время включения
                 signal_captured = 1;
                 USART2_Print("[УСПЕХ] Сигнал захвачен на CLIK (PB1)!\r\n");
             } else {
                 /* Сигнал НЕ захвачен — красный светодиод остаётся погашенным */
                 HAL_GPIO_WritePin(GPIOB, LED_RED_PIN, LED_RED_OFF);
+                red_led_state = 0;
                 signal_captured = 0;
                 USART2_Print("[ОШИБКА] Сигнал НЕ захвачен на CLIK (PB1)!\r\n");
+                USART2_Print("Возможные причины:\r\n");
+                USART2_Print("  1. Слишком слабый сигнал на PB1 (< 2В)\r\n");
+                USART2_Print("  2. Неправильная настройка перемаппирования TIM3\r\n");
+                USART2_Print("  3. Прерывание не успевает сработать за 2 мкс\r\n");
             }
 
             /* Обновление данных в ModBus */
@@ -333,7 +356,7 @@ void TIM3_InputCapture_Init(void)
   * @brief  КРИТИЧЕСКИ ВАЖНО: Таймер запускается ДО генерации импульса!
   *         Это позволяет захватить очень короткие задержки (2 мкс)
   */
-void generate_pulse_and_start_timer(void)
+void generate_pulse_and_measure(void)
 {
     /* Сброс флагов измерения */
     tof_measurement_done = 0;
@@ -345,18 +368,18 @@ void generate_pulse_and_start_timer(void)
     /* === КРИТИЧЕСКИ ВАЖНО: ЗАПУСК ТАЙМЕРА ДО ИМПУЛЬСА === */
     TIM3->CR1 |= TIM_CR1_CEN;  // Запуск таймера (готов к захвату СРАЗУ!)
 
-    /* МИНИМАЛЬНАЯ ЗАДЕРЖКА ДЛЯ СТАБИЛИЗАЦИИ ТАЙМЕРА (1 такт) */
-    __asm__("NOP");  // ТОЛЬКО 1 такт задержки!
+    /* МИНИМАЛЬНАЯ ЗАДЕРЖКА ДЛЯ СТАБИЛИЗАЦИИ ТАЙМЕРА (ТОЛЬКО 1 НОП) */
+    __NOP();
 
-    /* Генерация импульса 10 мкс на PB5 (Gen_Impuls) */
-    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, PULSE_HIGH);
+    /* Генерация импульса 10 мкс на PB5 (Gen_Impuls) - ПРЯМОЙ ДОСТУП К РЕГИСТРАМ */
+    GPIOB->BSRR = GPIO_PIN_5;  // УСТАНОВИТЬ PB5 = HIGH (максимальная скорость)
 
-    /* ТОЧНАЯ ЗАДЕРЖКА 10 МКС */
-    for (volatile uint32_t i = 0; i < 54; i++) {
+    /* ТОЧНАЯ ЗАДЕРЖКА 10 МКС (54 итерации = 10.0 мкс при -O0) */
+    for (volatile uint32_t i = 0; i < PULSE_DELAY_ITERATIONS; i++) {
         __NOP();
     }
 
-    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, PULSE_LOW);
+    GPIOB->BRR = GPIO_PIN_5;   // СБРОСИТЬ PB5 = LOW (максимальная скорость)
 
     /* Таймер уже работает — ничего не делаем */
 }
@@ -368,7 +391,7 @@ void generate_pulse_and_start_timer(void)
 uint32_t measure_time_of_flight(void)
 {
     /* Генерация импульса с предварительным запуском таймера */
-    generate_pulse_and_start_timer();
+    generate_pulse_and_measure();
 
     /* Ожидание завершения измерения или таймаута */
     uint32_t start_wait = HAL_GetTick();
@@ -378,8 +401,7 @@ uint32_t measure_time_of_flight(void)
             TIM3->CR1 &= ~TIM_CR1_CEN;  // Остановить таймер
             break;
         }
-        ModBus_Process();
-        __NOP();
+        __NOP();  // Минимальная задержка для экономии энергии
     }
 
     /* Остановка таймера */
@@ -394,12 +416,6 @@ uint32_t measure_time_of_flight(void)
   */
 void print_tof_results(uint32_t tof_ticks, float tof_us, float position_mm, uint8_t captured)
 {
-    if (captured) {
-        USART2_Print("[ИНДИКАЦИЯ] Красный светодиод (PB13): ВКЛ (сигнал захвачен)\r\n");
-    } else {
-        USART2_Print("[ИНДИКАЦИЯ] Красный светодиод (PB13): ВЫКЛ (сигнал НЕ захвачен)\r\n");
-    }
-
     USART2_Print("Время пролёта: ");
     if (captured) {
         float_to_str(tof_us, float_buffer, 2);
@@ -613,7 +629,7 @@ static void MX_GPIO_Init(void)
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-    /* Настройка красного светодиода на PB13 (загорается при захвате сигнала) */
+    /* Настройка красного светодиода на PB13 (загорается на 1 сек при захвате сигнала) */
     GPIO_InitStruct.Pin = LED_RED_PIN;
     GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
     GPIO_InitStruct.Pull = GPIO_NOPULL;

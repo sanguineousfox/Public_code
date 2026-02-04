@@ -3,7 +3,7 @@
   ******************************************************************************
   * @file    stm32f1xx_it.c
   * @brief   Interrupt Service Routines for magnetostrictive sensor TOF measurement
-  *          CRITICAL: Minimal latency for 2 us signal capture
+  *          CRITICAL: ABSOLUTELY MINIMAL latency for 2 us signal capture
   ******************************************************************************
   */
 /* USER CODE END Header */
@@ -22,7 +22,6 @@
 /* Глобальные переменные для измерения времени пролёта (объявлены в main.c) */
 extern volatile uint32_t tof_capture_value;
 extern volatile uint8_t tof_measurement_done;
-extern volatile uint8_t tof_timeout;
 
 /* USER CODE END TD */
 
@@ -63,10 +62,11 @@ void NMI_Handler(void)
   /* USER CODE BEGIN NonMaskableInt_IRQn 0 */
 
   /* USER CODE END NonMaskableInt_IRQn 0 */
-  /* USER CODE BEGIN NonMaskableInt_IRQn 1 */
   while (1)
   {
   }
+  /* USER CODE BEGIN NonMaskableInt_IRQn 1 */
+
   /* USER CODE END NonMaskableInt_IRQn 1 */
 }
 
@@ -80,9 +80,10 @@ void HardFault_Handler(void)
   /* USER CODE END HardFault_IRQn 0 */
   while (1)
   {
-    /* USER CODE BEGIN W1_HardFault_IRQn 0 */
-    /* USER CODE END W1_HardFault_IRQn 0 */
   }
+  /* USER CODE BEGIN HardFault_IRQn 1 */
+
+  /* USER CODE END HardFault_IRQn 1 */
 }
 
 /**
@@ -95,9 +96,10 @@ void MemManage_Handler(void)
   /* USER CODE END MemoryManagement_IRQn 0 */
   while (1)
   {
-    /* USER CODE BEGIN W1_MemoryManagement_IRQn 0 */
-    /* USER CODE END W1_MemoryManagement_IRQn 0 */
   }
+  /* USER CODE BEGIN MemoryManagement_IRQn 1 */
+
+  /* USER CODE END MemoryManagement_IRQn 1 */
 }
 
 /**
@@ -110,9 +112,10 @@ void BusFault_Handler(void)
   /* USER CODE END BusFault_IRQn 0 */
   while (1)
   {
-    /* USER CODE BEGIN W1_BusFault_IRQn 0 */
-    /* USER CODE END W1_BusFault_IRQn 0 */
   }
+  /* USER CODE BEGIN BusFault_IRQn 1 */
+
+  /* USER CODE END BusFault_IRQn 1 */
 }
 
 /**
@@ -125,9 +128,10 @@ void UsageFault_Handler(void)
   /* USER CODE END UsageFault_IRQn 0 */
   while (1)
   {
-    /* USER CODE BEGIN W1_UsageFault_IRQn 0 */
-    /* USER CODE END W1_UsageFault_IRQn 0 */
   }
+  /* USER CODE BEGIN UsageFault_IRQn 1 */
+
+  /* USER CODE END UsageFault_IRQn 1 */
 }
 
 /**
@@ -192,25 +196,25 @@ void SysTick_Handler(void)
 
 /**
   * @brief This function handles TIM3 global interrupt (CLIK input capture).
-  *        CRITICAL: Minimal code for lowest latency (2 us response)
+  *        ABSOLUTELY MINIMAL CODE - ONLY 4 OPERATIONS!
   */
 void TIM3_IRQHandler(void)
 {
   /* USER CODE BEGIN TIM3_IRQn 0 */
 
-  /* Обработка захвата канала 4 (PB1 = CLIK) - МИНИМАЛЬНЫЙ КОД! */
+  /* ПРОВЕРКА ФЛАГА ЗАХВАТА */
   if (TIM3->SR & TIM_SR_CC4IF) {
-      /* Сразу сохраняем значение захвата */
+      /* 1. Сразу сохраняем значение захвата */
       tof_capture_value = TIM3->CCR4;
 
-      /* Останавливаем таймер */
-      TIM3->CR1 &= ~TIM_CR1_CEN;
+      /* 2. Останавливаем таймер */
+      TIM3->CR1 = 0;
 
-      /* Устанавливаем флаг завершения измерения */
+      /* 3. Устанавливаем флаг завершения измерения */
       tof_measurement_done = 1;
 
-      /* Сбрасываем флаг прерывания */
-      TIM3->SR &= ~TIM_SR_CC4IF;
+      /* 4. Сбрасываем флаг прерывания */
+      TIM3->SR = 0;
   }
 
   /* USER CODE END TIM3_IRQn 0 */
