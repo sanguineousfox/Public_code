@@ -2,161 +2,266 @@
 /**
   ******************************************************************************
   * @file    stm32f1xx_it.c
-  * @brief   Interrupt Service Routines.
+  * @brief   Interrupt Service Routines for magnetostrictive sensor TOF measurement
+  *          CRITICAL: Minimal latency for 2 us signal capture
   ******************************************************************************
-  * @attention
   */
 /* USER CODE END Header */
 
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "stm32f1xx_it.h"
-#include "modbus.h"
 
 /* Private includes ----------------------------------------------------------*/
+/* USER CODE BEGIN Includes */
+/* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
+/* USER CODE BEGIN TD */
+
+/* Глобальные переменные для измерения времени пролёта (объявлены в main.c) */
+extern volatile uint32_t tof_capture_value;
+extern volatile uint8_t tof_measurement_done;
+extern volatile uint8_t tof_timeout;
+
+/* USER CODE END TD */
 
 /* Private define ------------------------------------------------------------*/
+/* USER CODE BEGIN PD */
+/* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
+/* USER CODE BEGIN PM */
+/* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-extern volatile uint32_t capture_times[3];
-extern volatile uint8_t capture_index;
-extern volatile uint8_t measurement_done;
-extern volatile uint16_t last_capture;
+/* USER CODE BEGIN PV */
+/* USER CODE END PV */
 
-/* Внешние объявления из main.c */
+/* Private function prototypes -----------------------------------------------*/
+/* USER CODE BEGIN PFP */
+/* USER CODE END PFP */
+
+/* Private user code ---------------------------------------------------------*/
+/* USER CODE BEGIN 0 */
+/* USER CODE END 0 */
+
+/* External variables --------------------------------------------------------*/
 extern UART_HandleTypeDef huart1;
 extern UART_HandleTypeDef huart2;
 extern ADC_HandleTypeDef hadc1;
 extern ADC_HandleTypeDef hadc2;
 
-/* Private function prototypes -----------------------------------------------*/
-
-/* Private user code ---------------------------------------------------------*/
-
 /******************************************************************************/
 /*           Cortex-M3 Processor Interruption and Exception Handlers          */
 /******************************************************************************/
+/**
+  * @brief This function handles Non maskable interrupt.
+  */
 void NMI_Handler(void)
 {
+  /* USER CODE BEGIN NonMaskableInt_IRQn 0 */
+
+  /* USER CODE END NonMaskableInt_IRQn 0 */
+  /* USER CODE BEGIN NonMaskableInt_IRQn 1 */
   while (1)
   {
   }
+  /* USER CODE END NonMaskableInt_IRQn 1 */
 }
 
+/**
+  * @brief This function handles Hard fault interrupt.
+  */
 void HardFault_Handler(void)
 {
+  /* USER CODE BEGIN HardFault_IRQn 0 */
+
+  /* USER CODE END HardFault_IRQn 0 */
   while (1)
   {
+    /* USER CODE BEGIN W1_HardFault_IRQn 0 */
+    /* USER CODE END W1_HardFault_IRQn 0 */
   }
 }
 
+/**
+  * @brief This function handles Memory management fault.
+  */
 void MemManage_Handler(void)
 {
+  /* USER CODE BEGIN MemoryManagement_IRQn 0 */
+
+  /* USER CODE END MemoryManagement_IRQn 0 */
   while (1)
   {
+    /* USER CODE BEGIN W1_MemoryManagement_IRQn 0 */
+    /* USER CODE END W1_MemoryManagement_IRQn 0 */
   }
 }
 
+/**
+  * @brief This function handles Prefetch fault, memory access fault.
+  */
 void BusFault_Handler(void)
 {
+  /* USER CODE BEGIN BusFault_IRQn 0 */
+
+  /* USER CODE END BusFault_IRQn 0 */
   while (1)
   {
+    /* USER CODE BEGIN W1_BusFault_IRQn 0 */
+    /* USER CODE END W1_BusFault_IRQn 0 */
   }
 }
 
+/**
+  * @brief This function handles Undefined instruction or illegal state.
+  */
 void UsageFault_Handler(void)
 {
+  /* USER CODE BEGIN UsageFault_IRQn 0 */
+
+  /* USER CODE END UsageFault_IRQn 0 */
   while (1)
   {
+    /* USER CODE BEGIN W1_UsageFault_IRQn 0 */
+    /* USER CODE END W1_UsageFault_IRQn 0 */
   }
 }
 
+/**
+  * @brief This function handles System service call via SWI instruction.
+  */
 void SVC_Handler(void)
 {
+  /* USER CODE BEGIN SVCall_IRQn 0 */
+
+  /* USER CODE END SVCall_IRQn 0 */
+  /* USER CODE BEGIN SVCall_IRQn 1 */
+
+  /* USER CODE END SVCall_IRQn 1 */
 }
 
+/**
+  * @brief This function handles Debug monitor.
+  */
 void DebugMon_Handler(void)
 {
+  /* USER CODE BEGIN DebugMonitor_IRQn 0 */
+
+  /* USER CODE END DebugMonitor_IRQn 0 */
+  /* USER CODE BEGIN DebugMonitor_IRQn 1 */
+
+  /* USER CODE END DebugMonitor_IRQn 1 */
 }
 
+/**
+  * @brief This function handles Pendable request for system service.
+  */
 void PendSV_Handler(void)
 {
+  /* USER CODE BEGIN PendSV_IRQn 0 */
+
+  /* USER CODE END PendSV_IRQn 0 */
+  /* USER CODE BEGIN PendSV_IRQn 1 */
+
+  /* USER CODE END PendSV_IRQn 1 */
 }
 
+/**
+  * @brief This function handles System tick timer.
+  */
 void SysTick_Handler(void)
 {
+  /* USER CODE BEGIN SysTick_IRQn 0 */
+
+  /* USER CODE END SysTick_IRQn 0 */
   HAL_IncTick();
+  /* USER CODE BEGIN SysTick_IRQn 1 */
+
+  /* USER CODE END SysTick_IRQn 1 */
 }
 
 /******************************************************************************/
 /* STM32F1xx Peripheral Interrupt Handlers                                    */
+/* Add here the Interrupt Handlers for the used peripherals.                  */
+/* For the available peripheral interrupt handler names,                      */
+/* please refer to the startup file (startup_stm32f1xx.s).                    */
 /******************************************************************************/
 
-void EXTI1_IRQHandler(void)
-{
-  HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_1);
-}
-
+/**
+  * @brief This function handles TIM3 global interrupt (CLIK input capture).
+  *        CRITICAL: Minimal code for lowest latency (2 us response)
+  */
 void TIM3_IRQHandler(void)
 {
-    /* Проверка флага захвата канала 4 */
-    if (TIM3->SR & TIM_SR_CC4IF) {
-        /* Чтение значения захвата */
-        uint16_t capture = TIM3->CCR4;
+  /* USER CODE BEGIN TIM3_IRQn 0 */
 
-        /* Сохранение времени захвата */
-        if (capture_index < 3) {
-            capture_times[capture_index] = capture;
-            capture_index++;
+  /* Обработка захвата канала 4 (PB1 = CLIK) - МИНИМАЛЬНЫЙ КОД! */
+  if (TIM3->SR & TIM_SR_CC4IF) {
+      /* Сразу сохраняем значение захвата */
+      tof_capture_value = TIM3->CCR4;
 
-            /* Проверка завершения измерения (3 импульса) */
-            if (capture_index >= 3) {
-                measurement_done = 1;
-                TIM3->CR1 &= ~TIM_CR1_CEN;  // Остановка таймера
-                TIM3->DIER &= ~TIM_DIER_CC4IE;  // Отключение прерывания
-            }
-        }
+      /* Останавливаем таймер */
+      TIM3->CR1 &= ~TIM_CR1_CEN;
 
-        /* Сброс флага прерывания */
-        TIM3->SR &= ~TIM_SR_CC4IF;
-    }
+      /* Устанавливаем флаг завершения измерения */
+      tof_measurement_done = 1;
 
-    /* Обработка переполнения (если нужно для длинных периодов) */
-    if (TIM3->SR & TIM_SR_UIF) {
-        last_capture += 0x10000;  // Учёт переполнения 16-битного счётчика
-        TIM3->SR &= ~TIM_SR_UIF;
-    }
+      /* Сбрасываем флаг прерывания */
+      TIM3->SR &= ~TIM_SR_CC4IF;
+  }
+
+  /* USER CODE END TIM3_IRQn 0 */
+  /* USER CODE BEGIN TIM3_IRQn 1 */
+
+  /* USER CODE END TIM3_IRQn 1 */
 }
 
+/**
+  * @brief This function handles USART1 global interrupt.
+  */
 void USART1_IRQHandler(void)
 {
-    // Используем стандартный обработчик HAL
-    HAL_UART_IRQHandler(&huart1);
+  /* USER CODE BEGIN USART1_IRQn 0 */
+
+  /* USER CODE END USART1_IRQn 0 */
+  HAL_UART_IRQHandler(&huart1);
+  /* USER CODE BEGIN USART1_IRQn 1 */
+
+  /* USER CODE END USART1_IRQn 1 */
 }
 
+/**
+  * @brief This function handles USART2 global interrupt.
+  */
 void USART2_IRQHandler(void)
 {
-    HAL_UART_IRQHandler(&huart2);
+  /* USER CODE BEGIN USART2_IRQn 0 */
+
+  /* USER CODE END USART2_IRQn 0 */
+  HAL_UART_IRQHandler(&huart2);
+  /* USER CODE BEGIN USART2_IRQn 1 */
+
+  /* USER CODE END USART2_IRQn 1 */
 }
 
-// Обработчики прерываний ADC (добавлены)
+/**
+  * @brief This function handles ADC1 and ADC2 global interrupts.
+  */
 void ADC1_2_IRQHandler(void)
 {
-    HAL_ADC_IRQHandler(&hadc1);
-    HAL_ADC_IRQHandler(&hadc2);
-}
-/**
-  * @brief This function handles TIM3 global interrupt.
-  */
+  /* USER CODE BEGIN ADC1_2_IRQn 0 */
 
-/**
-  * @brief This function handles TIM4 global interrupt.
-  */
-void TIM4_IRQHandler(void)
-{
-    HAL_TIM_IRQHandler(&htim4);
+  /* USER CODE END ADC1_2_IRQn 0 */
+  HAL_ADC_IRQHandler(&hadc1);
+  HAL_ADC_IRQHandler(&hadc2);
+  /* USER CODE BEGIN ADC1_2_IRQn 1 */
+
+  /* USER CODE END ADC1_2_IRQn 1 */
 }
+
+/* USER CODE BEGIN 1 */
+
+/* USER CODE END 1 */
