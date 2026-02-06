@@ -2,103 +2,101 @@
 /**
   ******************************************************************************
   * @file           : main.c
-  * @brief          : Система измерения времени пролёта магнитострикционного датчика
-  *                   с измерением температуры (LM75B) и сохранением данных (AT24C02)
+  * @brief          : Main program body
+  * @description    : Система измерения времени пролёта магнитострикционного датчика
+  *                   - Импульс: точно 10.00 мкс (54 итерации)
+  *                   - Период измерений: 10 секунд
+  *                   - Красный светодиод (PB13) горит 1 сек при захвате сигнала
+  *                   - Добавлена поддержка I2C2: LM75B (температура) и AT24C02 (EEPROM)
   ******************************************************************************
   */
 /* USER CODE END Header */
 
+/* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "stm32f1xx_it.h"
 #include "utils.h"
-#include "i2c_config.h"
-#include "lm75b.h"
-#include "at24c02.h"
+#include "i2c_config.h"   /* I2C2: PB10=SCL, PB11=SDA */
+#include "lm75b.h"        /* Драйвер LM75B через I2C2 */
+#include "at24c02.h"      /* Драйвер AT24C02 через I2C2 */
 #include <stdint.h>
 #include <string.h>
 #include <math.h>
 
-/* === ТАКТИРОВАНИЕ И КАЛИБРОВКА === */
-#define TIMER_CLOCK_HZ  72000000.0f                 // Тактовая частота ядра после PLL
-#define VREFINT_CAL_ADDR  ((uint16_t*)0x1FFFF7BA)   // Адрес заводской калибровки VREFINT при 3.3В
-#define VREFINT_CAL_VALUE (*VREFINT_CAL_ADDR)       // Значение калибровки (обычно ~1260 при 3.3В)
-#define ADC_SAMPLES     16                          // Количество выборок для усреднения АЦП
-#define MEAS_TIMEOUT_MS 10                          // Таймаут измерения времени пролёта
+/* Private define ------------------------------------------------------------*/
+#define TIMER_CLOCK_HZ  72000000.0f  // 72 МГц после PLL
+#define VREFINT_CAL_ADDR  ((uint16_t*)0x1FFFF7BA)  // Адрес калибровки в памяти
+#define VREFINT_CAL_VALUE (*VREFINT_CAL_ADDR)      // Правильное чтение 16-битного значения
+#define ADC_SAMPLES     16      // Количество выборок для усреднения
+#define MEAS_TIMEOUT_MS 10      // Таймаут измерения времени пролёта (10 мс)
 
-/* === КОЭФФИЦИЕНТЫ ДЕЛИТЕЛЕЙ НАПРЯЖЕНИЯ ===
-   Формула расчёта реального напряжения:
-   V_реал = V_адц * (R1 + R2) / R2
+/* ЧАСТОТНЫЕ КОЭФФИЦИЕНТЫ ДЕЛИТЕЛЕЙ (подобраны экспериментально) */
+#define DIV_24V_FACTOR  9.2f    // Резисторы ~81к+10к
+#define DIV_12V_FACTOR  4.6f    // Резисторы ~35к+10к
+#define DIV_5V_FACTOR   2.92f   // Резисторы ~4.7к+10к (коэффициент 3.13, но с учётом погрешностей = 1.47)
 
-   Где:
-   - V_адц = (значение_АЦП / 4095) * VDDA
-   - R1, R2 - резисторы делителя
+/* МАГНИТОСТРИКЦИОННЫЙ ДАТЧИК */
+#define PULSE_WIDTH_US  10      // Ширина генерируемого импульса (мкс)
+#define PULSE_PERIOD_MS 10000   // Период измерения = 10 секунд (10000 мс)
+#define SOUND_SPEED_MPS 2800.0f // Скорость звука в волноводе (м/с)
+#define TOF_TICK_US     (1000000.0f / (TIMER_CLOCK_HZ / 7.0f))  // 0.09722 мкс на тик
 
-   Подобранные экспериментально коэффициенты: */
-#define DIV_24V_FACTOR  9.2f    // Делитель 24В: ~81кОм + 10кОм → коэффициент 9.1, с учётом погрешностей = 9.2
-#define DIV_12V_FACTOR  4.6f    // Делитель 12В: ~35кОм + 10кОм → коэффициент 4.5, с учётом погрешностей = 4.6
-#define DIV_5V_FACTOR   2.92f   // Делитель 5В: ~4.7кОм + 10кОм → теоретический коэффициент 3.13, фактический = 2.92
-
-/* === ПАРАМЕТРЫ МАГНИТОСТРИКЦИОННОГО ДАТЧИКА === */
-#define PULSE_WIDTH_US  10          // Ширина генерируемого импульса возбуждения (мкс)
-#define PULSE_PERIOD_MS 10000       // Период измерений (10 секунд)
-#define SOUND_SPEED_MPS 2800.0f     // Скорость звука в волноводе магнитострикционного датчика (м/с)
-                                    // Зависит от материала волновода (обычно 2700-2900 м/с для железа)
-#define TOF_TICK_US     (1000000.0f / (TIMER_CLOCK_HZ / 7.0f))  // Длительность тика таймера в мкс
-                                    // При предделителе 6: 72 МГц / (6+1) = 10.2857 МГц → 1 тик = 0.09722 мкс
-
-/* === УРОВНИ СИГНАЛОВ === */
-#define POWER_5V_ON     GPIO_PIN_RESET  // Активный низкий уровень для питания 5В (постоянно включено)
-#define PULSE_HIGH      GPIO_PIN_SET    // Высокий уровень = импульс возбуждения АКТИВЕН
-#define PULSE_LOW       GPIO_PIN_RESET  // Низкий уровень = импульс возбуждения НЕ АКТИВЕН
+/* АКТИВНЫЕ УРОВНИ */
+#define POWER_5V_ON     GPIO_PIN_RESET  // Низкий уровень = питание ВКЛЮЧЕНО (постоянно!)
+#define PULSE_HIGH      GPIO_PIN_SET    // Высокий уровень = импульс АКТИВЕН
+#define PULSE_LOW       GPIO_PIN_RESET  // Низкий уровень = импульс НЕ АКТИВЕН
 #define LED_RED_ON      GPIO_PIN_SET    // Красный светодиод: включён = HIGH
 #define LED_RED_OFF     GPIO_PIN_RESET  // Красный светодиод: выключен = LOW
 #define LED_BLUE_ON     GPIO_PIN_SET    // Синий светодиод: включён = HIGH
 #define LED_BLUE_OFF    GPIO_PIN_RESET  // Синий светодиод: выключен = LOW
 
-/* === ПИНЫ СВЕТОДИОДОВ === */
-#define LED_RED_PIN     GPIO_PIN_13  // PB13 = красный светодиод (горит 1 сек при захвате сигнала)
-#define LED_BLUE_PIN    GPIO_PIN_12  // PB12 = синий светодиод (мигает 1 Гц - индикация работы)
+/* СВЕТОДИОДЫ */
+#define LED_RED_PIN     GPIO_PIN_13  // PB13 = красный светодиод
+#define LED_BLUE_PIN    GPIO_PIN_12  // PB12 = синий светодиод
 
-#define LED_RED_ON_TIME_MS 1000  // Время горения красного светодиода после захвата сигнала
-#define PULSE_DELAY_ITERATIONS 54  // Количество итераций для задержки 10 мкс при 72 МГц (-O0)
-                                   // Экспериментально подобрано: 54 * ~185 нс = 10.0 мкс
+/* Время горения красного светодиода после захвата */
+#define LED_RED_ON_TIME_MS 1000  // 1 секунда
 
-/* === АДРЕСА УСТРОЙСТВ I2C2 ===
-   I2C2 использует пины PB10 (SCL) и PB11 (SDA) на STM32F103C8T6 */
-#define LM75B_ADDR      LM75B_DEFAULT_ADDRESS   // 0x90 (8-bit) = 0x48 (7-bit) - датчик температуры
-#define AT24C02_ADDR    AT24C02_DEFAULT_ADDRESS // 0xA0 (8-bit) = 0x50 (7-bit) - EEPROM 256 байт
-#define EEPROM_TEMP_ADDR 0x20                   // Адрес в EEPROM для сохранения последней температуры
-#define EEPROM_BOOT_COUNT_ADDR 0x00             // Адрес для счётчика загрузок системы
+/* ТОЧНАЯ ЗАДЕРЖКА 10 МКС ДЛЯ 72 МГц (экспериментально подобрано) */
+#define PULSE_DELAY_ITERATIONS 54  // 54 итерации = 10.0 мкс при -O0
 
-/* === ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ === */
-UART_HandleTypeDef huart1;  // USART1 для ModBus RTU (9600 бод)
-UART_HandleTypeDef huart2;  // USART2 для отладочного вывода (115200 бод)
-ADC_HandleTypeDef hadc1;    // ADC1 для измерения 24В и VREFINT
-ADC_HandleTypeDef hadc2;    // ADC2 для измерения 12В и 5В
+/* I2C2 / LM75B / AT24C02 */
+#define LM75B_ADDR      LM75B_DEFAULT_ADDRESS   // 0x90 (8-bit)
+#define AT24C02_ADDR    AT24C02_DEFAULT_ADDRESS // 0xA0 (8-bit)
+#define EEPROM_TEMP_ADDR 0x20                   // Адрес в EEPROM для сохранения температуры
+#define EEPROM_BOOT_COUNT_ADDR 0x00             // Адрес для счётчика загрузок
 
-// Переменные для измерения времени пролёта (Time-of-Flight)
-volatile uint32_t tof_capture_value = 0;    // Значение счётчика таймера при захвате фронта сигнала
-volatile uint8_t tof_measurement_done = 0;  // Флаг завершения измерения (устанавливается в прерывании TIM3)
-volatile uint8_t tof_timeout = 0;           // Флаг таймаута измерения
-volatile uint8_t signal_captured = 0;       // Флаг успешного захвата сигнала на входе CLIK (PB1)
+/* Private variables ---------------------------------------------------------*/
+UART_HandleTypeDef huart1;  // Для ModBus (USART1)
+UART_HandleTypeDef huart2;  // Для отладки (USART2)
+ADC_HandleTypeDef hadc1;
+ADC_HandleTypeDef hadc2;
+// ВАЖНО: hi2c2 определён в i2c_config.c, здесь НЕ ОПРЕДЕЛЯЕМ!
 
-// Результаты измерений
-static float current_vdda = 3.3f;    // Напряжение питания АЦП (калибруется через VREFINT)
-static float current_24v = 24.0f;    // Напряжение основного питания 24В
-static float current_12v = 12.0f;    // Напряжение питания 12В
-static float current_5v = 5.0f;      // Напряжение питания 5В
-static float current_temperature = 0.0f;  // Температура от датчика LM75B (°C)
+// Глобальные переменные для измерения времени пролёта
+volatile uint32_t tof_capture_value = 0;    // Значение захвата таймера
+volatile uint8_t tof_measurement_done = 0;  // Флаг завершения измерения
+volatile uint8_t tof_timeout = 0;           // Флаг таймаута
+volatile uint8_t signal_captured = 0;       // Флаг: был ли захвачен сигнал на CLIK
 
-// Флаги инициализации периферии
+// Переменные для хранения измерений
+static float current_vdda = 3.3f;
+static float current_24v = 24.0f;
+static float current_12v = 12.0f;
+static float current_5v = 5.0f;
+static float current_temperature = 0.0f;    // Температура от LM75B
+
+// Флаги инициализации
 static uint8_t adc1_initialized = 0;
 static uint8_t adc2_initialized = 0;
-static uint8_t i2c_initialized = 0;      // I2C2 инициализирован
-static uint8_t lm75b_initialized = 0;    // Датчик температуры обнаружен
-static uint8_t at24c02_initialized = 0;  // EEPROM обнаружен
+static uint8_t i2c_initialized = 0;         // I2C2 инициализирован
+static uint8_t lm75b_initialized = 0;       // LM75B обнаружен
+static uint8_t at24c02_initialized = 0;     // AT24C02 обнаружен
 
-static char float_buffer[32];  // Буфер для преобразования float в строку
+// Буфер для преобразования float в строку
+static char float_buffer[32];
 
-/* === ПРОТОТИПЫ ФУНКЦИЙ === */
+/* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART1_UART_Init(void);
@@ -107,24 +105,27 @@ static void MX_ADC1_Init(void);
 static void MX_ADC2_Init(void);
 void Error_Handler(void);
 
-void TIM3_InputCapture_Init(void);          // Инициализация таймера для захвата времени пролёта
-void generate_pulse_and_measure(void);      // Генерация импульса + запуск измерения
-uint32_t measure_time_of_flight(void);      // Полный цикл измерения времени пролёта
+void TIM3_InputCapture_Init(void);
+void generate_pulse_and_measure(void);
+uint32_t measure_time_of_flight(void);
 void print_tof_results(uint32_t tof_ticks, float tof_us, float position_mm, uint8_t captured);
-void Read_All_Voltages(void);               // Измерение всех напряжений системы
+void Read_All_Voltages(void);
 uint32_t Read_ADC_Single(ADC_HandleTypeDef* hadc, uint32_t channel, uint32_t sampling_time);
 uint32_t Read_ADC_Average(ADC_HandleTypeDef* hadc, uint32_t channel, uint32_t sampling_time, uint8_t samples);
 
-void Read_Temperature(void);                // Чтение температуры с LM75B
-void Read_Boot_Count(void);                 // Чтение и инкремент счётчика загрузок из EEPROM
+/* I2C2 / LM75B / AT24C02 */
+void Read_Temperature(void);
+void Save_Boot_Count(void);
+void Read_Boot_Count(void);
+/* I2C2 / LM75B / AT24C02 */
 
 /**
-  * @brief  Главная функция программы
-  * @retval нет
+  * @brief  The application entry point.
+  * @retval int
   */
 int main(void)
 {
-    /* === ИНИЦИАЛИЗАЦИЯ МИКРОКОНТРОЛЛЕРА === */
+    /* MCU Configuration--------------------------------------------------------*/
     HAL_Init();
     SystemClock_Config();
     MX_GPIO_Init();
@@ -133,213 +134,302 @@ int main(void)
     MX_ADC1_Init();
     MX_ADC2_Init();
 
-    /* === ИНИЦИАЛИЗАЦИЯ I2C2 ДЛЯ ДАТЧИКОВ ===
-       Используем I2C2 (PB10=SCL, PB11=SDA) - стандартное подключение для STM32F103C8T6
-       ВАЖНО: На линиях SCL/SDA должны быть подтяжки 4.7кОм к 3.3В */
-    USART2_Print("Инициализация I2C2 (PB10=SCL, PB11=SDA)...\r\n");
+    /* I2C2 / LM75B / AT24C02 */
+    /* Инициализация I2C2 (PB10=SCL, PB11=SDA) */
+    USART2_Print("[ИНИЦ] Инициализация I2C2 (PB10=SCL, PB11=SDA)...\r\n");
     if (MX_I2C2_Init() == HAL_OK) {
         i2c_initialized = 1;
-        USART2_Print("I2C2 готов\r\n");
+        USART2_Print("[ИНИЦ] I2C2 инициализирован успешно\r\n");
 
-        /* Инициализация датчика температуры LM75B */
+        /* Инициализация LM75B */
+        USART2_Print("[ИНИЦ] Инициализация LM75B (0x48)...\r\n");
         if (LM75B_Init(LM75B_ADDR) == HAL_OK) {
             lm75b_initialized = 1;
-            USART2_Print("LM75B обнаружен\r\n");
+            USART2_Print("[ИНИЦ] LM75B инициализирован успешно\r\n");
         } else {
-            USART2_Print("LM75B не найден\r\n");
+            USART2_Print("[ИНИЦ] КРИТИЧЕСКАЯ ОШИБКА: LM75B НЕ НАЙДЕН!\r\n");
+            USART2_Print("Проверьте подключение: SCL->PB10, SDA->PB11, VCC=3.3V, GND\r\n");
+            USART2_Print("ВАЖНО: Установите подтяжки 4.7кОм от SCL/SDA к 3.3V!\r\n");
         }
 
-        /* Инициализация EEPROM AT24C02 */
+        /* Инициализация AT24C02 */
+        USART2_Print("[ИНИЦ] Инициализация AT24C02 (0x50)...\r\n");
         if (AT24C02_Init(AT24C02_ADDR) == HAL_OK) {
             at24c02_initialized = 1;
-            USART2_Print("AT24C02 обнаружен\r\n");
-            Read_Boot_Count();  // Инкремент счётчика загрузок
-        } else {
-            USART2_Print("AT24C02 не найден\r\n");
-        }
-    }
+            USART2_Print("[ИНИЦ] AT24C02 инициализирован успешно\r\n");
 
-    /* === ИНИЦИАЛИЗАЦИЯ ЗАХВАТА ВРЕМЕНИ ПРОЛЁТА ===
-       Используется TIM3, канал 4 (вход PB1 = CLIK)
-       Таймер настроен на частоту 10.2857 МГц (предделитель 6 от 72 МГц) */
+            /* Чтение счётчика загрузок из EEPROM */
+            Read_Boot_Count();
+        } else {
+            USART2_Print("[ИНИЦ] КРИТИЧЕСКАЯ ОШИБКА: AT24C02 НЕ НАЙДЕН!\r\n");
+            USART2_Print("Проверьте подключение: SCL->PB10, SDA->PB11, VCC=3.3V, GND\r\n");
+            USART2_Print("ВАЖНО: Установите подтяжки 4.7кОм от SCL/SDA к 3.3V!\r\n");
+        }
+    } else {
+        USART2_Print("[ИНИЦ] КРИТИЧЕСКАЯ ОШИБКА: I2C2 НЕ ИНИЦИАЛИЗИРОВАН!\r\n");
+        USART2_Print("Проверьте конфигурацию тактирования и пины PB10/PB11\r\n");
+    }
+    /* I2C2 / LM75B / AT24C02 */
+
+    /* Инициализация захвата времени пролёта (PB1 = TIM3_CH4 = CLIK) */
     TIM3_InputCapture_Init();
 
-    /* === КАЛИБРОВКА АЦП === */
+    /* Калибровка ADC */
+    USART2_Print("[ИНИЦ] Калибровка ADC1...\r\n");
     if (HAL_ADCEx_Calibration_Start(&hadc1) == HAL_OK) {
         adc1_initialized = 1;
+        USART2_Print("[ИНИЦ] ADC1 откалиброван успешно\r\n");
+    } else {
+        USART2_Print("[ИНИЦ] Калибровка ADC1 НЕ УДАЛАСЬ!\r\n");
     }
+
+    USART2_Print("[ИНИЦ] Калибровка ADC2...\r\n");
     if (HAL_ADCEx_Calibration_Start(&hadc2) == HAL_OK) {
         adc2_initialized = 1;
+        USART2_Print("[ИНИЦ] ADC2 откалиброван успешно\r\n");
+    } else {
+        USART2_Print("[ИНИЦ] Калибровка ADC2 НЕ УДАЛАСЬ!\r\n");
     }
 
-    /* === ИНИЦИАЛИЗАЦИЯ ПРОТОКОЛА MODBUS === */
+    /* Инициализация ModBus */
     ModBus_Init();
+
+    /* Задержка для стабилизации */
     HAL_Delay(1000);
 
-    /* === НАСТРОЙКА ПРИОРИТЕТОВ ПРЕРЫВАНИЙ ===
-       Приоритеты: 0 - самый высокий, 15 - самый низкий
-       Важно: прерывание таймера захвата должно иметь высокий приоритет для точного измерения */
+    /* Настройка приоритетов прерываний */
     HAL_NVIC_SetPriority(USART1_IRQn, 0, 0);
     HAL_NVIC_EnableIRQ(USART1_IRQn);
     HAL_NVIC_SetPriority(USART2_IRQn, 0, 1);
     HAL_NVIC_EnableIRQ(USART2_IRQn);
-    HAL_NVIC_SetPriority(TIM3_IRQn, 0, 0);  // МАКСИМАЛЬНЫЙ ПРИОРИТЕТ для захвата сигнала!
+    HAL_NVIC_SetPriority(TIM3_IRQn, 0, 0);  // МАКСИМАЛЬНЫЙ ПРИОРИТЕТ для захвата!
     HAL_NVIC_EnableIRQ(TIM3_IRQn);
     HAL_NVIC_SetPriority(ADC1_2_IRQn, 1, 1);
     HAL_NVIC_EnableIRQ(ADC1_2_IRQn);
+    /* I2C2 прерывания (уже настроены в HAL_I2C_MspInit) */
 
-    __enable_irq();  // Включение глобальных прерываний
+    /* Включаем глобальные прерывания */
+    __enable_irq();
 
-    /* === ВЫВОД ИНФОРМАЦИИ О СИСТЕМЕ === */
-    USART2_Print("\r\n=== СИСТЕМА ЗАПУЩЕНА ===\r\n");
-    USART2_Print("Измерения каждые 10 секунд\r\n");
-    USART2_Print("PB13 - красный светодиод (сигнал захвачен)\r\n");
-    USART2_Print("PB12 - синий светодиод (работа системы)\r\n");
-    USART2_Print("========================\r\n\r\n");
+    /* Вывод информации о системе */
+    USART2_Print("\r\n========================================\r\n");
+    USART2_Print(" Система измерения времени пролёта (TOF)\r\n");
+    USART2_Print("========================================\r\n");
+    USART2_Print("Система инициализирована\r\n");
+    USART2_Print("USART2: Отладочный вывод (115200)\r\n");
+    USART2_Print("USART1: ModBus RTU (9600, 8N1)\r\n");
+    USART2_Print("Адрес устройства: 1\r\n");
+    USART2_Print("Интервал измерений: 10 секунд\r\n");
+    USART2_Print("Индикация: Красный светодиод (PB13) = горит 1 сек при захвате сигнала\r\n");
+    USART2_Print("           Синий светодиод (PB12) = мигает (1 Гц)\r\n");
+    /* I2C2 / LM75B / AT24C02 */
+    USART2_Print("I2C2: PB10=SCL, PB11=SDA @ 100 kHz\r\n");
+    if (lm75b_initialized) {
+        USART2_Print("LM75B: Адрес 0x48 (температура)\r\n");
+    } else {
+        USART2_Print("LM75B: НЕ ОБНАРУЖЕН (проверьте подключение и подтяжки!)\r\n");
+    }
+    if (at24c02_initialized) {
+        USART2_Print("AT24C02: Адрес 0x50 (256 байт EEPROM)\r\n");
+    } else {
+        USART2_Print("AT24C02: НЕ ОБНАРУЖЕН (проверьте подключение и подтяжки!)\r\n");
+    }
+    USART2_Print("ВАЖНО: Подтяжки 4.7кОм от SCL/SDA к 3.3V ОБЯЗАТЕЛЬНЫ!\r\n");
+    /* I2C2 / LM75B / AT24C02 */
+    USART2_Print("VREFINT_CAL: ");
+    USART2_PrintNum(VREFINT_CAL_VALUE);
+    USART2_Print("\r\nПины:\r\n");
+    USART2_Print("  PB5 (Gen_Impuls):  выход, импульс 10 мкс @ 10 Гц (каждые 10 сек)\r\n");
+    USART2_Print("  PB6 (Power_5V):    выход, постоянно НИЗКИЙ (питание ВКЛ)\r\n");
+    USART2_Print("  PB1 (CLIK):        вход, TIM3_CH4\r\n");
+    USART2_Print("  PB13 (LED_RED):    выход, горит 1 сек при захвате сигнала\r\n");
+    USART2_Print("  PB12 (LED_BLUE):   выход, мигает (1 Гц)\r\n");
+    USART2_Print("  PB10 (SCL):        I2C2\r\n");
+    USART2_Print("  PB11 (SDA):        I2C2\r\n");
+    USART2_Print("========================================\r\n\r\n");
 
-    /* === ПЕРВОНАЧАЛЬНОЕ ИЗМЕРЕНИЕ ПАРАМЕТРОВ === */
+    /* Тестовое измерение напряжений при запуске */
     Read_All_Voltages();
+    /* I2C2 / LM75B / AT24C02 */
     if (lm75b_initialized) {
         Read_Temperature();
     }
+    /* I2C2 / LM75B / AT24C02 */
 
-    /* === ПЕРЕМЕННЫЕ ЦИКЛА ИЗМЕРЕНИЙ === */
-    uint32_t last_measure_time = 0;     // Время последнего измерения
-    uint32_t last_debug_time = 0;       // Время последнего мигания синим светодиодом
-    uint32_t led_red_off_time = 0;      // Время автоматического выключения красного светодиода
-    uint8_t blue_led_state = 0;         // Состояние синего светодиода (0=выкл, 1=вкл)
-    uint8_t red_led_state = 0;          // Состояние красного светодиода
+    USART2_Print("[ИНИЦ] --- РЕЗУЛЬТАТЫ ИЗМЕРЕНИЙ ---\r\n");
+    USART2_Print("[ИНИЦ] VDDA = ");
+    float_to_str(current_vdda, float_buffer, 3);
+    USART2_Print(float_buffer);
+    USART2_Print(" В\r\n");
 
-    /* === ГЛАВНЫЙ ЦИКЛ ПРОГРАММЫ === */
+    USART2_Print("[ИНИЦ] 24В  = ");
+    float_to_str(current_24v, float_buffer, 2);
+    USART2_Print(float_buffer);
+    USART2_Print(" В\r\n");
+
+    USART2_Print("[ИНИЦ] 12В  = ");
+    float_to_str(current_12v, float_buffer, 2);
+    USART2_Print(float_buffer);
+    USART2_Print(" В\r\n");
+
+    USART2_Print("[ИНИЦ] 5В   = ");
+    float_to_str(current_5v, float_buffer, 2);
+    USART2_Print(float_buffer);
+    USART2_Print(" В\r\n");
+
+    /* I2C2 / LM75B / AT24C02 */
+    if (lm75b_initialized) {
+        USART2_Print("[ИНИЦ] Темп. = ");
+        float_to_str(current_temperature, float_buffer, 1);
+        USART2_Print(float_buffer);
+        USART2_Print(" °C\r\n");
+    }
+    /* I2C2 / LM75B / AT24C02 */
+
+    /* Основные переменные цикла */
+    uint32_t last_measure_time = 0;
+    uint32_t last_debug_time = 0;
+    uint32_t led_red_off_time = 0;  // Время выключения красного светодиода
+    uint8_t blue_led_state = 0;
+    uint8_t red_led_state = 0;      // 0 = выключен, 1 = включён
+
+    /* Бесконечный цикл */
     while (1)
     {
-        /* Мигание синим светодиодом 1 Гц - индикация работы системы */
-        if (HAL_GetTick() - last_debug_time >= 1000) {
+        /* Мигание синим светодиодом каждую секунду (индикация работы) */
+        if (HAL_GetTick() - last_debug_time >= 1000)
+        {
             last_debug_time = HAL_GetTick();
             blue_led_state = !blue_led_state;
             HAL_GPIO_WritePin(GPIOB, LED_BLUE_PIN, blue_led_state ? LED_BLUE_ON : LED_BLUE_OFF);
         }
 
-        /* Автоматическое выключение красного светодиода через 1 секунду после захвата */
-        if (red_led_state && (HAL_GetTick() - led_red_off_time >= LED_RED_ON_TIME_MS)) {
+        /* Автоматическое выключение красного светодиода через 1 секунду */
+        if (red_led_state && (HAL_GetTick() - led_red_off_time >= LED_RED_ON_TIME_MS))
+        {
             HAL_GPIO_WritePin(GPIOB, LED_RED_PIN, LED_RED_OFF);
             red_led_state = 0;
         }
 
-        /* Цикл измерений каждые 10 секунд */
-        if (HAL_GetTick() - last_measure_time >= PULSE_PERIOD_MS) {
+        /* Измерение каждые 10 секунд */
+        if (HAL_GetTick() - last_measure_time >= PULSE_PERIOD_MS)
+        {
             last_measure_time = HAL_GetTick();
 
-            /* Сброс индикации перед новым измерением */
+            /* НАЧАЛО НОВОГО ЦИКЛА ИЗМЕРЕНИЯ */
+            USART2_Print("\r\n========================================\r\n");
+            USART2_Print("ЦИКЛ ИЗМЕРЕНИЯ ЗАПУЩЕН (каждые 10 сек)\r\n");
+            USART2_Print("========================================\r\n");
+
+            /* Сброс индикации: погасить красный светодиод */
             HAL_GPIO_WritePin(GPIOB, LED_RED_PIN, LED_RED_OFF);
             red_led_state = 0;
             signal_captured = 0;
 
-            /* Шаг 1: Измерение напряжений питания */
+            /* Шаг 1: Измерение напряжений */
             Read_All_Voltages();
             ModBus_UpdateVoltages(current_vdda, current_24v, current_12v, current_5v);
 
-            /* Шаг 2: Измерение температуры и сохранение в EEPROM */
+            /* Шаг 2: Измерение температуры */
+            /* I2C2 / LM75B / AT24C02 */
             if (lm75b_initialized) {
                 Read_Temperature();
-                /* Сохранение температуры в EEPROM с точностью 0.1°C:
-                   Значение умножается на 10 и сохраняется как 16-битное целое */
+
+                /* Сохранение температуры в EEPROM (для отладки/статистики) */
                 if (at24c02_initialized) {
-                    int16_t temp_raw = (int16_t)(current_temperature * 10.0f);
+                    int16_t temp_raw = (int16_t)(current_temperature * 10.0f); // *10 для 0.1°C точности
                     AT24C02_WriteByte(AT24C02_ADDR, EEPROM_TEMP_ADDR, (uint8_t)(temp_raw >> 8));
                     AT24C02_WriteByte(AT24C02_ADDR, EEPROM_TEMP_ADDR + 1, (uint8_t)(temp_raw & 0xFF));
                 }
             }
+            /* I2C2 / LM75B / AT24C02 */
 
             /* Шаг 3: Генерация импульса и измерение времени пролёта */
-            uint32_t tof_ticks = measure_time_of_flight();  // Время в тиках таймера
-            float tof_us = tof_ticks * TOF_TICK_US;         // Перевод в микросекунды
+            uint32_t tof_ticks = measure_time_of_flight();
+            float tof_us = tof_ticks * TOF_TICK_US;
 
-            /* Коррекция: вычитаем длительность генерируемого импульса (10 мкс) */
+            /* Коррекция: вычитаем время импульса (10 мкс) */
             if (tof_ticks > (10.0f / TOF_TICK_US)) {
                 tof_us -= 10.0f;
             }
 
-            /* Расчёт положения магнита в волноводе:
-               Формула: положение = (время_пролёта * скорость_звука) / 2
-               Деление на 2 - потому что сигнал проходит путь туда и обратно */
-            float position_mm = (tof_us * 0.001f * SOUND_SPEED_MPS) / 2.0f;
+            float position_mm = (tof_us * 0.001f * SOUND_SPEED_MPS) / 2.0f;  // /2 так как туда-обратно
 
-            /* Шаг 4: Индикация результата захвата */
+            /* Шаг 4: Индикация результата */
             if (tof_ticks > 0 && tof_measurement_done) {
-                /* Сигнал успешно захвачен - включаем красный светодиод на 1 сек */
+                /* Сигнал успешно захвачен — зажечь красный светодиод на 1 секунду */
                 HAL_GPIO_WritePin(GPIOB, LED_RED_PIN, LED_RED_ON);
                 red_led_state = 1;
-                led_red_off_time = HAL_GetTick();
+                led_red_off_time = HAL_GetTick();  // Запомнить время включения
                 signal_captured = 1;
+                USART2_Print("[УСПЕХ] Сигнал захвачен на CLIK (PB1)!\r\n");
             } else {
+                /* Сигнал НЕ захвачен — красный светодиод остаётся погашенным */
+                HAL_GPIO_WritePin(GPIOB, LED_RED_PIN, LED_RED_OFF);
+                red_led_state = 0;
                 signal_captured = 0;
+                USART2_Print("[ОШИБКА] Сигнал НЕ захвачен на CLIK (PB1)!\r\n");
+                USART2_Print("Возможные причины:\r\n");
+                USART2_Print("  1. Слишком слабый сигнал на PB1 (< 2В)\r\n");
+                USART2_Print("  2. Неправильная настройка перемаппирования TIM3\r\n");
+                USART2_Print("  3. Прерывание не успевает сработать за 2 мкс\r\n");
             }
 
-            /* Обновление данных для ModBus */
+            /* Обновление данных в ModBus (температура передаётся как 3-й параметр) */
             ModBus_UpdateMeasurements(tof_us, position_mm, current_temperature, signal_captured ? 1 : 0);
 
-            /* Вывод результатов измерения */
-            USART2_Print("=== ИЗМЕРЕНИЕ ===\r\n");
-            USART2_Print("Напряжения: ");
+            /* Вывод результатов */
+            USART2_Print("\r\n--- РЕЗУЛЬТАТЫ ИЗМЕРЕНИЯ ---\r\n");
+            USART2_Print("Напряжения: VDDA=");
             float_to_str(current_vdda, float_buffer, 2);
             USART2_Print(float_buffer);
-            USART2_Print("V ");
+            USART2_Print("В 24В=");
             float_to_str(current_24v, float_buffer, 1);
             USART2_Print(float_buffer);
-            USART2_Print("V ");
+            USART2_Print("В 12В=");
             float_to_str(current_12v, float_buffer, 1);
             USART2_Print(float_buffer);
-            USART2_Print("V ");
+            USART2_Print("В 5В=");
             float_to_str(current_5v, float_buffer, 1);
             USART2_Print(float_buffer);
-            USART2_Print("V\r\n");
+            USART2_Print("В\r\n");
 
+            /* I2C2 / LM75B / AT24C02 */
             if (lm75b_initialized) {
                 USART2_Print("Температура: ");
                 float_to_str(current_temperature, float_buffer, 1);
                 USART2_Print(float_buffer);
-                USART2_Print(" C\r\n");
-            }
-
-            if (signal_captured) {
-                USART2_Print("Время пролёта: ");
-                float_to_str(tof_us, float_buffer, 2);
-                USART2_Print(float_buffer);
-                USART2_Print(" мкс\r\n");
-                USART2_Print("Положение: ");
-                float_to_str(position_mm, float_buffer, 1);
-                USART2_Print(float_buffer);
-                USART2_Print(" мм\r\n");
+                USART2_Print(" °C\r\n");
             } else {
-                USART2_Print("Сигнал не захвачен\r\n");
+                USART2_Print("Температура: НЕ ДОСТУПНА (датчик не обнаружен)\r\n");
             }
-            USART2_Print("================\r\n");
+            /* I2C2 / LM75B / AT24C02 */
+
+            print_tof_results(tof_ticks, tof_us, position_mm, signal_captured);
+
+            /* Информация о следующем цикле */
+            USART2_Print("\r\nСледующий цикл измерения через 10 секунд...\r\n");
+            USART2_Print("========================================\r\n");
         }
 
-        /* Обработка ModBus запросов */
+        /* Обработка ModBus */
         ModBus_Process();
         HAL_Delay(1);
     }
 }
 
 /**
-  * @brief  Callback приёма данных по UART
-  * @param  huart: указатель на структуру UART_HandleTypeDef
-  * @retval нет
+  * @brief  Callback завершения приема UART
   */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
     if (huart->Instance == USART1) {
-        ModBus_RxCallback(huart);  // Обработка входящих ModBus команд
+        ModBus_RxCallback(huart);
     }
 }
 
 /**
-  * @brief  Инициализация TIM3 для захвата времени пролёта
-  * @details Используется частичное перемаппирование: PB1 = TIM3_CH4
-  *          Предделитель = 6 → тактовая частота таймера = 72 МГц / 7 = 10.2857 МГц
-  *          Разрешение: 1 тик = 0.09722 мкс
+  * @brief  Инициализация TIM3 для измерения времени пролёта (канал 4, PB1 = CLIK)
   */
 void TIM3_InputCapture_Init(void)
 {
@@ -347,88 +437,88 @@ void TIM3_InputCapture_Init(void)
     __HAL_RCC_GPIOB_CLK_ENABLE();
     __HAL_RCC_AFIO_CLK_ENABLE();
 
-    /* КРИТИЧЕСКИ ВАЖНО: Перемаппирование ДО настройки GPIO!
-       Частичное перемаппирование: PB1 вместо PA3 для TIM3_CH4 */
-    __HAL_AFIO_REMAP_TIM3_PARTIAL();
+    /* КРИТИЧЕСКИ ВАЖНО: Перемаппирование ДО настройки GPIO! */
+    __HAL_AFIO_REMAP_TIM3_PARTIAL();  // PB1 = TIM3_CH4 (частичное перемаппирование)
 
     GPIO_InitTypeDef GPIO_InitStruct = {0};
     GPIO_InitStruct.Pin = GPIO_PIN_1;
-    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;  // PB1 как цифровой вход для сигнала CLIK
+    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;  // PB1 как цифровой вход (CLIK)
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-    /* Настройка таймера TIM3 */
+    /* Настройка таймера */
     TIM3->CR1 = 0;
     TIM3->CR2 = 0;
-    TIM3->PSC = 6;          // Предделитель: 72 МГц / (6+1) = 10.2857 МГц
-    TIM3->ARR = 0xFFFF;     // Автоперезагрузка (максимальный период ~6.7 мс)
-    TIM3->CNT = 0;          // Сброс счётчика
-    TIM3->EGR = TIM_EGR_UG; // Применение настроек
+    TIM3->PSC = 6;          // 72 МГц / 7 = 10.2857 МГц → 1 тик = 0.09722 мкс
+    TIM3->ARR = 0xFFFF;     // Максимальный период (~6.7 мс)
+    TIM3->CNT = 0;
+    TIM3->EGR = TIM_EGR_UG; // Применить настройки
 
     /* Настройка канала 4 для захвата по фронту */
     TIM3->CCMR2 = 0;
-    TIM3->CCMR2 |= (0x1 << 12);     // CC4S = 01: вход от TI4 (PB1)
-    TIM3->CCMR2 &= ~(0x3 << 10);    // IC4PSC = 00: без предделителя захвата
-    TIM3->CCMR2 &= ~(0xF << 8);     // IC4F = 0000: фильтр отключён (максимальная скорость)
+    TIM3->CCMR2 |= (0x1 << 12);     // CC4S = 01 (вход от TI4/PB1)
+    TIM3->CCMR2 &= ~(0x3 << 10);    // Без предделителя захвата
+    TIM3->CCMR2 &= ~(0xF << 8);     // Фильтр = 0 (МАКСИМАЛЬНАЯ СКОРОСТЬ!)
 
     TIM3->CCER = TIM_CCER_CC4E;     // Включить захват по фронту на канале 4
-    TIM3->DIER = TIM_DIER_CC4IE;    // Разрешить прерывание по захвату
-    TIM3->SR = 0;                   // Очистить флаги прерываний
+    TIM3->DIER = TIM_DIER_CC4IE;    // Только прерывание захвата
+    TIM3->SR = 0;                   // Очистить флаги
 }
 
 /**
-  * @brief  Генерация импульса возбуждения и запуск измерения
-  * @details КРИТИЧЕСКИ ВАЖНО: Таймер запускается ДО генерации импульса!
-  *          Это позволяет захватить очень короткие задержки (~2 мкс) отражённого сигнала.
-  *          Если запустить таймер после импульса — короткие задержки будут пропущены.
+  * @brief  КРИТИЧЕСКИ ВАЖНО: Таймер запускается ДО генерации импульса!
+  *         Это позволяет захватить очень короткие задержки (2 мкс)
   */
 void generate_pulse_and_measure(void)
 {
-    /* Сброс флагов и счётчика перед новым измерением */
+    /* Сброс флагов измерения */
     tof_measurement_done = 0;
     tof_timeout = 0;
     tof_capture_value = 0;
     TIM3->SR = 0;
-    TIM3->CNT = 0;
+    TIM3->CNT = 0;  // Сброс счётчика
 
-    /* ЗАПУСК ТАЙМЕРА ДО ГЕНЕРАЦИИ ИМПУЛЬСА (критически важно!) */
-    TIM3->CR1 |= TIM_CR1_CEN;
-    __NOP();  // Минимальная задержка для стабилизации
+    /* КРИТИЧЕСКИ ВАЖНО: ЗАПУСК ТАЙМЕРА ДО ИМПУЛЬСА */
+    TIM3->CR1 |= TIM_CR1_CEN;  // Запуск таймера (готов к захвату СРАЗУ!)
 
-    /* Генерация импульса 10 мкс на PB5 (Gen_Impuls) - прямой доступ к регистрам для скорости */
-    GPIOB->BSRR = GPIO_PIN_5;  // Установить PB5 = HIGH (начало импульса)
+    /* МИНИМАЛЬНАЯ ЗАДЕРЖКА ДЛЯ СТАБИЛИЗАЦИИ ТАЙМЕРА (ТОЛЬКО 1 НОП) */
+    __NOP();
 
-    /* Точная задержка 10 мкс (54 итерации = 10.0 мкс при -O0 и 72 МГц) */
+    /* Генерация импульса 10 мкс на PB5 (Gen_Impuls) - ПРЯМОЙ ДОСТУП К РЕГИСТРАМ */
+    GPIOB->BSRR = GPIO_PIN_5;  // УСТАНОВИТЬ PB5 = HIGH (максимальная скорость)
+
+    /* ТОЧНАЯ ЗАДЕРЖКА 10 МКС (54 итерации = 10.0 мкс при -O0) */
     for (volatile uint32_t i = 0; i < PULSE_DELAY_ITERATIONS; i++) {
         __NOP();
     }
 
-    GPIOB->BRR = GPIO_PIN_5;   // Сбросить PB5 = LOW (конец импульса)
-    /* Таймер продолжает работать — ждём захвата отражённого сигнала в прерывании */
+    GPIOB->BRR = GPIO_PIN_5;   // СБРОСИТЬ PB5 = LOW (максимальная скорость)
+
+    /* Таймер уже работает — ничего не делаем */
 }
 
 /**
-  * @brief  Измерение времени пролёта отражённого сигнала
-  * @retval Время в тиках таймера (0 при таймауте)
+  * @brief  Измерение времени пролёта
+  * @retval Значение таймера в тиках (0 при таймауте)
   */
 uint32_t measure_time_of_flight(void)
 {
     /* Генерация импульса с предварительным запуском таймера */
     generate_pulse_and_measure();
 
-    /* Ожидание завершения измерения или таймаута (10 мс) */
+    /* Ожидание завершения измерения или таймаута */
     uint32_t start_wait = HAL_GetTick();
     while (!tof_measurement_done && !tof_timeout) {
         if ((HAL_GetTick() - start_wait) >= MEAS_TIMEOUT_MS) {
             tof_timeout = 1;
-            TIM3->CR1 &= ~TIM_CR1_CEN;  // Остановить таймер при таймауте
+            TIM3->CR1 &= ~TIM_CR1_CEN;  // Остановить таймер
             break;
         }
-        __NOP();
+        __NOP();  // Минимальная задержка для экономии энергии
     }
 
-    /* Остановка таймера и сброс флагов */
+    /* Остановка таймера */
     TIM3->CR1 &= ~TIM_CR1_CEN;
     TIM3->SR = 0;
 
@@ -436,19 +526,32 @@ uint32_t measure_time_of_flight(void)
 }
 
 /**
-  * @brief  Вывод результатов измерения (заглушка - вывод реализован в основном цикле)
+  * @brief  Вывод результатов измерения времени пролёта
   */
 void print_tof_results(uint32_t tof_ticks, float tof_us, float position_mm, uint8_t captured)
 {
+    USART2_Print("Время пролёта: ");
+    if (captured) {
+        float_to_str(tof_us, float_buffer, 2);
+        USART2_Print(float_buffer);
+        USART2_Print(" мкс (");
+        USART2_PrintNum(tof_ticks);
+        USART2_Print(" тиков)\r\n");
+    } else {
+        USART2_Print("НЕ ИЗМЕРЕНО (таймаут)\r\n");
+    }
+
+    if (captured) {
+        USART2_Print("Положение магнита: ");
+        float_to_str(position_mm, float_buffer, 1);
+        USART2_Print(float_buffer);
+        USART2_Print(" мм от начала волновода\r\n");
+    }
 }
 
+/* I2C2 / LM75B / AT24C02 */
 /**
   * @brief  Чтение температуры с датчика LM75B
-  * @details LM75B возвращает 16-битное значение:
-  *          Биты 15-5: знаковое значение температуры в дополнительном коде (шаг 0.125°C)
-  *          Биты 4-0: дробная часть (всегда 0 для чтения)
-  *          Формат: [15:5] = целая часть * 32, [4:0] = 0
-  *          Пример: 0x0190 = 0000 0001 1001 0000 = +25.0°C (0x0190 >> 5 = 25)
   */
 void Read_Temperature(void)
 {
@@ -459,13 +562,29 @@ void Read_Temperature(void)
 
     if (LM75B_ReadTemperature(LM75B_ADDR, &current_temperature) != HAL_OK) {
         current_temperature = -127.0f;
+        USART2_Print("[I2C] ОШИБКА: Не удалось прочитать температуру!\r\n");
     }
 }
 
 /**
-  * @brief  Чтение и инкремент счётчика загрузок из EEPROM
-  * @details Счётчик хранится в первом байте EEPROM (адрес 0x00)
-  *          При каждой загрузке значение увеличивается на 1 (с переполнением через 255)
+  * @brief  Сохранение счётчика загрузок в EEPROM при старте
+  */
+void Save_Boot_Count(void)
+{
+    if (!at24c02_initialized || !i2c_initialized) return;
+
+    uint8_t boot_count = 0;
+    AT24C02_ReadByte(AT24C02_ADDR, EEPROM_BOOT_COUNT_ADDR, &boot_count);
+    boot_count++;
+    AT24C02_WriteByte(AT24C02_ADDR, EEPROM_BOOT_COUNT_ADDR, boot_count);
+
+    USART2_Print("[I2C] Счётчик загрузок: ");
+    USART2_PrintNum(boot_count);
+    USART2_Print("\r\n");
+}
+
+/**
+  * @brief  Чтение счётчика загрузок из EEPROM
   */
 void Read_Boot_Count(void)
 {
@@ -473,17 +592,15 @@ void Read_Boot_Count(void)
 
     uint8_t boot_count = 0;
     if (AT24C02_ReadByte(AT24C02_ADDR, EEPROM_BOOT_COUNT_ADDR, &boot_count) == HAL_OK) {
-        boot_count++;
-        AT24C02_WriteByte(AT24C02_ADDR, EEPROM_BOOT_COUNT_ADDR, boot_count);
+        USART2_Print("[I2C] Устройство запущено ");
+        USART2_PrintNum(boot_count);
+        USART2_Print(" раз(а)\r\n");
     }
 }
+/* I2C2 / LM75B / AT24C02 */
 
 /**
-  * @brief  Чтение одного значения АЦП
-  * @param  hadc: указатель на структуру ADC_HandleTypeDef
-  * @param  channel: номер канала АЦП
-  * @param  sampling_time: время выборки
-  * @retval Значение АЦП (0-4095)
+  * @brief  Чтение одного значения ADC
   */
 uint32_t Read_ADC_Single(ADC_HandleTypeDef* hadc, uint32_t channel, uint32_t sampling_time)
 {
@@ -508,12 +625,7 @@ uint32_t Read_ADC_Single(ADC_HandleTypeDef* hadc, uint32_t channel, uint32_t sam
 }
 
 /**
-  * @brief  Чтение усреднённого значения АЦП
-  * @param  hadc: указатель на структуру ADC_HandleTypeDef
-  * @param  channel: номер канала АЦП
-  * @param  sampling_time: время выборки
-  * @param  samples: количество выборок для усреднения
-  * @retval Усреднённое значение АЦП (0-4095)
+  * @brief  Чтение среднего значения ADC
   */
 uint32_t Read_ADC_Average(ADC_HandleTypeDef* hadc, uint32_t channel, uint32_t sampling_time, uint8_t samples)
 {
@@ -522,7 +634,6 @@ uint32_t Read_ADC_Average(ADC_HandleTypeDef* hadc, uint32_t channel, uint32_t sa
 
     for (uint8_t i = 0; i < samples; i++) {
         uint32_t value = Read_ADC_Single(hadc, channel, sampling_time);
-        /* Фильтрация некорректных значений (менее 100 или более 4000) */
         if (value > 100 && value < 4000) {
             sum += value;
             valid_samples++;
@@ -538,23 +649,12 @@ uint32_t Read_ADC_Average(ADC_HandleTypeDef* hadc, uint32_t channel, uint32_t sa
 }
 
 /**
-  * @brief  Измерение всех напряжений системы
-  * @details Порядок измерения:
-  *          1. Калибровка VDDA через внутренний источник VREFINT
-  *          2. Измерение 24В через делитель на PA0 (ADC1)
-  *          3. Измерение 12В через делитель на PA1 (ADC2)
-  *          4. Измерение 5В через делитель на PA5 (ADC2)
-  *
-  *          Формула калибровки VDDA:
-  *          VDDA = 3.3В * VREFINT_CAL / ADC_VREFINT
-  *          где VREFINT_CAL - заводское значение при 3.3В (адрес 0x1FFFF7BA)
-  *
-  *          Формула расчёта напряжения:
-  *          V_реал = (ADC_value / 4095) * VDDA * DIV_FACTOR
+  * @brief  Чтение всех напряжений
   */
 void Read_All_Voltages(void)
 {
     if (!adc1_initialized || !adc2_initialized) {
+        USART2_Print("[ADC] ОШИБКА: ADC не инициализирован!\r\n");
         return;
     }
 
@@ -563,23 +663,21 @@ void Read_All_Voltages(void)
     uint32_t adc_raw_12v = 0;
     uint32_t adc_raw_5v = 0;
 
-    /* === ШАГ 1: КАЛИБРОВКА VDDA ЧЕРЕЗ VREFINT ===
-       Включаем внутренний источник опорного напряжения (1.20В) */
+    /* --- Измерение VREFINT для калибровки VDDA --- */
     ADC1->CR2 |= ADC_CR2_TSVREFE;
     HAL_Delay(10);
     adc_raw_vdda = Read_ADC_Average(&hadc1, ADC_CHANNEL_VREFINT, ADC_SAMPLETIME_239CYCLES_5, ADC_SAMPLES);
     ADC1->CR2 &= ~ADC_CR2_TSVREFE;
     HAL_Delay(1);
 
-    /* Расчёт реального VDDA по формуле:
-       VDDA = 3.3В * VREFINT_CAL / ADC_VREFINT */
+    /* Расчёт VDDA */
     if (adc_raw_vdda > 1000 && adc_raw_vdda < 2000 && VREFINT_CAL_VALUE > 1000 && VREFINT_CAL_VALUE < 2000) {
         current_vdda = 3.3f * (float)VREFINT_CAL_VALUE / (float)adc_raw_vdda;
     } else {
-        current_vdda = 3.3f;  // Значение по умолчанию при ошибке калибровки
+        current_vdda = 3.3f;
     }
 
-    /* === ШАГ 2: ИЗМЕРЕНИЕ 24В (PA0, ADC1) === */
+    /* --- 24В (PA0, ADC1) --- */
     adc_raw_24v = Read_ADC_Average(&hadc1, ADC_CHANNEL_0, ADC_SAMPLETIME_239CYCLES_5, ADC_SAMPLES);
     if (adc_raw_24v > 100 && adc_raw_24v < 4000) {
         float adc_voltage = (float)adc_raw_24v * current_vdda / 4095.0f;
@@ -588,7 +686,7 @@ void Read_All_Voltages(void)
         current_24v = 24.0f;
     }
 
-    /* === ШАГ 3: ИЗМЕРЕНИЕ 12В (PA1, ADC2) === */
+    /* --- 12В (PA1, ADC2) --- */
     adc_raw_12v = Read_ADC_Average(&hadc2, ADC_CHANNEL_1, ADC_SAMPLETIME_239CYCLES_5, ADC_SAMPLES);
     if (adc_raw_12v > 100 && adc_raw_12v < 4000) {
         float adc_voltage = (float)adc_raw_12v * current_vdda / 4095.0f;
@@ -597,7 +695,7 @@ void Read_All_Voltages(void)
         current_12v = 12.0f;
     }
 
-    /* === ШАГ 4: ИЗМЕРЕНИЕ 5В (PA5, ADC2) === */
+    /* --- 5В (PA5, ADC2) --- */
     adc_raw_5v = Read_ADC_Average(&hadc2, ADC_CHANNEL_5, ADC_SAMPLETIME_239CYCLES_5, ADC_SAMPLES);
     if (adc_raw_5v > 100 && adc_raw_5v < 4000) {
         float adc_voltage = (float)adc_raw_5v * current_vdda / 4095.0f;
@@ -608,11 +706,7 @@ void Read_All_Voltages(void)
 }
 
 /**
-  * @brief  Конфигурация системы тактирования
-  * @details Используется внешний кварц 8 МГц с PLL:
-  *          HSE = 8 МГц → PLL (×9) = 72 МГц → системная частота
-  *          АПВ1 (таймеры) = 72 МГц / 2 = 36 МГц
-  *          АПВ2 (АЦП) = 72 МГц / 6 = 12 МГц (макс. для АЦП STM32F1)
+  * @brief System Clock Configuration
   */
 void SystemClock_Config(void)
 {
@@ -626,7 +720,7 @@ void SystemClock_Config(void)
     RCC_OscInitStruct.HSIState = RCC_HSI_ON;
     RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
     RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
-    RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL9;  // 8 МГц × 9 = 72 МГц
+    RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL9;
     if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
     {
         Error_Handler();
@@ -636,7 +730,7 @@ void SystemClock_Config(void)
                                 |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
     RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
     RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
-    RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;   // 72/2 = 36 МГц для таймеров
+    RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
     RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
     if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
@@ -644,7 +738,6 @@ void SystemClock_Config(void)
         Error_Handler();
     }
 
-    /* Тактирование АЦП: 72 МГц / 6 = 12 МГц (максимальная частота для АЦП STM32F1) */
     PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_ADC;
     PeriphClkInit.AdcClockSelection = RCC_ADCPCLK2_DIV6;
     if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit) != HAL_OK)
@@ -654,18 +747,7 @@ void SystemClock_Config(void)
 }
 
 /**
-  * @brief  Инициализация GPIO
-  * @details Назначение пинов:
-  *          PB1  - вход захвата сигнала CLIK (TIM3_CH4)
-  *          PB5  - выход генерации импульса возбуждения
-  *          PB6  - выход управления питанием 5В (активный низкий)
-  *          PB10 - SCL шины I2C2
-  *          PB11 - SDA шины I2C2
-  *          PB12 - синий светодиод (индикация работы)
-  *          PB13 - красный светодиод (индикация захвата сигнала)
-  *          PA0  - вход АЦП для 24В
-  *          PA1  - вход АЦП для 12В
-  *          PA5  - вход АЦП для 5В
+  * @brief GPIO Initialization Function
   */
 static void MX_GPIO_Init(void)
 {
@@ -677,65 +759,68 @@ static void MX_GPIO_Init(void)
     __HAL_RCC_GPIOB_CLK_ENABLE();
     __HAL_RCC_AFIO_CLK_ENABLE();
 
-    /* Кварц 32768 Гц на PC14/PC15 (не используется, но инициализирован для совместимости) */
+    /* Настройка кварца 32768 Гц на PC14/PC15 */
     GPIO_InitStruct.Pin = GPIO_PIN_14|GPIO_PIN_15;
     GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
     HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-    /* Аналоговые входы АЦП */
+    /* Настройка аналоговых входов */
     GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_5;
     GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-    /* Вход захвата сигнала CLIK (PB1 = TIM3_CH4) */
+    /* Настройка PB1 для захвата времени пролёта (CLIK - TIM3_CH4) */
     GPIO_InitStruct.Pin = GPIO_PIN_1;
     GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-    /* Выход генерации импульса возбуждения (PB5) */
+    /* Настройка PB5 как цифрового выхода для генерации импульсов (Gen_Impuls) */
     GPIO_InitStruct.Pin = GPIO_PIN_5;
     GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-    /* Выход управления питанием 5В (активный низкий уровень) */
+    /* Настройка PB6 как выхода управления питанием 5В (активный низкий уровень) */
     GPIO_InitStruct.Pin = GPIO_PIN_6;
     GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-    /* Шина I2C2: PB10=SCL, PB11=SDA (ОБЯЗАТЕЛЬНО режим Open Drain!) */
+    /* I2C2 / LM75B / AT24C02 */
+    /* Настройка PB10 (SCL) и PB11 (SDA) для I2C2 - КРИТИЧЕСКИ ВАЖНО: AF_OD! */
     GPIO_InitStruct.Pin = GPIO_PIN_10 | GPIO_PIN_11;
-    GPIO_InitStruct.Mode = GPIO_MODE_AF_OD;  // Открытый сток для шины I2C
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_OD;  // Alternate Function Open Drain (ОБЯЗАТЕЛЬНО!)
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+    /* I2C2 / LM75B / AT24C02 */
 
-    /* Светодиоды индикации */
+    /* Настройка красного светодиода на PB13 (загорается на 1 сек при захвате сигнала) */
     GPIO_InitStruct.Pin = LED_RED_PIN;
     GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-    HAL_GPIO_WritePin(GPIOB, LED_RED_PIN, LED_RED_OFF);
+    HAL_GPIO_WritePin(GPIOB, LED_RED_PIN, LED_RED_OFF);  // Изначально ВЫКЛ
 
+    /* Настройка синего светодиода на PB12 (мигает для индикации работы) */
     GPIO_InitStruct.Pin = LED_BLUE_PIN;
     GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-    HAL_GPIO_WritePin(GPIOB, LED_BLUE_PIN, LED_BLUE_OFF);
+    HAL_GPIO_WritePin(GPIOB, LED_BLUE_PIN, LED_BLUE_OFF);  // Изначально ВЫКЛ
 
-    /* Включение питания 5В (низкий уровень = ВКЛ) */
-    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, POWER_5V_ON);
+    /* ВАЖНО: Питание 5В постоянно ВКЛЮЧЕНО (низкий уровень на PB6) */
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, POWER_5V_ON);  // LOW = питание ВКЛ
 
-    /* USART1 (ModBus): PA9=TX, PA10=RX */
+    /* Настройка USART1 (PA9-TX, PA10-RX) */
     GPIO_InitStruct.Pin = GPIO_PIN_9;
     GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
@@ -746,7 +831,7 @@ static void MX_GPIO_Init(void)
     GPIO_InitStruct.Pull = GPIO_PULLUP;
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-    /* USART2 (отладка): PA2=TX, PA3=RX */
+    /* Настройка USART2 (PA2-TX, PA3-RX) */
     GPIO_InitStruct.Pin = GPIO_PIN_2;
     GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
@@ -759,7 +844,7 @@ static void MX_GPIO_Init(void)
 }
 
 /**
-  * @brief  Инициализация USART1 (ModBus RTU)
+  * @brief USART1 Initialization Function (ModBus)
   */
 static void MX_USART1_UART_Init(void)
 {
@@ -778,7 +863,7 @@ static void MX_USART1_UART_Init(void)
 }
 
 /**
-  * @brief  Инициализация USART2 (отладочный вывод)
+  * @brief USART2 Initialization Function (Debug)
   */
 static void MX_USART2_UART_Init(void)
 {
@@ -797,7 +882,7 @@ static void MX_USART2_UART_Init(void)
 }
 
 /**
-  * @brief  Инициализация ADC1 (измерение 24В и VREFINT)
+  * @brief ADC1 Initialization Function
   */
 static void MX_ADC1_Init(void)
 {
@@ -825,7 +910,7 @@ static void MX_ADC1_Init(void)
 }
 
 /**
-  * @brief  Инициализация ADC2 (измерение 12В и 5В)
+  * @brief ADC2 Initialization Function
   */
 static void MX_ADC2_Init(void)
 {
@@ -853,14 +938,14 @@ static void MX_ADC2_Init(void)
 }
 
 /**
-  * @brief  Обработчик критических ошибок
-  * @details Мигание красным светодиодом при невозможности продолжения работы
+  * @brief  This function is executed in case of error occurrence.
   */
 void Error_Handler(void)
 {
     __disable_irq();
     while (1)
     {
+        /* Мигание красным светодиодом при критической ошибке */
         HAL_GPIO_TogglePin(GPIOB, LED_RED_PIN);
         HAL_Delay(200);
     }
