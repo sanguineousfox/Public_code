@@ -2835,19 +2835,19 @@ void Read_All_Voltages(void)
  8001612:	b089      	sub	sp, #36	; 0x24
  8001614:	af00      	add	r7, sp, #0
     if (!adc1_initialized || !adc2_initialized) {
- 8001616:	4b6f      	ldr	r3, [pc, #444]	; (80017d4 <Read_All_Voltages+0x1c4>)
+ 8001616:	4b70      	ldr	r3, [pc, #448]	; (80017d8 <Read_All_Voltages+0x1c8>)
  8001618:	781b      	ldrb	r3, [r3, #0]
  800161a:	2b00      	cmp	r3, #0
  800161c:	d003      	beq.n	8001626 <Read_All_Voltages+0x16>
- 800161e:	4b6e      	ldr	r3, [pc, #440]	; (80017d8 <Read_All_Voltages+0x1c8>)
+ 800161e:	4b6f      	ldr	r3, [pc, #444]	; (80017dc <Read_All_Voltages+0x1cc>)
  8001620:	781b      	ldrb	r3, [r3, #0]
  8001622:	2b00      	cmp	r3, #0
  8001624:	d103      	bne.n	800162e <Read_All_Voltages+0x1e>
         USART2_Print("[ADC] ОШИБКА: ADC не инициализирован!\r\n");
- 8001626:	486d      	ldr	r0, [pc, #436]	; (80017dc <Read_All_Voltages+0x1cc>)
+ 8001626:	486e      	ldr	r0, [pc, #440]	; (80017e0 <Read_All_Voltages+0x1d0>)
  8001628:	f001 fc36 	bl	8002e98 <USART2_Print>
         return;
- 800162c:	e0cf      	b.n	80017ce <Read_All_Voltages+0x1be>
+ 800162c:	e0d0      	b.n	80017d0 <Read_All_Voltages+0x1c0>
     }
 
     uint32_t adc_raw_vdda = 0;
@@ -2865,9 +2865,9 @@ void Read_All_Voltages(void)
 
     /* --- Измерение VREFINT для калибровки VDDA --- */
     ADC1->CR2 |= ADC_CR2_TSVREFE;
- 800163e:	4b68      	ldr	r3, [pc, #416]	; (80017e0 <Read_All_Voltages+0x1d0>)
+ 800163e:	4b69      	ldr	r3, [pc, #420]	; (80017e4 <Read_All_Voltages+0x1d4>)
  8001640:	689b      	ldr	r3, [r3, #8]
- 8001642:	4a67      	ldr	r2, [pc, #412]	; (80017e0 <Read_All_Voltages+0x1d0>)
+ 8001642:	4a68      	ldr	r2, [pc, #416]	; (80017e4 <Read_All_Voltages+0x1d4>)
  8001644:	f443 0300 	orr.w	r3, r3, #8388608	; 0x800000
  8001648:	6093      	str	r3, [r2, #8]
     HAL_Delay(10);
@@ -2877,13 +2877,13 @@ void Read_All_Voltages(void)
  8001650:	2310      	movs	r3, #16
  8001652:	2207      	movs	r2, #7
  8001654:	2111      	movs	r1, #17
- 8001656:	4863      	ldr	r0, [pc, #396]	; (80017e4 <Read_All_Voltages+0x1d4>)
+ 8001656:	4864      	ldr	r0, [pc, #400]	; (80017e8 <Read_All_Voltages+0x1d8>)
  8001658:	f7ff ffa0 	bl	800159c <Read_ADC_Average>
  800165c:	61f8      	str	r0, [r7, #28]
     ADC1->CR2 &= ~ADC_CR2_TSVREFE;
- 800165e:	4b60      	ldr	r3, [pc, #384]	; (80017e0 <Read_All_Voltages+0x1d0>)
+ 800165e:	4b61      	ldr	r3, [pc, #388]	; (80017e4 <Read_All_Voltages+0x1d4>)
  8001660:	689b      	ldr	r3, [r3, #8]
- 8001662:	4a5f      	ldr	r2, [pc, #380]	; (80017e0 <Read_All_Voltages+0x1d0>)
+ 8001662:	4a60      	ldr	r2, [pc, #384]	; (80017e4 <Read_All_Voltages+0x1d4>)
  8001664:	f423 0300 	bic.w	r3, r3, #8388608	; 0x800000
  8001668:	6093      	str	r3, [r2, #8]
     HAL_Delay(1);
@@ -2898,21 +2898,21 @@ void Read_All_Voltages(void)
  8001678:	69fb      	ldr	r3, [r7, #28]
  800167a:	f5b3 6ffa 	cmp.w	r3, #2000	; 0x7d0
  800167e:	d222      	bcs.n	80016c6 <Read_All_Voltages+0xb6>
- 8001680:	4b59      	ldr	r3, [pc, #356]	; (80017e8 <Read_All_Voltages+0x1d8>)
+ 8001680:	4b5a      	ldr	r3, [pc, #360]	; (80017ec <Read_All_Voltages+0x1dc>)
  8001682:	881b      	ldrh	r3, [r3, #0]
  8001684:	f5b3 7f7a 	cmp.w	r3, #1000	; 0x3e8
  8001688:	d91d      	bls.n	80016c6 <Read_All_Voltages+0xb6>
- 800168a:	4b57      	ldr	r3, [pc, #348]	; (80017e8 <Read_All_Voltages+0x1d8>)
+ 800168a:	4b58      	ldr	r3, [pc, #352]	; (80017ec <Read_All_Voltages+0x1dc>)
  800168c:	881b      	ldrh	r3, [r3, #0]
  800168e:	f5b3 6ffa 	cmp.w	r3, #2000	; 0x7d0
  8001692:	d218      	bcs.n	80016c6 <Read_All_Voltages+0xb6>
         current_vdda = 3.3f * (float)VREFINT_CAL_VALUE / (float)adc_raw_vdda;
- 8001694:	4b54      	ldr	r3, [pc, #336]	; (80017e8 <Read_All_Voltages+0x1d8>)
+ 8001694:	4b55      	ldr	r3, [pc, #340]	; (80017ec <Read_All_Voltages+0x1dc>)
  8001696:	881b      	ldrh	r3, [r3, #0]
  8001698:	4618      	mov	r0, r3
  800169a:	f7fe fe15 	bl	80002c8 <__aeabi_ui2f>
  800169e:	4603      	mov	r3, r0
- 80016a0:	4952      	ldr	r1, [pc, #328]	; (80017ec <Read_All_Voltages+0x1dc>)
+ 80016a0:	4953      	ldr	r1, [pc, #332]	; (80017f0 <Read_All_Voltages+0x1e0>)
  80016a2:	4618      	mov	r0, r3
  80016a4:	f7fe fe68 	bl	8000378 <__aeabi_fmul>
  80016a8:	4603      	mov	r3, r0
@@ -2925,13 +2925,13 @@ void Read_All_Voltages(void)
  80016b8:	f7fe ff12 	bl	80004e0 <__aeabi_fdiv>
  80016bc:	4603      	mov	r3, r0
  80016be:	461a      	mov	r2, r3
- 80016c0:	4b4b      	ldr	r3, [pc, #300]	; (80017f0 <Read_All_Voltages+0x1e0>)
+ 80016c0:	4b4c      	ldr	r3, [pc, #304]	; (80017f4 <Read_All_Voltages+0x1e4>)
  80016c2:	601a      	str	r2, [r3, #0]
  80016c4:	e002      	b.n	80016cc <Read_All_Voltages+0xbc>
     } else {
         current_vdda = 3.3f;
- 80016c6:	4b4a      	ldr	r3, [pc, #296]	; (80017f0 <Read_All_Voltages+0x1e0>)
- 80016c8:	4a48      	ldr	r2, [pc, #288]	; (80017ec <Read_All_Voltages+0x1dc>)
+ 80016c6:	4b4b      	ldr	r3, [pc, #300]	; (80017f4 <Read_All_Voltages+0x1e4>)
+ 80016c8:	4a49      	ldr	r2, [pc, #292]	; (80017f0 <Read_All_Voltages+0x1e0>)
  80016ca:	601a      	str	r2, [r3, #0]
     }
 
@@ -2940,7 +2940,7 @@ void Read_All_Voltages(void)
  80016cc:	2310      	movs	r3, #16
  80016ce:	2207      	movs	r2, #7
  80016d0:	2100      	movs	r1, #0
- 80016d2:	4844      	ldr	r0, [pc, #272]	; (80017e4 <Read_All_Voltages+0x1d4>)
+ 80016d2:	4845      	ldr	r0, [pc, #276]	; (80017e8 <Read_All_Voltages+0x1d8>)
  80016d4:	f7ff ff62 	bl	800159c <Read_ADC_Average>
  80016d8:	61b8      	str	r0, [r7, #24]
     if (adc_raw_24v > 100 && adc_raw_24v < 4000) {
@@ -2954,31 +2954,31 @@ void Read_All_Voltages(void)
  80016e8:	69b8      	ldr	r0, [r7, #24]
  80016ea:	f7fe fded 	bl	80002c8 <__aeabi_ui2f>
  80016ee:	4602      	mov	r2, r0
- 80016f0:	4b3f      	ldr	r3, [pc, #252]	; (80017f0 <Read_All_Voltages+0x1e0>)
+ 80016f0:	4b40      	ldr	r3, [pc, #256]	; (80017f4 <Read_All_Voltages+0x1e4>)
  80016f2:	681b      	ldr	r3, [r3, #0]
  80016f4:	4619      	mov	r1, r3
  80016f6:	4610      	mov	r0, r2
  80016f8:	f7fe fe3e 	bl	8000378 <__aeabi_fmul>
  80016fc:	4603      	mov	r3, r0
- 80016fe:	493d      	ldr	r1, [pc, #244]	; (80017f4 <Read_All_Voltages+0x1e4>)
+ 80016fe:	493e      	ldr	r1, [pc, #248]	; (80017f8 <Read_All_Voltages+0x1e8>)
  8001700:	4618      	mov	r0, r3
  8001702:	f7fe feed 	bl	80004e0 <__aeabi_fdiv>
  8001706:	4603      	mov	r3, r0
  8001708:	60fb      	str	r3, [r7, #12]
         current_24v = adc_voltage * DIV_24V_FACTOR;
- 800170a:	493b      	ldr	r1, [pc, #236]	; (80017f8 <Read_All_Voltages+0x1e8>)
+ 800170a:	493c      	ldr	r1, [pc, #240]	; (80017fc <Read_All_Voltages+0x1ec>)
  800170c:	68f8      	ldr	r0, [r7, #12]
  800170e:	f7fe fe33 	bl	8000378 <__aeabi_fmul>
  8001712:	4603      	mov	r3, r0
  8001714:	461a      	mov	r2, r3
- 8001716:	4b39      	ldr	r3, [pc, #228]	; (80017fc <Read_All_Voltages+0x1ec>)
+ 8001716:	4b3a      	ldr	r3, [pc, #232]	; (8001800 <Read_All_Voltages+0x1f0>)
  8001718:	601a      	str	r2, [r3, #0]
     if (adc_raw_24v > 100 && adc_raw_24v < 4000) {
  800171a:	e002      	b.n	8001722 <Read_All_Voltages+0x112>
     } else {
         current_24v = 24.0f;
- 800171c:	4b37      	ldr	r3, [pc, #220]	; (80017fc <Read_All_Voltages+0x1ec>)
- 800171e:	4a38      	ldr	r2, [pc, #224]	; (8001800 <Read_All_Voltages+0x1f0>)
+ 800171c:	4b38      	ldr	r3, [pc, #224]	; (8001800 <Read_All_Voltages+0x1f0>)
+ 800171e:	4a39      	ldr	r2, [pc, #228]	; (8001804 <Read_All_Voltages+0x1f4>)
  8001720:	601a      	str	r2, [r3, #0]
     }
 
@@ -2987,7 +2987,7 @@ void Read_All_Voltages(void)
  8001722:	2310      	movs	r3, #16
  8001724:	2207      	movs	r2, #7
  8001726:	2101      	movs	r1, #1
- 8001728:	4836      	ldr	r0, [pc, #216]	; (8001804 <Read_All_Voltages+0x1f4>)
+ 8001728:	4837      	ldr	r0, [pc, #220]	; (8001808 <Read_All_Voltages+0x1f8>)
  800172a:	f7ff ff37 	bl	800159c <Read_ADC_Average>
  800172e:	6178      	str	r0, [r7, #20]
     if (adc_raw_12v > 100 && adc_raw_12v < 4000) {
@@ -3001,31 +3001,31 @@ void Read_All_Voltages(void)
  800173e:	6978      	ldr	r0, [r7, #20]
  8001740:	f7fe fdc2 	bl	80002c8 <__aeabi_ui2f>
  8001744:	4602      	mov	r2, r0
- 8001746:	4b2a      	ldr	r3, [pc, #168]	; (80017f0 <Read_All_Voltages+0x1e0>)
+ 8001746:	4b2b      	ldr	r3, [pc, #172]	; (80017f4 <Read_All_Voltages+0x1e4>)
  8001748:	681b      	ldr	r3, [r3, #0]
  800174a:	4619      	mov	r1, r3
  800174c:	4610      	mov	r0, r2
  800174e:	f7fe fe13 	bl	8000378 <__aeabi_fmul>
  8001752:	4603      	mov	r3, r0
- 8001754:	4927      	ldr	r1, [pc, #156]	; (80017f4 <Read_All_Voltages+0x1e4>)
+ 8001754:	4928      	ldr	r1, [pc, #160]	; (80017f8 <Read_All_Voltages+0x1e8>)
  8001756:	4618      	mov	r0, r3
  8001758:	f7fe fec2 	bl	80004e0 <__aeabi_fdiv>
  800175c:	4603      	mov	r3, r0
  800175e:	60bb      	str	r3, [r7, #8]
         current_12v = adc_voltage * DIV_12V_FACTOR;
- 8001760:	4929      	ldr	r1, [pc, #164]	; (8001808 <Read_All_Voltages+0x1f8>)
+ 8001760:	492a      	ldr	r1, [pc, #168]	; (800180c <Read_All_Voltages+0x1fc>)
  8001762:	68b8      	ldr	r0, [r7, #8]
  8001764:	f7fe fe08 	bl	8000378 <__aeabi_fmul>
  8001768:	4603      	mov	r3, r0
  800176a:	461a      	mov	r2, r3
- 800176c:	4b27      	ldr	r3, [pc, #156]	; (800180c <Read_All_Voltages+0x1fc>)
+ 800176c:	4b28      	ldr	r3, [pc, #160]	; (8001810 <Read_All_Voltages+0x200>)
  800176e:	601a      	str	r2, [r3, #0]
     if (adc_raw_12v > 100 && adc_raw_12v < 4000) {
  8001770:	e002      	b.n	8001778 <Read_All_Voltages+0x168>
     } else {
         current_12v = 12.0f;
- 8001772:	4b26      	ldr	r3, [pc, #152]	; (800180c <Read_All_Voltages+0x1fc>)
- 8001774:	4a26      	ldr	r2, [pc, #152]	; (8001810 <Read_All_Voltages+0x200>)
+ 8001772:	4b27      	ldr	r3, [pc, #156]	; (8001810 <Read_All_Voltages+0x200>)
+ 8001774:	4a27      	ldr	r2, [pc, #156]	; (8001814 <Read_All_Voltages+0x204>)
  8001776:	601a      	str	r2, [r3, #0]
     }
 
@@ -3034,68 +3034,69 @@ void Read_All_Voltages(void)
  8001778:	2310      	movs	r3, #16
  800177a:	2207      	movs	r2, #7
  800177c:	2105      	movs	r1, #5
- 800177e:	4821      	ldr	r0, [pc, #132]	; (8001804 <Read_All_Voltages+0x1f4>)
+ 800177e:	4822      	ldr	r0, [pc, #136]	; (8001808 <Read_All_Voltages+0x1f8>)
  8001780:	f7ff ff0c 	bl	800159c <Read_ADC_Average>
  8001784:	6138      	str	r0, [r7, #16]
     if (adc_raw_5v > 100 && adc_raw_5v < 4000) {
  8001786:	693b      	ldr	r3, [r7, #16]
  8001788:	2b64      	cmp	r3, #100	; 0x64
- 800178a:	d91d      	bls.n	80017c8 <Read_All_Voltages+0x1b8>
+ 800178a:	d91e      	bls.n	80017ca <Read_All_Voltages+0x1ba>
  800178c:	693b      	ldr	r3, [r7, #16]
  800178e:	f5b3 6f7a 	cmp.w	r3, #4000	; 0xfa0
- 8001792:	d219      	bcs.n	80017c8 <Read_All_Voltages+0x1b8>
+ 8001792:	d21a      	bcs.n	80017ca <Read_All_Voltages+0x1ba>
         float adc_voltage = (float)adc_raw_5v * current_vdda / 4095.0f;
  8001794:	6938      	ldr	r0, [r7, #16]
  8001796:	f7fe fd97 	bl	80002c8 <__aeabi_ui2f>
  800179a:	4602      	mov	r2, r0
- 800179c:	4b14      	ldr	r3, [pc, #80]	; (80017f0 <Read_All_Voltages+0x1e0>)
+ 800179c:	4b15      	ldr	r3, [pc, #84]	; (80017f4 <Read_All_Voltages+0x1e4>)
  800179e:	681b      	ldr	r3, [r3, #0]
  80017a0:	4619      	mov	r1, r3
  80017a2:	4610      	mov	r0, r2
  80017a4:	f7fe fde8 	bl	8000378 <__aeabi_fmul>
  80017a8:	4603      	mov	r3, r0
- 80017aa:	4912      	ldr	r1, [pc, #72]	; (80017f4 <Read_All_Voltages+0x1e4>)
+ 80017aa:	4913      	ldr	r1, [pc, #76]	; (80017f8 <Read_All_Voltages+0x1e8>)
  80017ac:	4618      	mov	r0, r3
  80017ae:	f7fe fe97 	bl	80004e0 <__aeabi_fdiv>
  80017b2:	4603      	mov	r3, r0
  80017b4:	607b      	str	r3, [r7, #4]
         current_5v = adc_voltage * DIV_5V_FACTOR;
- 80017b6:	4917      	ldr	r1, [pc, #92]	; (8001814 <Read_All_Voltages+0x204>)
- 80017b8:	6878      	ldr	r0, [r7, #4]
- 80017ba:	f7fe fddd 	bl	8000378 <__aeabi_fmul>
- 80017be:	4603      	mov	r3, r0
- 80017c0:	461a      	mov	r2, r3
- 80017c2:	4b15      	ldr	r3, [pc, #84]	; (8001818 <Read_All_Voltages+0x208>)
- 80017c4:	601a      	str	r2, [r3, #0]
+ 80017b6:	687b      	ldr	r3, [r7, #4]
+ 80017b8:	4619      	mov	r1, r3
+ 80017ba:	4618      	mov	r0, r3
+ 80017bc:	f7fe fcd4 	bl	8000168 <__addsf3>
+ 80017c0:	4603      	mov	r3, r0
+ 80017c2:	461a      	mov	r2, r3
+ 80017c4:	4b14      	ldr	r3, [pc, #80]	; (8001818 <Read_All_Voltages+0x208>)
+ 80017c6:	601a      	str	r2, [r3, #0]
     if (adc_raw_5v > 100 && adc_raw_5v < 4000) {
- 80017c6:	e002      	b.n	80017ce <Read_All_Voltages+0x1be>
+ 80017c8:	e002      	b.n	80017d0 <Read_All_Voltages+0x1c0>
     } else {
         current_5v = 5.0f;
- 80017c8:	4b13      	ldr	r3, [pc, #76]	; (8001818 <Read_All_Voltages+0x208>)
- 80017ca:	4a14      	ldr	r2, [pc, #80]	; (800181c <Read_All_Voltages+0x20c>)
- 80017cc:	601a      	str	r2, [r3, #0]
+ 80017ca:	4b13      	ldr	r3, [pc, #76]	; (8001818 <Read_All_Voltages+0x208>)
+ 80017cc:	4a13      	ldr	r2, [pc, #76]	; (800181c <Read_All_Voltages+0x20c>)
+ 80017ce:	601a      	str	r2, [r3, #0]
     }
 }
- 80017ce:	3724      	adds	r7, #36	; 0x24
- 80017d0:	46bd      	mov	sp, r7
- 80017d2:	bd90      	pop	{r4, r7, pc}
- 80017d4:	20000180 	.word	0x20000180
- 80017d8:	20000181 	.word	0x20000181
- 80017dc:	08008640 	.word	0x08008640
- 80017e0:	40012400 	.word	0x40012400
- 80017e4:	20000114 	.word	0x20000114
- 80017e8:	1ffff7ba 	.word	0x1ffff7ba
- 80017ec:	40533333 	.word	0x40533333
- 80017f0:	20000000 	.word	0x20000000
- 80017f4:	457ff000 	.word	0x457ff000
- 80017f8:	41133333 	.word	0x41133333
- 80017fc:	20000004 	.word	0x20000004
- 8001800:	41c00000 	.word	0x41c00000
- 8001804:	20000144 	.word	0x20000144
- 8001808:	40933333 	.word	0x40933333
- 800180c:	20000008 	.word	0x20000008
- 8001810:	41400000 	.word	0x41400000
- 8001814:	403ae148 	.word	0x403ae148
+ 80017d0:	3724      	adds	r7, #36	; 0x24
+ 80017d2:	46bd      	mov	sp, r7
+ 80017d4:	bd90      	pop	{r4, r7, pc}
+ 80017d6:	bf00      	nop
+ 80017d8:	20000180 	.word	0x20000180
+ 80017dc:	20000181 	.word	0x20000181
+ 80017e0:	08008640 	.word	0x08008640
+ 80017e4:	40012400 	.word	0x40012400
+ 80017e8:	20000114 	.word	0x20000114
+ 80017ec:	1ffff7ba 	.word	0x1ffff7ba
+ 80017f0:	40533333 	.word	0x40533333
+ 80017f4:	20000000 	.word	0x20000000
+ 80017f8:	457ff000 	.word	0x457ff000
+ 80017fc:	41133333 	.word	0x41133333
+ 8001800:	20000004 	.word	0x20000004
+ 8001804:	41c00000 	.word	0x41c00000
+ 8001808:	20000144 	.word	0x20000144
+ 800180c:	40933333 	.word	0x40933333
+ 8001810:	20000008 	.word	0x20000008
+ 8001814:	41400000 	.word	0x41400000
  8001818:	2000000c 	.word	0x2000000c
  800181c:	40a00000 	.word	0x40a00000
 
