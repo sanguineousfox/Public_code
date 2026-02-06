@@ -7,6 +7,7 @@
   *                   - Импульс: точно 10.00 мкс (54 итерации)
   *                   - Период измерений: 10 секунд
   *                   - Красный светодиод (PB13) горит 1 сек при захвате сигнала
+  *                   - Добавлена поддержка I2C2: LM75B (температура) и AT24C02 (EEPROM)
   ******************************************************************************
   */
 /* USER CODE END Header */
@@ -15,6 +16,9 @@
 #include "main.h"
 #include "stm32f1xx_it.h"
 #include "utils.h"
+#include "i2c_config.h"   /* I2C2: PB10=SCL, PB11=SDA */
+#include "lm75b.h"        /* Драйвер LM75B через I2C2 */
+#include "at24c02.h"      /* Драйвер AT24C02 через I2C2 */
 #include <stdint.h>
 #include <string.h>
 #include <math.h>
@@ -27,9 +31,9 @@
 #define MEAS_TIMEOUT_MS 10      // Таймаут измерения времени пролёта (10 мс)
 
 /* ЧАСТОТНЫЕ КОЭФФИЦИЕНТЫ ДЕЛИТЕЛЕЙ (подобраны экспериментально) */
-#define DIV_24V_FACTOR  14.4f    // Резисторы ~81к+10к
-#define DIV_12V_FACTOR  4.5f    // Резисторы ~35к+10к
-#define DIV_5V_FACTOR   1.9f   // Резисторы ~4.7к+10к (коэффициент 3.13, но с учётом погрешностей = 1.47)
+#define DIV_24V_FACTOR  9.2f    // Резисторы ~81к+10к
+#define DIV_12V_FACTOR  4.6f    // Резисторы ~35к+10к
+#define DIV_5V_FACTOR   2.0f   // Резисторы ~4.7к+10к
 
 /* МАГНИТОСТРИКЦИОННЫЙ ДАТЧИК */
 #define PULSE_WIDTH_US  10      // Ширина генерируемого импульса (мкс)
@@ -56,11 +60,18 @@
 /* ТОЧНАЯ ЗАДЕРЖКА 10 МКС ДЛЯ 72 МГц (экспериментально подобрано) */
 #define PULSE_DELAY_ITERATIONS 54  // 54 итерации = 10.0 мкс при -O0
 
+/* I2C2 / LM75B / AT24C02 */
+#define LM75B_ADDR      LM75B_DEFAULT_ADDRESS   // 0x90 (8-bit)
+#define AT24C02_ADDR    AT24C02_DEFAULT_ADDRESS // 0xA0 (8-bit)
+#define EEPROM_TEMP_ADDR 0x20                   // Адрес в EEPROM для сохранения температуры
+#define EEPROM_BOOT_COUNT_ADDR 0x00             // Адрес для счётчика загрузок
+
 /* Private variables ---------------------------------------------------------*/
 UART_HandleTypeDef huart1;  // Для ModBus (USART1)
 UART_HandleTypeDef huart2;  // Для отладки (USART2)
 ADC_HandleTypeDef hadc1;
 ADC_HandleTypeDef hadc2;
+// ВАЖНО: hi2c2 определён в i2c_config.c, здесь НЕ ОПРЕДЕЛЯЕМ!
 
 // Глобальные переменные для измерения времени пролёта
 volatile uint32_t tof_capture_value = 0;    // Значение захвата таймера
@@ -73,10 +84,14 @@ static float current_vdda = 3.3f;
 static float current_24v = 24.0f;
 static float current_12v = 12.0f;
 static float current_5v = 5.0f;
+static float current_temperature = 0.0f;    // Температура от LM75B
 
-// Флаги инициализации ADC
+// Флаги инициализации
 static uint8_t adc1_initialized = 0;
 static uint8_t adc2_initialized = 0;
+static uint8_t i2c_initialized = 0;         // I2C2 инициализирован
+static uint8_t lm75b_initialized = 0;       // LM75B обнаружен
+static uint8_t at24c02_initialized = 0;     // AT24C02 обнаружен
 
 // Буфер для преобразования float в строку
 static char float_buffer[32];
@@ -98,6 +113,12 @@ void Read_All_Voltages(void);
 uint32_t Read_ADC_Single(ADC_HandleTypeDef* hadc, uint32_t channel, uint32_t sampling_time);
 uint32_t Read_ADC_Average(ADC_HandleTypeDef* hadc, uint32_t channel, uint32_t sampling_time, uint8_t samples);
 
+/* I2C2 / LM75B / AT24C02 */
+void Read_Temperature(void);
+void Save_Boot_Count(void);
+void Read_Boot_Count(void);
+/* I2C2 / LM75B / AT24C02 */
+
 /**
   * @brief  The application entry point.
   * @retval int
@@ -112,6 +133,43 @@ int main(void)
     MX_USART2_UART_Init();
     MX_ADC1_Init();
     MX_ADC2_Init();
+
+    /* I2C2 / LM75B / AT24C02 */
+    /* Инициализация I2C2 (PB10=SCL, PB11=SDA) */
+    USART2_Print("[ИНИЦ] Инициализация I2C2 (PB10=SCL, PB11=SDA)...\r\n");
+    if (MX_I2C2_Init() == HAL_OK) {
+        i2c_initialized = 1;
+        USART2_Print("[ИНИЦ] I2C2 инициализирован успешно\r\n");
+
+        /* Инициализация LM75B */
+        USART2_Print("[ИНИЦ] Инициализация LM75B (0x48)...\r\n");
+        if (LM75B_Init(LM75B_ADDR) == HAL_OK) {
+            lm75b_initialized = 1;
+            USART2_Print("[ИНИЦ] LM75B инициализирован успешно\r\n");
+        } else {
+            USART2_Print("[ИНИЦ] КРИТИЧЕСКАЯ ОШИБКА: LM75B НЕ НАЙДЕН!\r\n");
+            USART2_Print("Проверьте подключение: SCL->PB10, SDA->PB11, VCC=3.3V, GND\r\n");
+            USART2_Print("ВАЖНО: Установите подтяжки 4.7кОм от SCL/SDA к 3.3V!\r\n");
+        }
+
+        /* Инициализация AT24C02 */
+        USART2_Print("[ИНИЦ] Инициализация AT24C02 (0x50)...\r\n");
+        if (AT24C02_Init(AT24C02_ADDR) == HAL_OK) {
+            at24c02_initialized = 1;
+            USART2_Print("[ИНИЦ] AT24C02 инициализирован успешно\r\n");
+
+            /* Чтение счётчика загрузок из EEPROM */
+            Read_Boot_Count();
+        } else {
+            USART2_Print("[ИНИЦ] КРИТИЧЕСКАЯ ОШИБКА: AT24C02 НЕ НАЙДЕН!\r\n");
+            USART2_Print("Проверьте подключение: SCL->PB10, SDA->PB11, VCC=3.3V, GND\r\n");
+            USART2_Print("ВАЖНО: Установите подтяжки 4.7кОм от SCL/SDA к 3.3V!\r\n");
+        }
+    } else {
+        USART2_Print("[ИНИЦ] КРИТИЧЕСКАЯ ОШИБКА: I2C2 НЕ ИНИЦИАЛИЗИРОВАН!\r\n");
+        USART2_Print("Проверьте конфигурацию тактирования и пины PB10/PB11\r\n");
+    }
+    /* I2C2 / LM75B / AT24C02 */
 
     /* Инициализация захвата времени пролёта (PB1 = TIM3_CH4 = CLIK) */
     TIM3_InputCapture_Init();
@@ -148,6 +206,7 @@ int main(void)
     HAL_NVIC_EnableIRQ(TIM3_IRQn);
     HAL_NVIC_SetPriority(ADC1_2_IRQn, 1, 1);
     HAL_NVIC_EnableIRQ(ADC1_2_IRQn);
+    /* I2C2 прерывания (уже настроены в HAL_I2C_MspInit) */
 
     /* Включаем глобальные прерывания */
     __enable_irq();
@@ -163,6 +222,20 @@ int main(void)
     USART2_Print("Интервал измерений: 10 секунд\r\n");
     USART2_Print("Индикация: Красный светодиод (PB13) = горит 1 сек при захвате сигнала\r\n");
     USART2_Print("           Синий светодиод (PB12) = мигает (1 Гц)\r\n");
+    /* I2C2 / LM75B / AT24C02 */
+    USART2_Print("I2C2: PB10=SCL, PB11=SDA @ 100 kHz\r\n");
+    if (lm75b_initialized) {
+        USART2_Print("LM75B: Адрес 0x48 (температура)\r\n");
+    } else {
+        USART2_Print("LM75B: НЕ ОБНАРУЖЕН (проверьте подключение и подтяжки!)\r\n");
+    }
+    if (at24c02_initialized) {
+        USART2_Print("AT24C02: Адрес 0x50 (256 байт EEPROM)\r\n");
+    } else {
+        USART2_Print("AT24C02: НЕ ОБНАРУЖЕН (проверьте подключение и подтяжки!)\r\n");
+    }
+    USART2_Print("ВАЖНО: Подтяжки 4.7кОм от SCL/SDA к 3.3V ОБЯЗАТЕЛЬНЫ!\r\n");
+    /* I2C2 / LM75B / AT24C02 */
     USART2_Print("VREFINT_CAL: ");
     USART2_PrintNum(VREFINT_CAL_VALUE);
     USART2_Print("\r\nПины:\r\n");
@@ -171,10 +244,17 @@ int main(void)
     USART2_Print("  PB1 (CLIK):        вход, TIM3_CH4\r\n");
     USART2_Print("  PB13 (LED_RED):    выход, горит 1 сек при захвате сигнала\r\n");
     USART2_Print("  PB12 (LED_BLUE):   выход, мигает (1 Гц)\r\n");
+    USART2_Print("  PB10 (SCL):        I2C2\r\n");
+    USART2_Print("  PB11 (SDA):        I2C2\r\n");
     USART2_Print("========================================\r\n\r\n");
 
     /* Тестовое измерение напряжений при запуске */
     Read_All_Voltages();
+    /* I2C2 / LM75B / AT24C02 */
+    if (lm75b_initialized) {
+        Read_Temperature();
+    }
+    /* I2C2 / LM75B / AT24C02 */
 
     USART2_Print("[ИНИЦ] --- РЕЗУЛЬТАТЫ ИЗМЕРЕНИЙ ---\r\n");
     USART2_Print("[ИНИЦ] VDDA = ");
@@ -196,6 +276,15 @@ int main(void)
     float_to_str(current_5v, float_buffer, 2);
     USART2_Print(float_buffer);
     USART2_Print(" В\r\n");
+
+    /* I2C2 / LM75B / AT24C02 */
+    if (lm75b_initialized) {
+        USART2_Print("[ИНИЦ] Темп. = ");
+        float_to_str(current_temperature, float_buffer, 1);
+        USART2_Print(float_buffer);
+        USART2_Print(" °C\r\n");
+    }
+    /* I2C2 / LM75B / AT24C02 */
 
     /* Основные переменные цикла */
     uint32_t last_measure_time = 0;
@@ -227,7 +316,7 @@ int main(void)
         {
             last_measure_time = HAL_GetTick();
 
-            /* === НАЧАЛО НОВОГО ЦИКЛА ИЗМЕРЕНИЯ === */
+            /* НАЧАЛО НОВОГО ЦИКЛА ИЗМЕРЕНИЯ */
             USART2_Print("\r\n========================================\r\n");
             USART2_Print("ЦИКЛ ИЗМЕРЕНИЯ ЗАПУЩЕН (каждые 10 сек)\r\n");
             USART2_Print("========================================\r\n");
@@ -241,7 +330,21 @@ int main(void)
             Read_All_Voltages();
             ModBus_UpdateVoltages(current_vdda, current_24v, current_12v, current_5v);
 
-            /* Шаг 2: Генерация импульса и измерение времени пролёта */
+            /* Шаг 2: Измерение температуры */
+            /* I2C2 / LM75B / AT24C02 */
+            if (lm75b_initialized) {
+                Read_Temperature();
+
+                /* Сохранение температуры в EEPROM (для отладки/статистики) */
+                if (at24c02_initialized) {
+                    int16_t temp_raw = (int16_t)(current_temperature * 10.0f); // *10 для 0.1°C точности
+                    AT24C02_WriteByte(AT24C02_ADDR, EEPROM_TEMP_ADDR, (uint8_t)(temp_raw >> 8));
+                    AT24C02_WriteByte(AT24C02_ADDR, EEPROM_TEMP_ADDR + 1, (uint8_t)(temp_raw & 0xFF));
+                }
+            }
+            /* I2C2 / LM75B / AT24C02 */
+
+            /* Шаг 3: Генерация импульса и измерение времени пролёта */
             uint32_t tof_ticks = measure_time_of_flight();
             float tof_us = tof_ticks * TOF_TICK_US;
 
@@ -252,7 +355,7 @@ int main(void)
 
             float position_mm = (tof_us * 0.001f * SOUND_SPEED_MPS) / 2.0f;  // /2 так как туда-обратно
 
-            /* Шаг 3: Индикация результата */
+            /* Шаг 4: Индикация результата */
             if (tof_ticks > 0 && tof_measurement_done) {
                 /* Сигнал успешно захвачен — зажечь красный светодиод на 1 секунду */
                 HAL_GPIO_WritePin(GPIOB, LED_RED_PIN, LED_RED_ON);
@@ -272,8 +375,8 @@ int main(void)
                 USART2_Print("  3. Прерывание не успевает сработать за 2 мкс\r\n");
             }
 
-            /* Обновление данных в ModBus */
-            ModBus_UpdateMeasurements(tof_us, position_mm, 0, signal_captured ? 1 : 0);
+            /* Обновление данных в ModBus (температура передаётся как 3-й параметр) */
+            ModBus_UpdateMeasurements(tof_us, position_mm, current_temperature, signal_captured ? 1 : 0);
 
             /* Вывод результатов */
             USART2_Print("\r\n--- РЕЗУЛЬТАТЫ ИЗМЕРЕНИЯ ---\r\n");
@@ -290,6 +393,17 @@ int main(void)
             float_to_str(current_5v, float_buffer, 1);
             USART2_Print(float_buffer);
             USART2_Print("В\r\n");
+
+            /* I2C2 / LM75B / AT24C02 */
+            if (lm75b_initialized) {
+                USART2_Print("Температура: ");
+                float_to_str(current_temperature, float_buffer, 1);
+                USART2_Print(float_buffer);
+                USART2_Print(" °C\r\n");
+            } else {
+                USART2_Print("Температура: НЕ ДОСТУПНА (датчик не обнаружен)\r\n");
+            }
+            /* I2C2 / LM75B / AT24C02 */
 
             print_tof_results(tof_ticks, tof_us, position_mm, signal_captured);
 
@@ -365,7 +479,7 @@ void generate_pulse_and_measure(void)
     TIM3->SR = 0;
     TIM3->CNT = 0;  // Сброс счётчика
 
-    /* === КРИТИЧЕСКИ ВАЖНО: ЗАПУСК ТАЙМЕРА ДО ИМПУЛЬСА === */
+    /* КРИТИЧЕСКИ ВАЖНО: ЗАПУСК ТАЙМЕРА ДО ИМПУЛЬСА */
     TIM3->CR1 |= TIM_CR1_CEN;  // Запуск таймера (готов к захвату СРАЗУ!)
 
     /* МИНИМАЛЬНАЯ ЗАДЕРЖКА ДЛЯ СТАБИЛИЗАЦИИ ТАЙМЕРА (ТОЛЬКО 1 НОП) */
@@ -434,6 +548,56 @@ void print_tof_results(uint32_t tof_ticks, float tof_us, float position_mm, uint
         USART2_Print(" мм от начала волновода\r\n");
     }
 }
+
+/* I2C2 / LM75B / AT24C02 */
+/**
+  * @brief  Чтение температуры с датчика LM75B
+  */
+void Read_Temperature(void)
+{
+    if (!lm75b_initialized || !i2c_initialized) {
+        current_temperature = -127.0f;  // Специальное значение ошибки
+        return;
+    }
+
+    if (LM75B_ReadTemperature(LM75B_ADDR, &current_temperature) != HAL_OK) {
+        current_temperature = -127.0f;
+        USART2_Print("[I2C] ОШИБКА: Не удалось прочитать температуру!\r\n");
+    }
+}
+
+/**
+  * @brief  Сохранение счётчика загрузок в EEPROM при старте
+  */
+void Save_Boot_Count(void)
+{
+    if (!at24c02_initialized || !i2c_initialized) return;
+
+    uint8_t boot_count = 0;
+    AT24C02_ReadByte(AT24C02_ADDR, EEPROM_BOOT_COUNT_ADDR, &boot_count);
+    boot_count++;
+    AT24C02_WriteByte(AT24C02_ADDR, EEPROM_BOOT_COUNT_ADDR, boot_count);
+
+    USART2_Print("[I2C] Счётчик загрузок: ");
+    USART2_PrintNum(boot_count);
+    USART2_Print("\r\n");
+}
+
+/**
+  * @brief  Чтение счётчика загрузок из EEPROM
+  */
+void Read_Boot_Count(void)
+{
+    if (!at24c02_initialized || !i2c_initialized) return;
+
+    uint8_t boot_count = 0;
+    if (AT24C02_ReadByte(AT24C02_ADDR, EEPROM_BOOT_COUNT_ADDR, &boot_count) == HAL_OK) {
+        USART2_Print("[I2C] Устройство запущено ");
+        USART2_PrintNum(boot_count);
+        USART2_Print(" раз(а)\r\n");
+    }
+}
+/* I2C2 / LM75B / AT24C02 */
 
 /**
   * @brief  Чтение одного значения ADC
@@ -628,6 +792,14 @@ static void MX_GPIO_Init(void)
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+    /* I2C2 / LM75B / AT24C02 */
+    /* Настройка PB10 (SCL) и PB11 (SDA) для I2C2 - КРИТИЧЕСКИ ВАЖНО: AF_OD! */
+    GPIO_InitStruct.Pin = GPIO_PIN_10 | GPIO_PIN_11;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_OD;  // Alternate Function Open Drain (ОБЯЗАТЕЛЬНО!)
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+    /* I2C2 / LM75B / AT24C02 */
 
     /* Настройка красного светодиода на PB13 (загорается на 1 сек при захвате сигнала) */
     GPIO_InitStruct.Pin = LED_RED_PIN;
