@@ -1,0 +1,6 @@
+../Core/Src/at24c02.c:16:19:AT24C02_Init	40	static
+../Core/Src/at24c02.c:26:19:AT24C02_ReadByte	32	static
+../Core/Src/at24c02.c:38:19:AT24C02_ReadBytes	40	static
+../Core/Src/at24c02.c:51:19:AT24C02_WriteByte	40	static
+../Core/Src/at24c02.c:70:19:AT24C02_WriteBytes	56	static
+../Core/Src/at24c02.c:107:19:AT24C02_WaitReady	40	static
