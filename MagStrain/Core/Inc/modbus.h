@@ -27,26 +27,18 @@
 #define MODBUS_EXCEPTION_ILLEGAL_DATA_ADDRESS 0x02
 #define MODBUS_EXCEPTION_ILLEGAL_DATA_VALUE   0x03
 
-/* Адреса Input регистров (только чтение) -----------------------------------*/
-#define REG_VDDA_HIGH        0
-#define REG_VDDA_LOW         1
-#define REG_24V_HIGH         2
-#define REG_24V_LOW          3
-#define REG_12V_HIGH         4
-#define REG_12V_LOW          5
-#define REG_5V_HIGH          6
-#define REG_5V_LOW           7
-#define REG_PERIOD1_HIGH     8
-#define REG_PERIOD1_LOW      9
-#define REG_PERIOD2_HIGH     10
-#define REG_PERIOD2_LOW      11
-#define REG_FREQ_HIGH        12
-#define REG_FREQ_LOW         13
-#define REG_STATUS           14
-#define REG_COUNTER          15
-#define REG_TIMESTAMP_HIGH   16
-#define REG_TIMESTAMP_LOW    17
-#define REG_INPUT_REG_COUNT  18
+/* Адреса Input регистров (только чтение) - ИЗМЕНЕНО НА 16-БИТНЫЕ ЗНАЧЕНИЯ С ОБРАБОТКОЙ ОШИБОК */
+#define REG_24V              0  // 24V * 10 (0.1V точность) или 0xFFFF при ошибке
+#define REG_12V              1  // 12V * 10
+#define REG_5V               2  // 5V * 10
+#define REG_VDDA             3  // VDDA * 10
+#define REG_TOF              4  // Время пролёта * 10 (0.1 мкс) или 0xFFFF при ошибке
+#define REG_TEMPERATURE      5  // Температура * 10 (0.1 °C) или 0xFFFF при ошибке
+#define REG_STATUS           6  // Статус измерения (бит 0: захват сигнала)
+#define REG_COUNTER          7  // Счётчик измерений
+#define REG_TIMESTAMP_HIGH   8  // Временная метка (старшие 16 бит)
+#define REG_TIMESTAMP_LOW    9  // Временная метка (младшие 16 бит)
+#define REG_INPUT_REG_COUNT  10
 
 /* Адреса Holding регистров (чтение/запись) ---------------------------------*/
 #define HOLD_DEVICE_ADDR     0
@@ -58,10 +50,14 @@
 /* Прототипы функций --------------------------------------------------------*/
 void ModBus_Init(void);
 void ModBus_Process(void);
-void ModBus_UpdateVoltages(float vdda, float v24, float v12, float v5);
-void ModBus_UpdateMeasurements(float p1, float p2, float freq, uint8_t status);
+/* ИЗМЕНЕНО: Добавлены флаги ошибок для обработки вывода FF */
+void ModBus_UpdateVoltages(float vdda, float v24, float v12, float v5,
+                           uint8_t vdda_err, uint8_t v24_err, uint8_t v12_err, uint8_t v5_err);
+void ModBus_UpdateMeasurements(float tof_us, float temperature,
+                               uint8_t tof_err, uint8_t temp_err, uint8_t status);
 void ModBus_RxCallback(UART_HandleTypeDef *huart);
 void ModBus_RxByte(uint8_t byte);
 uint16_t ModBus_CRC16(const uint8_t *data, uint16_t length);
-
+void ModBus_TransmitFrame(uint8_t *frame, uint16_t len);
+void ModBus_PrepareForTransmit(void);  // Добавлен прототип
 #endif /* MODBUS_H */
