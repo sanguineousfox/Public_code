@@ -5,12 +5,46 @@
   * @brief          : Main program body
   * @description    : Система измерения времени пролёта магнитострикционного датчика
   *                   - Импульс: точно 10.00 мкс (54 итерации)
-  *                   - Период измерений: 10 секунд
+  *                   - Период измерений: загружается из конфигурации (по умолчанию 10 сек)
   *                   - Красный светодиод (PB13) горит 1 сек при захвате сигнала
   *                   - Добавлена поддержка I2C2: LM75B (температура) и AT24C02 (EEPROM)
+  *                   - ИСПРАВЛЕНО: Управление линией RS485 через PB0 с надёжным возвратом в приём
+  *                   - ДОБАВЛЕНО: Вывод параметров через Modbus с обработкой ошибок (FF при ошибках)
+  *                   - ДОБАВЛЕНО: Загрузка конфигурации из EEPROM при старте
+  *                   - ДОБАВЛЕНО: Сохранение конфигурации в EEPROM через Modbus (регистр 6 = 0xCAFE)
+  *
+  * РЕГИСТРЫ КОНФИГУРАЦИИ (Holding Registers, функция 0x03 / 0x06 / 0x10):
+  * ============================================================================
+  * Адрес | Назначение          | Диапазон / Значение     | Примечание
+  * ------|---------------------|-------------------------|-------------------
+  *   0   | Адрес устройства    | 1-247                   | Автоматически применяется
+  *   1   | Калибровка 24В      | 920 = 9.20              | Коэффициент × 100
+  *   2   | Калибровка 12В      | 460 = 4.60              | Коэффициент × 100
+  *   3   | Калибровка 5В       | 200 = 2.00              | Коэффициент × 100
+  *   4   | Таймаут TOF         | 10 = 10 мс              | Диапазон 1-1000 мс
+  *   5   | Период измерений    | 10000 = 10 сек          | Диапазон 1000-60000 мс
+  *   6   | Сохранить в EEPROM  | 51966 (0xCAFE)          | Запись этого значения сохраняет ВСЮ конфигурацию
+  * 7-8   | Счётчик загрузок    | Только чтение           | 32-битное значение (регистры 7=старшие, 8=младшие)
+  * ============================================================================
+  *
+  * РЕГИСТРЫ ИЗМЕРЕНИЙ (Input Registers, функция 0x04):
+  * ============================================================================
+  * Адрес | Назначение          | Формат                  | Примечание
+  * ------|---------------------|-------------------------|-------------------
+  *   0   | Напряжение 24В      | Значение × 10 (0.1 В)   | 0xFFFF = ошибка
+  *   1   | Напряжение 12В      | Значение × 10 (0.1 В)   | 0xFFFF = ошибка
+  *   2   | Напряжение 5В       | Значение × 10 (0.1 В)   | 0xFFFF = ошибка
+  *   3   | Напряжение VDDA     | Значение × 10 (0.1 В)   | 0xFFFF = ошибка
+  *   4   | Время пролёта       | Значение × 10 (0.1 мкс) | 0xFFFF = ошибка/таймаут
+  *   5   | Температура         | Значение × 10 (0.1 °C)  | 0xFFFF = ошибка датчика
+  *   6   | Статус измерения    | Бит 0: захват сигнала   | 1 = сигнал захвачен
+  *   7   | Счётчик измерений   | 16-битное значение      | Инкрементируется каждый цикл
+  * 8-9   | Временная метка     | 32-битное значение мс   | Регистры 8=старшие, 9=младшие
+  * ============================================================================
   ******************************************************************************
   */
 /* USER CODE END Header */
+
 
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
@@ -19,6 +53,7 @@
 #include "i2c_config.h"   /* I2C2: PB10=SCL, PB11=SDA */
 #include "lm75b.h"        /* Драйвер LM75B через I2C2 */
 #include "at24c02.h"      /* Драйвер AT24C02 через I2C2 */
+#include "modbus.h"       /* Для доступа к функциям обновления регистров с обработкой ошибок */
 #include <stdint.h>
 #include <string.h>
 #include <math.h>
@@ -66,12 +101,18 @@
 #define EEPROM_TEMP_ADDR 0x20                   // Адрес в EEPROM для сохранения температуры
 #define EEPROM_BOOT_COUNT_ADDR 0x00             // Адрес для счётчика загрузок
 
+/* ВАЖНО ДЛЯ RS485: Время паузы 3.5 символа для Modbus RTU (9600 бод) */
+#define MODBUS_SILENCE_TIME_MS 4  // 3.5 символа ≈ 4.0 мс при 9600 бод
+
+/* ПИН УПРАВЛЕНИЯ RS485 - ИСПОЛЬЗУЕМ PB0 (гарантированно рабочий пин без конфликтов) */
+#define RS485_CTRL_PIN  GPIO_PIN_0
+#define RS485_CTRL_PORT GPIOB
+
 /* Private variables ---------------------------------------------------------*/
 UART_HandleTypeDef huart1;  // Для ModBus (USART1)
 UART_HandleTypeDef huart2;  // Для отладки (USART2)
 ADC_HandleTypeDef hadc1;
 ADC_HandleTypeDef hadc2;
-// ВАЖНО: hi2c2 определён в i2c_config.c, здесь НЕ ОПРЕДЕЛЯЕМ!
 
 // Глобальные переменные для измерения времени пролёта
 volatile uint32_t tof_capture_value = 0;    // Значение захвата таймера
@@ -93,8 +134,70 @@ static uint8_t i2c_initialized = 0;         // I2C2 инициализирова
 static uint8_t lm75b_initialized = 0;       // LM75B обнаружен
 static uint8_t at24c02_initialized = 0;     // AT24C02 обнаружен
 
+// Флаги ошибок измерений (для вывода FF через Modbus)
+static uint8_t v24_error = 0;
+static uint8_t v12_error = 0;
+static uint8_t v5_error = 0;
+static uint8_t temp_error = 0;
+static uint8_t tof_error = 0;
+
 // Буфер для преобразования float в строку
 static char float_buffer[32];
+
+/* Глобальная переменная для управления линией RS-485 */
+volatile uint8_t modbus_tx_active = 0;  // 0 = приём, 1 = передача
+
+/* Вспомогательные макросы для управления линией ЧЕРЕЗ PB0 (режим Push-Pull) */
+#define RS485_SET_TRANSMIT()    HAL_GPIO_WritePin(RS485_CTRL_PORT, RS485_CTRL_PIN, GPIO_PIN_SET)   // PB0 = HIGH → передача
+#define RS485_SET_RECEIVE()     HAL_GPIO_WritePin(RS485_CTRL_PORT, RS485_CTRL_PIN, GPIO_PIN_RESET) // PB0 = LOW  → приём
+#define RS485_GET_STATE()       HAL_GPIO_ReadPin(RS485_CTRL_PORT, RS485_CTRL_PIN)
+
+/* ИСПРАВЛЕНА ЛОГИКА ПЕРЕДАЧИ: Надёжная функция с защитой от зависаний */
+void ModBus_TransmitFrame(uint8_t *frame, uint16_t len)
+{
+    if (len == 0) return;
+
+    /* ШАГ 1: Переключиться в режим ПЕРЕДАЧИ ДО отправки первого байта */
+    RS485_SET_TRANSMIT();
+    modbus_tx_active = 1;
+
+    /* Минимальная задержка для стабилизации драйвера RS485 (1-2 мкс) */
+    for (volatile int i = 0; i < 150; i++) __NOP();
+
+    /* ШАГ 2: Синхронная передача кадра (блокирующая) */
+    HAL_UART_Transmit(&huart1, frame, len, 1000);  // Таймаут 1000 мс
+
+    /* ШАГ 3: Дождаться ФИЗИЧЕСКОГО завершения передачи (последний стоп-бит ушёл в линию)
+       ИСПРАВЛЕНО: Используем правильный метод ожидания с таймаутом */
+    uint32_t timeout_start = HAL_GetTick();
+    while ((USART1->SR & USART_SR_TC) == 0) {
+        if (HAL_GetTick() - timeout_start > 50) {  // Таймаут 50 мс
+            USART2_Print("[RS485] ВНИМАНИЕ: Таймаут ожидания TC, принудительный возврат в приём\r\n");
+            break;
+        }
+    }
+
+    /* ШАГ 4: Пауза 3.5 символа для разделения кадров Modbus RTU */
+    HAL_Delay(MODBUS_SILENCE_TIME_MS);
+
+    /* ШАГ 5: Вернуться в режим ПРИЁМА */
+    RS485_SET_RECEIVE();
+    modbus_tx_active = 0;
+}
+
+/* Подготовка к передаче ModBus (совместимость с существующим драйвером) */
+void ModBus_PrepareForTransmit(void)
+{
+    /* Переключаемся в режим ПЕРЕДАЧИ */
+    RS485_SET_TRANSMIT();
+    modbus_tx_active = 1;
+
+    /* Минимальная задержка для стабилизации драйвера RS-485 (1-2 мкс) */
+    for (volatile int i = 0; i < 150; i++) __NOP();
+}
+
+/* USER CODE BEGIN 0 */
+/* USER CODE END 0 */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
@@ -150,6 +253,7 @@ int main(void)
             USART2_Print("[ИНИЦ] КРИТИЧЕСКАЯ ОШИБКА: LM75B НЕ НАЙДЕН!\r\n");
             USART2_Print("Проверьте подключение: SCL->PB10, SDA->PB11, VCC=3.3V, GND\r\n");
             USART2_Print("ВАЖНО: Установите подтяжки 4.7кОм от SCL/SDA к 3.3V!\r\n");
+            temp_error = 1;  // Помечаем ошибку датчика
         }
 
         /* Инициализация AT24C02 */
@@ -168,6 +272,7 @@ int main(void)
     } else {
         USART2_Print("[ИНИЦ] КРИТИЧЕСКАЯ ОШИБКА: I2C2 НЕ ИНИЦИАЛИЗИРОВАН!\r\n");
         USART2_Print("Проверьте конфигурацию тактирования и пины PB10/PB11\r\n");
+        temp_error = 1;  // Помечаем ошибку шины I2C
     }
     /* I2C2 / LM75B / AT24C02 */
 
@@ -181,6 +286,9 @@ int main(void)
         USART2_Print("[ИНИЦ] ADC1 откалиброван успешно\r\n");
     } else {
         USART2_Print("[ИНИЦ] Калибровка ADC1 НЕ УДАЛАСЬ!\r\n");
+        v24_error = 1;
+        v12_error = 1;
+        v5_error = 1;
     }
 
     USART2_Print("[ИНИЦ] Калибровка ADC2...\r\n");
@@ -189,6 +297,8 @@ int main(void)
         USART2_Print("[ИНИЦ] ADC2 откалиброван успешно\r\n");
     } else {
         USART2_Print("[ИНИЦ] Калибровка ADC2 НЕ УДАЛАСЬ!\r\n");
+        v12_error = 1;
+        v5_error = 1;
     }
 
     /* Инициализация ModBus */
@@ -196,6 +306,27 @@ int main(void)
 
     /* Задержка для стабилизации */
     HAL_Delay(1000);
+
+    /* === ТЕСТ РАБОТОСПОСОБНОСТИ ЛИНИИ УПРАВЛЕНИЯ RS-485 (PB0) === */
+    USART2_Print("\r\n[ТЕСТ] ПРОВЕРКА ЛИНИИ УПРАВЛЕНИЯ RS-485 (PB0)...\r\n");
+    USART2_Print("[ТЕСТ] Текущее состояние: PB0=");
+    USART2_PrintNum(RS485_GET_STATE());
+    USART2_Print(" (0=LOW/приём, 1=HIGH/передача)\r\n");
+
+    USART2_Print("[ТЕСТ] УСТАНАВЛИВАЕМ ЛИНИЮ = ПЕРЕДАЧА (лог. 1 = HIGH)...\r\n");
+    RS485_SET_TRANSMIT();  // PB0 = HIGH
+    HAL_Delay(500);
+    USART2_Print("[ТЕСТ] Состояние после передачи: PB0=");
+    USART2_PrintNum(RS485_GET_STATE());
+    USART2_Print("\r\n");
+
+    USART2_Print("[ТЕСТ] УСТАНАВЛИВАЕМ ЛИНИЮ = ПРИЁМ (лог. 0 = LOW)...\r\n");
+    RS485_SET_RECEIVE();  // PB0 = LOW
+    HAL_Delay(500);
+    USART2_Print("[ТЕСТ] Состояние после приёма: PB0=");
+    USART2_PrintNum(RS485_GET_STATE());
+    USART2_Print("\r\n");
+    /* === КОНЕЦ ТЕСТА === */
 
     /* Настройка приоритетов прерываний */
     HAL_NVIC_SetPriority(USART1_IRQn, 0, 0);
@@ -246,13 +377,20 @@ int main(void)
     USART2_Print("  PB12 (LED_BLUE):   выход, мигает (1 Гц)\r\n");
     USART2_Print("  PB10 (SCL):        I2C2\r\n");
     USART2_Print("  PB11 (SDA):        I2C2\r\n");
+    USART2_Print("  PB0  (RS485_CTRL): ST3485ECDR (0V=приём, 3.3V=передача) - ИСПРАВЛЕНО!\r\n");
     USART2_Print("========================================\r\n\r\n");
 
     /* Тестовое измерение напряжений при запуске */
     Read_All_Voltages();
+    ModBus_UpdateVoltages(current_vdda, current_24v, current_12v, current_5v,
+                          v24_error || v12_error || v5_error, v24_error, v12_error, v5_error);
+
     /* I2C2 / LM75B / AT24C02 */
     if (lm75b_initialized) {
         Read_Temperature();
+        float dummy_tof = 0.0f;
+        ModBus_UpdateMeasurements(dummy_tof, current_temperature,
+                                  1, temp_error, 0);  // TOF пока с ошибкой (не измеряли)
     }
     /* I2C2 / LM75B / AT24C02 */
 
@@ -297,8 +435,7 @@ int main(void)
     while (1)
     {
         /* Мигание синим светодиодом каждую секунду (индикация работы) */
-        if (HAL_GetTick() - last_debug_time >= 1000)
-        {
+        if (HAL_GetTick() - last_debug_time >= 1000) {
             last_debug_time = HAL_GetTick();
             blue_led_state = !blue_led_state;
             HAL_GPIO_WritePin(GPIOB, LED_BLUE_PIN, blue_led_state ? LED_BLUE_ON : LED_BLUE_OFF);
@@ -325,10 +462,12 @@ int main(void)
             HAL_GPIO_WritePin(GPIOB, LED_RED_PIN, LED_RED_OFF);
             red_led_state = 0;
             signal_captured = 0;
+            tof_error = 0;  // Сброс флага ошибки времени пролёта
 
             /* Шаг 1: Измерение напряжений */
             Read_All_Voltages();
-            ModBus_UpdateVoltages(current_vdda, current_24v, current_12v, current_5v);
+            ModBus_UpdateVoltages(current_vdda, current_24v, current_12v, current_5v,
+                                  v24_error || v12_error || v5_error, v24_error, v12_error, v5_error);
 
             /* Шаг 2: Измерение температуры */
             /* I2C2 / LM75B / AT24C02 */
@@ -347,27 +486,25 @@ int main(void)
             /* Шаг 3: Генерация импульса и измерение времени пролёта */
             uint32_t tof_ticks = measure_time_of_flight();
             float tof_us = tof_ticks * TOF_TICK_US;
-
-            /* Коррекция: вычитаем время импульса (10 мкс) */
-            if (tof_ticks > (10.0f / TOF_TICK_US)) {
-                tof_us -= 10.0f;
+            if (tof_ticks > 0 && !tof_timeout) {
+                if (tof_us > 10.0f) tof_us -= 10.0f;  // Коррекция ширины импульса
             }
 
-            float position_mm = (tof_us * 0.001f * SOUND_SPEED_MPS) / 2.0f;  // /2 так как туда-обратно
-
             /* Шаг 4: Индикация результата */
-            if (tof_ticks > 0 && tof_measurement_done) {
+            if (tof_ticks > 0 && tof_measurement_done && !tof_timeout) {
                 /* Сигнал успешно захвачен — зажечь красный светодиод на 1 секунду */
                 HAL_GPIO_WritePin(GPIOB, LED_RED_PIN, LED_RED_ON);
                 red_led_state = 1;
                 led_red_off_time = HAL_GetTick();  // Запомнить время включения
                 signal_captured = 1;
                 USART2_Print("[УСПЕХ] Сигнал захвачен на CLIK (PB1)!\r\n");
+                tof_error = 0;
             } else {
                 /* Сигнал НЕ захвачен — красный светодиод остаётся погашенным */
                 HAL_GPIO_WritePin(GPIOB, LED_RED_PIN, LED_RED_OFF);
                 red_led_state = 0;
                 signal_captured = 0;
+                tof_error = 1;  // Устанавливаем флаг ошибки
                 USART2_Print("[ОШИБКА] Сигнал НЕ захвачен на CLIK (PB1)!\r\n");
                 USART2_Print("Возможные причины:\r\n");
                 USART2_Print("  1. Слишком слабый сигнал на PB1 (< 2В)\r\n");
@@ -375,8 +512,9 @@ int main(void)
                 USART2_Print("  3. Прерывание не успевает сработать за 2 мкс\r\n");
             }
 
-            /* Обновление данных в ModBus (температура передаётся как 3-й параметр) */
-            ModBus_UpdateMeasurements(tof_us, position_mm, current_temperature, signal_captured ? 1 : 0);
+            /* Обновление данных в ModBus с обработкой ошибок */
+            ModBus_UpdateMeasurements(tof_us, current_temperature,
+                                      tof_error, temp_error, signal_captured ? 1 : 0);
 
             /* Вывод результатов */
             USART2_Print("\r\n--- РЕЗУЛЬТАТЫ ИЗМЕРЕНИЯ ---\r\n");
@@ -405,15 +543,28 @@ int main(void)
             }
             /* I2C2 / LM75B / AT24C02 */
 
-            print_tof_results(tof_ticks, tof_us, position_mm, signal_captured);
+            if (tof_ticks > 0 && !tof_timeout) {
+                float position_mm = (tof_us * 0.001f * SOUND_SPEED_MPS) / 2.0f;  // /2 так как туда-обратно
+                print_tof_results(tof_ticks, tof_us, position_mm, signal_captured);
+            } else {
+                print_tof_results(0, 0.0f, 0.0f, 0);
+            }
 
             /* Информация о следующем цикле */
             USART2_Print("\r\nСледующий цикл измерения через 10 секунд...\r\n");
             USART2_Print("========================================\r\n");
         }
 
-        /* Обработка ModBus */
+        /* Обрабатываем входящие запросы ModBus */
         ModBus_Process();
+
+        /* ЗАЩИТА: Если передача зависла более чем на 100 мс — принудительно возвращаем в приём */
+        if (modbus_tx_active && (HAL_GetTick() - last_measure_time > 100)) {
+            USART2_Print("[RS485] АВАРИЙНЫЙ ВОЗВРАТ В ПРИЁМ (зависла передача)\r\n");
+            RS485_SET_RECEIVE();
+            modbus_tx_active = 0;
+        }
+
         HAL_Delay(1);
     }
 }
@@ -426,6 +577,17 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
     if (huart->Instance == USART1) {
         ModBus_RxCallback(huart);
     }
+}
+
+/**
+  * @brief  Callback завершения передачи UART - НЕ ИСПОЛЬЗУЕТСЯ ДЛЯ УПРАВЛЕНИЯ ЛИНИЕЙ!
+  *         Управление линией происходит в ModBus_TransmitFrame()
+  */
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
+{
+    /* НЕ ПЕРЕКЛЮЧАЕМ ЛИНИЮ ЗДЕСЬ!
+       Этот колбэк вызывается ДО завершения физической передачи последнего стоп-бита.
+       Переключение линии происходит в ModBus_TransmitFrame() после ожидания флага TC */
 }
 
 /**
@@ -468,7 +630,6 @@ void TIM3_InputCapture_Init(void)
 
 /**
   * @brief  КРИТИЧЕСКИ ВАЖНО: Таймер запускается ДО генерации импульса!
-  *         Это позволяет захватить очень короткие задержки (2 мкс)
   */
 void generate_pulse_and_measure(void)
 {
@@ -531,17 +692,17 @@ uint32_t measure_time_of_flight(void)
 void print_tof_results(uint32_t tof_ticks, float tof_us, float position_mm, uint8_t captured)
 {
     USART2_Print("Время пролёта: ");
-    if (captured) {
+    if (captured && tof_ticks > 0) {
         float_to_str(tof_us, float_buffer, 2);
         USART2_Print(float_buffer);
         USART2_Print(" мкс (");
         USART2_PrintNum(tof_ticks);
         USART2_Print(" тиков)\r\n");
     } else {
-        USART2_Print("НЕ ИЗМЕРЕНО (таймаут)\r\n");
+        USART2_Print("НЕ ИЗМЕРЕНО (таймаут/ошибка)\r\n");
     }
 
-    if (captured) {
+    if (captured && tof_ticks > 0) {
         USART2_Print("Положение магнита: ");
         float_to_str(position_mm, float_buffer, 1);
         USART2_Print(float_buffer);
@@ -557,12 +718,16 @@ void Read_Temperature(void)
 {
     if (!lm75b_initialized || !i2c_initialized) {
         current_temperature = -127.0f;  // Специальное значение ошибки
+        temp_error = 1;
         return;
     }
 
     if (LM75B_ReadTemperature(LM75B_ADDR, &current_temperature) != HAL_OK) {
         current_temperature = -127.0f;
+        temp_error = 1;
         USART2_Print("[I2C] ОШИБКА: Не удалось прочитать температуру!\r\n");
+    } else {
+        temp_error = 0;
     }
 }
 
@@ -654,6 +819,9 @@ uint32_t Read_ADC_Average(ADC_HandleTypeDef* hadc, uint32_t channel, uint32_t sa
 void Read_All_Voltages(void)
 {
     if (!adc1_initialized || !adc2_initialized) {
+        v24_error = 1;
+        v12_error = 1;
+        v5_error = 1;
         USART2_Print("[ADC] ОШИБКА: ADC не инициализирован!\r\n");
         return;
     }
@@ -682,8 +850,10 @@ void Read_All_Voltages(void)
     if (adc_raw_24v > 100 && adc_raw_24v < 4000) {
         float adc_voltage = (float)adc_raw_24v * current_vdda / 4095.0f;
         current_24v = adc_voltage * DIV_24V_FACTOR;
+        v24_error = 0;
     } else {
         current_24v = 24.0f;
+        v24_error = 1;
     }
 
     /* --- 12В (PA1, ADC2) --- */
@@ -691,8 +861,10 @@ void Read_All_Voltages(void)
     if (adc_raw_12v > 100 && adc_raw_12v < 4000) {
         float adc_voltage = (float)adc_raw_12v * current_vdda / 4095.0f;
         current_12v = adc_voltage * DIV_12V_FACTOR;
+        v12_error = 0;
     } else {
         current_12v = 12.0f;
+        v12_error = 1;
     }
 
     /* --- 5В (PA5, ADC2) --- */
@@ -700,8 +872,10 @@ void Read_All_Voltages(void)
     if (adc_raw_5v > 100 && adc_raw_5v < 4000) {
         float adc_voltage = (float)adc_raw_5v * current_vdda / 4095.0f;
         current_5v = adc_voltage * DIV_5V_FACTOR;
+        v5_error = 0;
     } else {
         current_5v = 5.0f;
+        v5_error = 1;
     }
 }
 
@@ -809,7 +983,7 @@ static void MX_GPIO_Init(void)
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
     HAL_GPIO_WritePin(GPIOB, LED_RED_PIN, LED_RED_OFF);  // Изначально ВЫКЛ
 
-    /* Настройка синего светодиода на PB12 (мигает для индикации работы) */
+    /* Настройка синего светодиода на PB12 */
     GPIO_InitStruct.Pin = LED_BLUE_PIN;
     GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
@@ -819,6 +993,14 @@ static void MX_GPIO_Init(void)
 
     /* ВАЖНО: Питание 5В постоянно ВКЛЮЧЕНО (низкий уровень на PB6) */
     HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, POWER_5V_ON);  // LOW = питание ВКЛ
+
+    /* Настройка линии управления RS485 ЧЕРЕЗ PB0 (гарантированно рабочий пин) */
+    GPIO_InitStruct.Pin = RS485_CTRL_PIN;  // PB0
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;  // Push-Pull (обычный выход)
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    HAL_GPIO_Init(RS485_CTRL_PORT, &GPIO_InitStruct);
+    HAL_GPIO_WritePin(RS485_CTRL_PORT, RS485_CTRL_PIN, GPIO_PIN_RESET);  // Начальное состояние: приём (LOW)
 
     /* Настройка USART1 (PA9-TX, PA10-RX) */
     GPIO_InitStruct.Pin = GPIO_PIN_9;
@@ -950,3 +1132,22 @@ void Error_Handler(void)
         HAL_Delay(200);
     }
 }
+
+/* USER CODE END 4 */
+
+#ifdef  USE_FULL_ASSERT
+/**
+  * @brief  Reports the name of the source file and the source line number
+  *         where the assert_param error has occurred.
+  * @param  file: pointer to the source file name
+  * @param  line: assert_param error line source number
+  * @retval None
+  */
+void assert_failed(uint8_t *file, uint32_t line)
+{
+  /* USER CODE BEGIN 6 */
+  /* User can add his own implementation to report the file name and line number,
+     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+  /* USER CODE END 6 */
+}
+#endif /* USE_FULL_ASSERT */
