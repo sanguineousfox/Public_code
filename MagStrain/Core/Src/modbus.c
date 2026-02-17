@@ -1,52 +1,3 @@
-/* USER CODE BEGIN Header */
-/**
-  ******************************************************************************
-  * @file           : main.c
-  * @brief          : Main program body
-  * @description    : Система измерения времени пролёта магнитострикционного датчика
-  *                   - Импульс: точно 10.00 мкс (54 итерации)
-  *                   - Период измерений: загружается из конфигурации (по умолчанию 10 сек)
-  *                   - Красный светодиод (PB13) горит 1 сек при захвате сигнала
-  *                   - Добавлена поддержка I2C2: LM75B (температура) и AT24C02 (EEPROM)
-  *                   - ИСПРАВЛЕНО: Управление линией RS485 через PB0 с надёжным возвратом в приём
-  *                   - ДОБАВЛЕНО: Вывод параметров через Modbus с обработкой ошибок (FF при ошибках)
-  *                   - ДОБАВЛЕНО: Загрузка конфигурации из EEPROM при старте
-  *                   - ДОБАВЛЕНО: Сохранение конфигурации в EEPROM через Modbus (регистр 6 = 0xCAFE)
-  *
-  * РЕГИСТРЫ КОНФИГУРАЦИИ (Holding Registers, функция 0x03 / 0x06 / 0x10):
-  * ============================================================================
-  * Адрес | Назначение          | Диапазон / Значение     | Примечание
-  * ------|---------------------|-------------------------|-------------------
-  *   0   | Адрес устройства    | 1-247                   | Автоматически применяется
-  *   1   | Калибровка 24В      | 920 = 9.20              | Коэффициент × 100
-  *   2   | Калибровка 12В      | 460 = 4.60              | Коэффициент × 100
-  *   3   | Калибровка 5В       | 200 = 2.00              | Коэффициент × 100
-  *   4   | Таймаут TOF         | 10 = 10 мс              | Диапазон 1-1000 мс
-  *   5   | Период измерений    | 10000 = 10 сек          | Диапазон 1000-60000 мс
-  *   6   | Сохранить в EEPROM  | 51966 (0xCAFE)          | Запись этого значения сохраняет ВСЮ конфигурацию
-  * 7-8   | Счётчик загрузок    | Только чтение           | 32-битное значение (регистры 7=старшие, 8=младшие)
-  * ============================================================================
-  *
-  * РЕГИСТРЫ ИЗМЕРЕНИЙ (Input Registers, функция 0x04):
-  * ============================================================================
-  * Адрес | Назначение          | Формат                  | Примечание
-  * ------|---------------------|-------------------------|-------------------
-  *   0   | Напряжение 24В      | Значение × 10 (0.1 В)   | 0xFFFF = ошибка
-  *   1   | Напряжение 12В      | Значение × 10 (0.1 В)   | 0xFFFF = ошибка
-  *   2   | Напряжение 5В       | Значение × 10 (0.1 В)   | 0xFFFF = ошибка
-  *   3   | Напряжение VDDA     | Значение × 10 (0.1 В)   | 0xFFFF = ошибка
-  *   4   | Время пролёта       | Значение × 10 (0.1 мкс) | 0xFFFF = ошибка/таймаут
-  *   5   | Температура         | Значение × 10 (0.1 °C)  | 0xFFFF = ошибка датчика
-  *   6   | Статус измерения    | Бит 0: захват сигнала   | 1 = сигнал захвачен
-  *   7   | Счётчик измерений   | 16-битное значение      | Инкрементируется каждый цикл
-  * 8-9   | Временная метка     | 32-битное значение мс   | Регистры 8=старшие, 9=младшие
-  * ============================================================================
-  ******************************************************************************
-  */
-/* USER CODE END Header */
-
-
-
 #include "modbus.h"
 #include "main.h"
 #include "utils.h"
@@ -76,9 +27,8 @@ static ModBus_Struct modbus;
 
 /* Внешние переменные -----------------------------------------------------*/
 extern UART_HandleTypeDef huart1;
-extern volatile uint8_t modbus_tx_active;  // Флаг состояния передачи из main.c
 
-/* Вспомогательная функция для преобразования числа в строку */
+/* Вспомогательная функция для преобразования числа в строку в modbus.c */
 static void modbus_uint32_to_str(uint32_t value, char* buffer)
 {
     if (value == 0) {
@@ -136,13 +86,23 @@ static void ModBus_SendException(uint8_t function, uint8_t exception_code)
     response[3] = crc & 0xFF;
     response[4] = (crc >> 8) & 0xFF;
 
+    // Вывод ответа в формате QModMaster
     USART2_PrintModBusResponse(response, 5);
 
-    if (!modbus_tx_active) {
-        ModBus_PrepareForTransmit();
-    }
-
     HAL_UART_Transmit(&huart1, response, 5, 200);
+}
+
+/* Преобразование float в два регистра ------------------------------------*/
+static void FloatToRegisters(float value, uint16_t *reg_high, uint16_t *reg_low)
+{
+    union {
+        float f;
+        uint32_t u32;
+    } converter;
+
+    converter.f = value;
+    *reg_high = (converter.u32 >> 16) & 0xFFFF;
+    *reg_low = converter.u32 & 0xFFFF;
 }
 
 /* Чтение holding регистров (функция 0x03) --------------------------------*/
@@ -181,11 +141,8 @@ static void ModBus_ReadHoldingRegisters(uint16_t start_addr, uint16_t reg_count)
     response[index++] = crc & 0xFF;
     response[index++] = (crc >> 8) & 0xFF;
 
+    // Вывод ответа в формате QModMaster
     USART2_PrintModBusResponse(response, index);
-
-    if (!modbus_tx_active) {
-        ModBus_PrepareForTransmit();
-    }
 
     HAL_UART_Transmit(&huart1, response, index, 200);
 }
@@ -226,11 +183,8 @@ static void ModBus_ReadInputRegisters(uint16_t start_addr, uint16_t reg_count)
     response[index++] = crc & 0xFF;
     response[index++] = (crc >> 8) & 0xFF;
 
+    // Вывод ответа в формате QModMaster
     USART2_PrintModBusResponse(response, index);
-
-    if (!modbus_tx_active) {
-        ModBus_PrepareForTransmit();
-    }
 
     HAL_UART_Transmit(&huart1, response, index, 200);
 }
@@ -243,8 +197,10 @@ static void ModBus_WriteSingleRegister(uint16_t reg_addr, uint16_t value)
         return;
     }
 
+    // Записываем значение в регистр
     modbus.holding_regs[reg_addr] = value;
 
+    // Если изменился адрес устройства, обновляем его
     if (reg_addr == HOLD_DEVICE_ADDR) {
         uint8_t new_addr = (uint8_t)(value & 0xFF);
         if (new_addr >= 1 && new_addr <= 247) {
@@ -257,6 +213,7 @@ static void ModBus_WriteSingleRegister(uint16_t reg_addr, uint16_t value)
         }
     }
     
+    // Отправляем ответ (эхо запроса)
     uint8_t response[8];
     uint16_t index = 0;
 
@@ -271,11 +228,8 @@ static void ModBus_WriteSingleRegister(uint16_t reg_addr, uint16_t value)
     response[index++] = crc & 0xFF;
     response[index++] = (crc >> 8) & 0xFF;
 
+    // Вывод ответа в формате QModMaster
     USART2_PrintModBusResponse(response, index);
-
-    if (!modbus_tx_active) {
-        ModBus_PrepareForTransmit();
-    }
 
     HAL_UART_Transmit(&huart1, response, index, 200);
 }
@@ -298,10 +252,12 @@ static void ModBus_WriteMultipleRegisters(uint16_t start_addr, uint16_t reg_coun
         return;
     }
 
+    // Записываем данные в регистры
     for(uint16_t i = 0; i < reg_count; i++) {
         uint16_t value = (data[i*2] << 8) | data[i*2 + 1];
         modbus.holding_regs[start_addr + i] = value;
 
+        // Если изменился адрес устройства (регистр 0), обновляем его
         if ((start_addr + i) == HOLD_DEVICE_ADDR) {
             uint8_t new_addr = (uint8_t)(value & 0xFF);
             if (new_addr >= 1 && new_addr <= 247) {
@@ -315,6 +271,7 @@ static void ModBus_WriteMultipleRegisters(uint16_t start_addr, uint16_t reg_coun
         }
     }
 
+    // Отправляем ответ
     uint8_t response[8];
     uint16_t index = 0;
 
@@ -329,11 +286,8 @@ static void ModBus_WriteMultipleRegisters(uint16_t start_addr, uint16_t reg_coun
     response[index++] = crc & 0xFF;
     response[index++] = (crc >> 8) & 0xFF;
 
+    // Вывод ответа в формате QModMaster
     USART2_PrintModBusResponse(response, index);
-
-    if (!modbus_tx_active) {
-        ModBus_PrepareForTransmit();
-    }
 
     HAL_UART_Transmit(&huart1, response, index, 200);
 }
@@ -347,6 +301,7 @@ static void ModBus_ProcessFrame(void)
         return;
     }
 
+    // Проверяем CRC
     uint16_t received_crc = (modbus.rx_buffer[modbus.rx_index - 1] << 8) |
                            modbus.rx_buffer[modbus.rx_index - 2];
     uint16_t calculated_crc = ModBus_CRC16(modbus.rx_buffer, modbus.rx_index - 2);
@@ -358,14 +313,17 @@ static void ModBus_ProcessFrame(void)
         return;
     }
 
+    // Проверяем адрес устройства
     uint8_t device_addr = modbus.rx_buffer[0];
     if (device_addr != modbus.device_address && device_addr != 0) {
         modbus.rx_index = 0;
         return;
     }
 
+    // Выводим принятую команду в формате как в QModMaster
     USART2_PrintModBusCommand(modbus.rx_buffer, modbus.rx_index);
 
+    // Обработка в зависимости от функции
     switch(modbus.rx_buffer[1]) {
         case MODBUS_READ_HOLDING_REGISTERS:
             if (modbus.rx_index >= 8) {
@@ -397,8 +355,9 @@ static void ModBus_ProcessFrame(void)
                 uint16_t reg_count = (modbus.rx_buffer[4] << 8) | modbus.rx_buffer[5];
                 uint8_t byte_count = modbus.rx_buffer[6];
 
+                // Проверяем соответствие количества байт
                 if (byte_count == reg_count * 2 &&
-                    modbus.rx_index == 7 + byte_count + 2) {
+                    modbus.rx_index == 7 + byte_count + 2) { // +2 для CRC
                     ModBus_WriteMultipleRegisters(start_addr, reg_count,
                                                  &modbus.rx_buffer[7]);
                 } else {
@@ -420,6 +379,7 @@ static void ModBus_ProcessFrame(void)
 /* Инициализация ModBus ---------------------------------------------------*/
 void ModBus_Init(void)
 {
+    // Инициализация ModBus структуры
     memset(&modbus, 0, sizeof(modbus));
     modbus.device_address = MODBUS_DEFAULT_ADDRESS;
     modbus.rx_active = 1;
@@ -428,20 +388,30 @@ void ModBus_Init(void)
     modbus.rx_byte_count = 0;
     modbus.last_byte_time = HAL_GetTick();
 
+    // Инициализация holding регистров нулями
     for (int i = 0; i < HOLD_HOLDING_REG_COUNT; i++) {
         modbus.holding_regs[i] = 0;
     }
 
+    // Установка начальных значений регистров
     modbus.holding_regs[HOLD_DEVICE_ADDR] = MODBUS_DEFAULT_ADDRESS;
     modbus.holding_regs[HOLD_BAUDRATE] = MODBUS_BAUDRATE;
     modbus.holding_regs[HOLD_PARITY] = 0;
     modbus.holding_regs[HOLD_STOP_BITS] = 1;
 
-    // Инициализация регистров ошибками по умолчанию (FFFF)
-    for (int i = 0; i < REG_INPUT_REG_COUNT; i++) {
-        modbus.input_regs[i] = 0xFFFF;
-    }
+    // Настройка начальных значений input регистров
+    FloatToRegisters(3.3f, &modbus.input_regs[REG_VDDA_HIGH], &modbus.input_regs[REG_VDDA_LOW]);
+    FloatToRegisters(24.0f, &modbus.input_regs[REG_24V_HIGH], &modbus.input_regs[REG_24V_LOW]);
+    FloatToRegisters(12.0f, &modbus.input_regs[REG_12V_HIGH], &modbus.input_regs[REG_12V_LOW]);
+    FloatToRegisters(5.0f, &modbus.input_regs[REG_5V_HIGH], &modbus.input_regs[REG_5V_LOW]);
 
+    // Установка значений по умолчанию для измерений
+    modbus.input_regs[REG_STATUS] = 0;
+    modbus.input_regs[REG_COUNTER] = 0;
+    modbus.input_regs[REG_TIMESTAMP_HIGH] = 0;
+    modbus.input_regs[REG_TIMESTAMP_LOW] = 0;
+
+    // Запуск приема по прерыванию
     HAL_UART_Receive_IT(&huart1, &modbus.rx_byte, 1);
 
     USART2_Print("[MODBUS] ModBus initialized\r\n");
@@ -452,8 +422,8 @@ void ModBus_Init(void)
     USART2_Print(", Baudrate: ");
     modbus_uint32_to_str(MODBUS_BAUDRATE, num_str);
     USART2_Print(num_str);
-    USART2_Print(", Input registers: ");
-    modbus_uint32_to_str(REG_INPUT_REG_COUNT, num_str);
+    USART2_Print(", Holding registers: ");
+    modbus_uint32_to_str(HOLD_HOLDING_REG_COUNT, num_str);
     USART2_Print(num_str);
     USART2_Print("\r\n");
 }
@@ -462,7 +432,10 @@ void ModBus_Init(void)
 void ModBus_RxCallback(UART_HandleTypeDef *huart)
 {
     if (huart->Instance == USART1) {
+        // Вызываем обработку принятого байта
         ModBus_RxByte(modbus.rx_byte);
+
+        // Запускаем прием следующего байта
         HAL_UART_Receive_IT(&huart1, &modbus.rx_byte, 1);
     }
 }
@@ -472,20 +445,26 @@ void ModBus_RxByte(uint8_t byte)
 {
     uint32_t current_time = HAL_GetTick();
 
+    // Проверяем межкадровый интервал (3.5 символа при 9600 бод ~ 4 мс)
     if (current_time - modbus.last_byte_time > MODBUS_INTER_FRAME_TIMEOUT_MS) {
+        // Новый фрейм, сбрасываем буфер
         modbus.rx_index = 0;
     }
     modbus.last_byte_time = current_time;
 
+    // Проверяем, что прием активен и есть место в буфере
     if (modbus.rx_active && modbus.rx_index < MODBUS_BUFFER_SIZE) {
+        // Сохраняем принятый байт
         modbus.rx_buffer[modbus.rx_index] = byte;
         modbus.rx_index++;
 
+        // Если индекс превысил размер буфера, сбрасываем
         if (modbus.rx_index >= MODBUS_BUFFER_SIZE) {
             modbus.rx_index = 0;
             modbus.rx_error = 1;
         }
     } else {
+        // Переполнение буфера
         modbus.rx_error = 1;
         modbus.rx_index = 0;
     }
@@ -497,34 +476,37 @@ void ModBus_Process(void)
     static uint32_t last_process_time = 0;
     uint32_t current_time = HAL_GetTick();
 
+    // Обработка не чаще чем раз в 10 мс
     if (current_time - last_process_time < 10) {
         return;
     }
     last_process_time = current_time;
 
+    // Если принят хотя бы 1 байт и прошло время таймаута, обрабатываем фрейм
     if (modbus.rx_index > 0 && (current_time - modbus.last_byte_time > MODBUS_RESPONSE_TIMEOUT_MS)) {
+        // Принудительная обработка фрейма
         ModBus_ProcessFrame();
     }
 }
 
-/* Обновление данных напряжений с обработкой ошибок ------------------------*/
-void ModBus_UpdateVoltages(float vdda, float v24, float v12, float v5,
-                           uint8_t vdda_err, uint8_t v24_err, uint8_t v12_err, uint8_t v5_err)
+/* Обновление данных напряжений -------------------------------------------*/
+void ModBus_UpdateVoltages(float vdda, float v24, float v12, float v5)
 {
-    modbus.input_regs[REG_24V] = v24_err ? 0xFFFF : (uint16_t)(v24 * 10.0f + 0.5f);
-    modbus.input_regs[REG_12V] = v12_err ? 0xFFFF : (uint16_t)(v12 * 10.0f + 0.5f);
-    modbus.input_regs[REG_5V] = v5_err ? 0xFFFF : (uint16_t)(v5 * 10.0f + 0.5f);
-    modbus.input_regs[REG_VDDA] = vdda_err ? 0xFFFF : (uint16_t)(vdda * 10.0f + 0.5f);
+    FloatToRegisters(vdda, &modbus.input_regs[REG_VDDA_HIGH], &modbus.input_regs[REG_VDDA_LOW]);
+    FloatToRegisters(v24, &modbus.input_regs[REG_24V_HIGH], &modbus.input_regs[REG_24V_LOW]);
+    FloatToRegisters(v12, &modbus.input_regs[REG_12V_HIGH], &modbus.input_regs[REG_12V_LOW]);
+    FloatToRegisters(v5, &modbus.input_regs[REG_5V_HIGH], &modbus.input_regs[REG_5V_LOW]);
 }
 
-/* Обновление данных измерений с обработкой ошибок -------------------------*/
-void ModBus_UpdateMeasurements(float tof_us, float temperature,
-                               uint8_t tof_err, uint8_t temp_err, uint8_t status)
+/* Обновление данных измерений --------------------------------------------*/
+void ModBus_UpdateMeasurements(float p1, float p2, float freq, uint8_t status)
 {
     static uint16_t counter = 0;
 
-    modbus.input_regs[REG_TOF] = tof_err ? 0xFFFF : (uint16_t)(tof_us * 10.0f + 0.5f);
-    modbus.input_regs[REG_TEMPERATURE] = temp_err ? 0xFFFF : (uint16_t)(temperature * 10.0f + 0.5f);
+    FloatToRegisters(p1, &modbus.input_regs[REG_PERIOD1_HIGH], &modbus.input_regs[REG_PERIOD1_LOW]);
+    FloatToRegisters(p2, &modbus.input_regs[REG_PERIOD2_HIGH], &modbus.input_regs[REG_PERIOD2_LOW]);
+    FloatToRegisters(freq, &modbus.input_regs[REG_FREQ_HIGH], &modbus.input_regs[REG_FREQ_LOW]);
+
     modbus.input_regs[REG_STATUS] = status;
     modbus.input_regs[REG_COUNTER] = counter++;
     if (counter > 65535) counter = 0;
