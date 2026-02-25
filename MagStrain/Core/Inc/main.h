@@ -7,18 +7,16 @@ extern "C" {
 
 /* Includes ------------------------------------------------------------------*/
 #include "stm32f1xx_hal.h"
-#include "modbus.h"
+
+/* ВАЖНО: УБРАТЬ #include "modbus.h" отсюда! */
+/* modbus.h должен включать main.h, а не наоборот */
 
 /* Exported functions prototypes ---------------------------------------------*/
 void Error_Handler(void);
 void USART2_Print(const char* str);
 void uint32_to_dec_str(uint32_t value, char* buffer);
-void float_to_str(float value, char* buffer, int decimals);
 void USART2_PrintHexByte(uint8_t byte);
 void USART2_PrintHexBuffer(const uint8_t* buffer, uint16_t length);
-void USART2_PrintModBusCommand(const uint8_t* data, uint16_t length);
-void USART2_PrintModBusResponse(const uint8_t* data, uint16_t length);
-void ModBus_DebugFrame(const uint8_t* frame, uint16_t length, const char* prefix);
 
 /* Private defines -----------------------------------------------------------*/
 #define Read_24V_Pin GPIO_PIN_0
@@ -42,9 +40,17 @@ void ModBus_DebugFrame(const uint8_t* frame, uint16_t length, const char* prefix
 #define Switch_In_impuls_Pin GPIO_PIN_7
 #define Switch_In_impuls_GPIO_Port GPIOB
 
+/* ==========================================================================
+ * ВАЖНО: Объявления внешних переменных должны быть ЗДЕСЬ (перед #endif)
+ * ========================================================================== */
+extern UART_HandleTypeDef huart1;
+extern UART_HandleTypeDef huart2;
+extern ADC_HandleTypeDef hadc1;
+extern ADC_HandleTypeDef hadc2;
+extern TIM_HandleTypeDef htim4;
+
 #ifdef __cplusplus
 }
 #endif
 
 #endif /* __MAIN_H */
-extern TIM_HandleTypeDef htim4;

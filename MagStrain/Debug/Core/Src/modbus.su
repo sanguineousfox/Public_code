@@ -1,0 +1,13 @@
+../Core/Src/modbus.c:24:10:ModBus_CRC16	24	static
+../Core/Src/modbus.c:41:13:ModBus_SendException	24	static
+../Core/Src/modbus.c:56:13:FloatToRegisters	32	static
+../Core/Src/modbus.c:68:13:ModBus_ReadHoldingRegisters	280	static
+../Core/Src/modbus.c:103:13:ModBus_ReadInputRegisters	280	static
+../Core/Src/modbus.c:138:13:ModBus_WriteSingleRegister	32	static
+../Core/Src/modbus.c:164:13:ModBus_ProcessFrame	32	static
+../Core/Src/modbus.c:223:6:ModBus_Init	16	static
+../Core/Src/modbus.c:253:6:ModBus_RxCallback	24	static
+../Core/Src/modbus.c:275:6:ModBus_Process	16	static
+../Core/Src/modbus.c:288:6:ModBus_UpdateVoltages	24	static
+../Core/Src/modbus.c:297:6:ModBus_UpdateMeasurements	24	static
+../Core/Src/modbus.c:305:6:ModBus_UpdateFirmwareVersion	16	static

@@ -27,8 +27,7 @@ Core/Src/at24c02.o: ../Core/Src/at24c02.c ../Core/Inc/at24c02.h \
  ../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_tim.h \
  ../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_tim_ex.h \
  ../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_uart.h \
- ../Core/Inc/i2c_config.h ../Core/Inc/main.h ../Core/Inc/modbus.h \
- ../Core/Inc/utils.h
+ ../Core/Inc/i2c_config.h ../Core/Inc/main.h
 ../Core/Inc/at24c02.h:
 ../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal.h:
 ../Core/Inc/stm32f1xx_hal_conf.h:
@@ -60,5 +59,3 @@ Core/Src/at24c02.o: ../Core/Src/at24c02.c ../Core/Inc/at24c02.h \
 ../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_uart.h:
 ../Core/Inc/i2c_config.h:
 ../Core/Inc/main.h:
-../Core/Inc/modbus.h:
-../Core/Inc/utils.h:

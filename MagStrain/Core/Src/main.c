@@ -1,19 +1,10 @@
 /* USER CODE BEGIN Header */
 /**
-******************************************************************************
-* @file           : main.c
-* @brief          : Main program body
-* @description    : Адаптация под документацию ПМП-201Е (СЕНС.421411.028 РЭ)
-*                   - Измерение уровня через магнитострикцию
-*                   - Генерация импульса на PB5 (Gen_Impuls)
-*                   - Управление транзисторами через PB7 (Switch_In_impuls):
-*                     * Перед импульсом: выключить (LOW)
-*                     * Через 15-20 мкс после импульса: включить (HIGH)
-*                     * Удерживать включённым минимум 500 мкс (или вычисленное время прохождения сигнала по волноводу)
-*                     * Непосредственно перед повторной отправкой: выключить (LOW)
-*                   - PB1 всегда в режиме входа (захват времени пролёта)
-******************************************************************************
-*/
+  ******************************************************************************
+  * @file           : main.c
+  * @brief          : Main program body
+  ******************************************************************************
+  */
 /* USER CODE END Header */
 
 #include "main.h"
@@ -24,7 +15,6 @@
 #include "modbus.h"
 #include <stdint.h>
 #include <string.h>
-#include <math.h>
 
 /* Private define ------------------------------------------------------------*/
 #define TIMER_CLOCK_HZ      72000000.0f
@@ -35,60 +25,59 @@
 #define DIV_24V_FACTOR      9.2f
 #define DIV_12V_FACTOR      4.6f
 #define DIV_5V_FACTOR       2.0f
-#define PULSE_WIDTH_US      10
-#define PULSE_PERIOD_MS     10000
+#define PULSE_PERIOD_MS     1000
 #define SOUND_SPEED_MPS     2800.0f
 #define TOF_TICK_US         (1000000.0f / (TIMER_CLOCK_HZ / 7.0f))
-#define LED_RED_ON          GPIO_PIN_SET
-#define LED_RED_OFF         GPIO_PIN_RESET
-#define LED_BLUE_ON         GPIO_PIN_SET
-#define LED_BLUE_OFF        GPIO_PIN_RESET
 #define LED_RED_PIN         GPIO_PIN_13
 #define LED_BLUE_PIN        GPIO_PIN_12
 #define LED_RED_ON_TIME_MS  1000
 #define PULSE_DELAY_ITERATIONS 45
-#define SWITCH_PIN          GPIO_PIN_7    // PB7 - управление транзисторами (Switch_In_impuls)
+#define SWITCH_PIN          GPIO_PIN_7
 #define SWITCH_PORT         GPIOB
-#define DELAY_AFTER_PULSE_ITER  97        // 18 мкс (15-20 мкс после импульса)
-// Минимальное время удержания транзистора закрытым (500 мкс = 2700 итераций при 72 МГц)
-// Используем вычисляемое значение на основе длины волновода
-#define WAVEGUIDE_LENGTH_MM 6000          // Длина волновода в мм (настраивается)
-#define SWITCH_HOLD_ITERATIONS ((WAVEGUIDE_LENGTH_MM * 1931) / 1000)  // Масштабируем для компиляции
-// #define SWITCH_HOLD_ITERATIONS 965   // Для 500 мм (0.179 мс)
-// #define SWITCH_HOLD_ITERATIONS 1931  // Для 1000 мм (0.358 мс)
-// #define SWITCH_HOLD_ITERATIONS 3862  // Для 2000 мм (0.716 мс)
-// #define SWITCH_HOLD_ITERATIONS 5793  // Для 3000 мм (1.07 мс)
-// #define SWITCH_HOLD_ITERATIONS 7724  // Для 4000 мм (1.43 мс)
-// #define SWITCH_HOLD_ITERATIONS 9655  // Для 5000 мм (1.79 мс)
-// #define SWITCH_HOLD_ITERATIONS 11586 // Для 6000 мм (2.14 мс)
-#define SWITCH_HOLD_ITERATIONS 12000  // 2.22 мс (достаточно для 6000 мм)
-/* ПРИМЕЧАНИЕ: ДЛЯ ДЛИНЫ ВОЛНОВОДА 6000 мм ВРЕМЯ ПРОХОЖДЕНИЯ = 2.14 мс */
+#define DELAY_AFTER_PULSE_ITER  97
+#define WAVEGUIDE_LENGTH_MM 6000
+#define SWITCH_HOLD_ITERATIONS 12000
 #define MODBUS_SILENCE_TIME_MS 4
 #define RS485_CTRL_PIN      GPIO_PIN_0
 #define RS485_CTRL_PORT     GPIOB
 #define FIRMWARE_VERSION    100
+
+#define LED_RED_ON          GPIO_PIN_SET
+#define LED_RED_OFF         GPIO_PIN_RESET
+#define LED_BLUE_ON         GPIO_PIN_SET
+#define LED_BLUE_OFF        GPIO_PIN_RESET
 
 /* Private variables ---------------------------------------------------------*/
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 ADC_HandleTypeDef hadc1;
 ADC_HandleTypeDef hadc2;
+
 volatile uint32_t tof_capture_value = 0;
 volatile uint8_t tof_measurement_done = 0;
 volatile uint8_t tof_timeout = 0;
 volatile uint8_t signal_captured = 0;
+
+/* Текущие значения */
 static float current_vdda = 3.3f;
 static float current_24v = 24.0f;
 static float current_12v = 12.0f;
 static float current_5v = 5.0f;
 static float current_temperature = 0.0f;
+
+/* Предыдущие значения для отслеживания изменений */
+static float prev_vdda = 0.0f;
+static float prev_24v = 0.0f;
+static float prev_12v = 0.0f;
+static float prev_5v = 0.0f;
+
 static uint8_t lm75b_initialized = 0;
 static uint8_t v24_error = 0;
 static uint8_t v12_error = 0;
 static uint8_t v5_error = 0;
 static uint8_t vdda_error = 0;
 static uint8_t temp_error = 0;
-static char float_buffer[32];
+
 volatile uint8_t modbus_tx_active = 0;
 
 #define RS485_SET_TRANSMIT() HAL_GPIO_WritePin(RS485_CTRL_PORT, RS485_CTRL_PIN, GPIO_PIN_SET)
@@ -98,17 +87,100 @@ volatile uint8_t modbus_tx_active = 0;
 void ModBus_TransmitFrame(uint8_t *frame, uint16_t len)
 {
     if (len == 0) return;
+
+    /* Ждем пока линия не освободится (защита от коллизий) */
+    uint32_t start_wait = HAL_GetTick();
+    while (modbus_tx_active) {
+        if (HAL_GetTick() - start_wait > 100) break;
+    }
+
     RS485_SET_TRANSMIT();
     modbus_tx_active = 1;
+
+    /* Небольшая задержка перед передачей (направление шины) */
     for (volatile int i = 0; i < 150; i++) __NOP();
-    HAL_UART_Transmit(&huart1, frame, len, 1000);
+
+    HAL_UART_Transmit(&huart1, frame, len, 100);
+
+    /* Ждем окончания передачи (TC flag) */
     uint32_t timeout_start = HAL_GetTick();
     while ((USART1->SR & USART_SR_TC) == 0) {
         if (HAL_GetTick() - timeout_start > 50) break;
     }
-    HAL_Delay(MODBUS_SILENCE_TIME_MS);
+
+    /* Пауза тишины Modbus (3.5 символа) */
+    for (volatile int i = 0; i < 800; i++) __NOP();
+
     RS485_SET_RECEIVE();
     modbus_tx_active = 0;
+}
+
+/* Вспомогательная функция для вывода целого числа */
+static void USART2_PrintInt(int32_t val)
+{
+    char buf[12];
+    int8_t i = 0;
+    int8_t len = 0;
+
+    if (val < 0) {
+        USART2_Print("-");
+        val = -val;
+    }
+
+    if (val == 0) {
+        USART2_Print("0");
+        return;
+    }
+
+    do {
+        buf[i++] = (val % 10) + '0';
+        val /= 10;
+    } while (val > 0);
+
+    len = i;
+    for (i = len - 1; i >= 0; i--) {
+        char c = buf[i];
+        HAL_UART_Transmit(&huart2, (uint8_t*)&c, 1, 10);
+    }
+}
+
+/* Вспомогательная функция для вывода float (2 знака) */
+static void USART2_PrintFloat(float val)
+{
+    int32_t int_part = (int32_t)val;
+    float frac = val - (float)int_part;
+    if (frac < 0) frac = -frac;
+    int32_t frac_part = (int32_t)(frac * 100.0f + 0.5f);
+    if (frac_part >= 100) frac_part = 0;
+
+    USART2_PrintInt(int_part);
+    USART2_Print(".");
+    if (frac_part < 10) USART2_Print("0");
+    USART2_PrintInt(frac_part);
+}
+
+/* Проверка и вывод изменения напряжения */
+static void Check_Voltage_Change(const char* name, float new_val, float old_val, float* store_val)
+{
+    float diff = new_val - old_val;
+    if (diff < 0) diff = -diff;
+
+    /* Если изменилось более чем на 0.1В или это первое измерение */
+    if (diff > 0.1f || old_val == 0.0f)
+    {
+        USART2_Print("[VOLT] ");
+        USART2_Print(name);
+        USART2_Print(": ");
+        USART2_PrintFloat(new_val);
+        USART2_Print(" В (изм: ");
+        if (old_val > 0.0f) {
+            USART2_PrintFloat(diff);
+        } else {
+            USART2_Print("init");
+        }
+        USART2_Print(")\r\n");
+        *store_val = new_val;
+    }
 }
 /* USER CODE END 0 */
 
@@ -129,57 +201,26 @@ uint32_t Read_ADC_Single(ADC_HandleTypeDef* hadc, uint32_t channel, uint32_t sam
 uint32_t Read_ADC_Average(ADC_HandleTypeDef* hadc, uint32_t channel, uint32_t sampling_time, uint8_t samples);
 
 /* USER CODE BEGIN 1 */
-/* Вынесенная функция для вывода результатов и обновления регистров Modbus */
 void Process_Measurement_Results(float tof_us, float position_mm, uint8_t signal_captured)
 {
-    /* Обновление напряжений (ТОЛЬКО 4 аргумента - без флагов ошибок) */
-    Read_All_Voltages();
-    ModBus_UpdateVoltages(current_vdda, current_24v, current_12v, current_5v);
+    ModBus_UpdateMeasurements(position_mm, current_temperature, WAVEGUIDE_LENGTH_MM);
+    ModBus_UpdateVoltages(current_24v, current_12v, current_5v, current_vdda);
+    ModBus_UpdateFirmwareVersion(FIRMWARE_VERSION);
 
-    /* Измерение температуры */
-    Read_Temperature();
-
-    /* Обновление ВСЕХ измерений через единую функцию (если объявлена в modbus.h) */
-    /* Если ModBus_UpdateMeasurements не объявлена, закомментируйте эту строку */
-    // ModBus_UpdateMeasurements(tof_us, current_temperature,
-    //                          (signal_captured ? 0 : 1), temp_error, signal_captured ? 1 : 0);
-
-    /* Вывод результатов в отладочный порт */
-    USART2_Print("Измерение: ");
-
-    // Напряжения
-    USART2_Print("V=");
-    float_to_str(current_24v, float_buffer, 1);
-    USART2_Print(float_buffer);
-    USART2_Print("/");
-    float_to_str(current_12v, float_buffer, 1);
-    USART2_Print(float_buffer);
-    USART2_Print("/");
-    float_to_str(current_5v, float_buffer, 1);
-    USART2_Print(float_buffer);
-    USART2_Print("V ");
-
-    // Температура
-    if (lm75b_initialized) {
-        USART2_Print("T=");
-        float_to_str(current_temperature, float_buffer, 1);
-        USART2_Print(float_buffer);
-        USART2_Print("C ");
+    if (signal_captured)
+    {
+        USART2_Print("[ИЗМ] Уровень: ");
+        USART2_PrintFloat(position_mm);
+        USART2_Print(" мм, Температура: ");
+        USART2_PrintFloat(current_temperature);
+        USART2_Print(" C, ToF: ");
+        USART2_PrintFloat(tof_us);
+        USART2_Print(" мкс\r\n");
     }
-
-    // Уровень
-    if (signal_captured) {
-        USART2_Print("LEVEL=");
-        float_to_str(position_mm, float_buffer, 0);
-        USART2_Print(float_buffer);
-        USART2_Print("mm (");
-        float_to_str(position_mm * 0.001f, float_buffer, 3);
-        USART2_Print(float_buffer);
-        USART2_Print("m)");
-    } else {
-        USART2_Print("LEVEL=timeout");
+    else
+    {
+        USART2_Print("[ИЗМ] Сигнал не захвачен (таймаут)\r\n");
     }
-    USART2_Print("\r\n");
 }
 /* USER CODE END 1 */
 
@@ -195,7 +236,6 @@ int main(void)
 
     /* Инициализация I2C2 и датчиков температуры */
     if (MX_I2C2_Init() == HAL_OK) {
-        /* Используем ОДИН датчик через базовую функцию (вместо несуществующей LM75B_Init_All) */
         if (LM75B_Init(LM75B_DEFAULT_ADDRESS) == HAL_OK) {
             lm75b_initialized = 1;
             USART2_Print("LM75B: обнаружен 1 датчик\r\n");
@@ -205,57 +245,45 @@ int main(void)
         }
     }
 
-    /* Инициализация захвата времени пролёта (PB1 = TIM3_CH4 = CLIK) */
     TIM3_InputCapture_Init();
 
-    /* Калибровка АЦП */
     USART2_Print("[ИНИЦ] Калибровка АЦП...\r\n");
     if (HAL_ADCEx_Calibration_Start(&hadc1) == HAL_OK) {
         USART2_Print("[ИНИЦ] АЦП1 откалиброван успешно\r\n");
     } else {
         USART2_Print("[ИНИЦ] Калибровка АЦП1 НЕ УДАЛАСЬ!\r\n");
-        v24_error = 1;
-        v12_error = 1;
-        v5_error = 1;
-        vdda_error = 1;
+        v24_error = 1; v12_error = 1; v5_error = 1; vdda_error = 1;
     }
 
     if (HAL_ADCEx_Calibration_Start(&hadc2) == HAL_OK) {
         USART2_Print("[ИНИЦ] АЦП2 откалиброван успешно\r\n");
     } else {
         USART2_Print("[ИНИЦ] Калибровка АЦП2 НЕ УДАЛАСЬ!\r\n");
-        v12_error = 1;
-        v5_error = 1;
+        v12_error = 1; v5_error = 1;
     }
 
-    /* Инициализация модуля АЦП */
     if (HAL_ADC_Init(&hadc1) != HAL_OK || HAL_ADC_Init(&hadc2) != HAL_OK) {
         USART2_Print("[ИНИЦ] Инициализация АЦП НЕ УДАЛАСЬ!\r\n");
-        v24_error = 1;
-        v12_error = 1;
-        v5_error = 1;
-        vdda_error = 1;
+        v24_error = 1; v12_error = 1; v5_error = 1; vdda_error = 1;
     }
 
-    /* Инициализация модуля модбас */
+    /* Инициализация Modbus */
     ModBus_Init();
-    // ModBus_UpdateFirmwareVersion(FIRMWARE_VERSION); // Убрано - функция не объявлена
+    ModBus_UpdateFirmwareVersion(FIRMWARE_VERSION);
 
-    /* Настройка прерываний */
     HAL_NVIC_SetPriority(USART1_IRQn, 0, 0);
     HAL_NVIC_EnableIRQ(USART1_IRQn);
     HAL_NVIC_SetPriority(TIM3_IRQn, 0, 0);
     HAL_NVIC_EnableIRQ(TIM3_IRQn);
     __enable_irq();
 
-    /* Первое измерение напряжений и температуры */
+    /* Первое измерение */
     Read_All_Voltages();
     Read_Temperature();
     ModBus_UpdateVoltages(current_vdda, current_24v, current_12v, current_5v);
 
-    USART2_Print("ПМП-201Е запущен. Адрес модбас: 1, скорость: 19200 бод, период измерений: 10 сек.\r\n");
+    USART2_Print("ПМП-201Е запущен. Адрес модбас: 1, скорость: 19200 бод.\r\n");
 
-    /* Основные переменные цикла */
     uint32_t last_measure_time = 0;
     uint32_t last_debug_time = 0;
     uint32_t led_red_off_time = 0;
@@ -264,30 +292,25 @@ int main(void)
 
     while (1)
     {
-        /* Мигание синим светодиодом каждую секунду */
         if (HAL_GetTick() - last_debug_time >= 1000) {
             last_debug_time = HAL_GetTick();
             blue_led_state = !blue_led_state;
             HAL_GPIO_WritePin(GPIOB, LED_BLUE_PIN, blue_led_state ? LED_BLUE_ON : LED_BLUE_OFF);
         }
 
-        /* Автоматическое выключение красного светодиода */
         if (red_led_state && (HAL_GetTick() - led_red_off_time >= LED_RED_ON_TIME_MS)) {
             HAL_GPIO_WritePin(GPIOB, LED_RED_PIN, LED_RED_OFF);
             red_led_state = 0;
         }
 
-        /* Измерение каждые 10 секунд - КРИТИЧЕСКИ ВАЖНЫЙ ЦИКЛ */
+        /* Измерение уровня каждые 10 сек */
         if (HAL_GetTick() - last_measure_time >= PULSE_PERIOD_MS) {
             last_measure_time = HAL_GetTick();
 
-            /* Сброс индикации */
             HAL_GPIO_WritePin(GPIOB, LED_RED_PIN, LED_RED_OFF);
             red_led_state = 0;
             signal_captured = 0;
 
-            /* === КРИТИЧЕСКИ ВАЖНЫЙ ЦИКЛ ИЗМЕРЕНИЯ === */
-            /* Только управление транзисторами, генерация импульса и фиксация */
             uint32_t tof_ticks = measure_time_of_flight();
             float tof_us = tof_ticks * TOF_TICK_US;
             float position_mm = 0.0f;
@@ -301,11 +324,10 @@ int main(void)
                 signal_captured = 1;
             }
 
-            /* === ВЫНЕСЕННАЯ ОБРАБОТКА РЕЗУЛЬТАТОВ === */
             Process_Measurement_Results(tof_us, position_mm, signal_captured);
         }
 
-        /* Обработка запросов модбас */
+        /* Обработка Modbus */
         ModBus_Process();
 
         /* Защита от зависания передачи */
@@ -318,7 +340,6 @@ int main(void)
     }
 }
 
-/* Callback для приёма данных по модбас */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
     if (huart->Instance == USART1) {
@@ -326,46 +347,32 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
     }
 }
 
-/* Инициализация таймера для захвата времени пролёта */
 void TIM3_InputCapture_Init(void)
 {
-	   __HAL_RCC_TIM3_CLK_ENABLE();
-	    __HAL_RCC_GPIOB_CLK_ENABLE();
-	    __HAL_RCC_AFIO_CLK_ENABLE();
-	    __HAL_AFIO_REMAP_TIM3_PARTIAL();  // TIM3_CH4 на PB1 (частичный ремап)
+    __HAL_RCC_TIM3_CLK_ENABLE();
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+    __HAL_RCC_AFIO_CLK_ENABLE();
+    __HAL_AFIO_REMAP_TIM3_PARTIAL();
 
-	    /* --- Настройка PB1 как входа с высоким импедансом --- */
-	    GPIO_InitTypeDef GPIO_InitStruct = {0};
-	    GPIO_InitStruct.Pin = GPIO_PIN_1;
-	    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;      // Вход без подтяжки
-	    GPIO_InitStruct.Pull = GPIO_NOPULL;          // Сигнал уже имеет уровень от внешней схемы
-	    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
-	    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    GPIO_InitStruct.Pin = GPIO_PIN_1;
+    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-	    /* --- Настройка TIM3 в режиме Input Capture --- */
-	    TIM3->CR1 = 0;                    // Сброс регистра управления
-	    TIM3->CR2 = 0;                    // Сброс CR2
-	    TIM3->PSC = 6;                    // Prescaler = 6 → тактирование 72 МГц / 7 = ~10.286 МГц (1 тик ≈ 97.2 нс)
-	    TIM3->ARR = 0xFFFF;               // Авто-перезагрузка на максимум (16 бит)
-	    TIM3->CNT = 0;                    // Сброс счётчика
-	    TIM3->EGR = TIM_EGR_UG;           // Генерация события обновления для применения настроек
-
-	    /* --- Настройка канала 4 (TIM3_CH4 = PB1) ---
-	     * CCMR2, биты 12-13 (CC4S): 01 = входной сигнал с TI4
-	     * Полярность захвата настраивается в CCER */
-	    TIM3->CCMR2 = (0x1 << 12);        // CC4S = 01: IC4 mapped on TI4
-
-	    /* --- Полярность захвата: КРИТИЧЕСКОЕ ИЗМЕНЕНИЕ ---
-	     * TIM_CCER_CC4E  (бит 12) = 1 : включить захват канала 4
-	     * TIM_CCER_CC4P  (бит 13) = 1 : захват по нисходящему фронту (HIGH→LOW)
-	     * Без CC4P захват был бы по восходящему фронту (по умолчанию) */
-	    TIM3->CCER = TIM_CCER_CC4E | TIM_CCER_CC4P;  // Falling edge capture
-
-	    TIM3->DIER = TIM_DIER_CC4IE;      // Включить прерывание по захвату канала 4
-	    TIM3->SR = 0;
+    TIM3->CR1 = 0;
+    TIM3->CR2 = 0;
+    TIM3->PSC = 6;
+    TIM3->ARR = 0xFFFF;
+    TIM3->CNT = 0;
+    TIM3->EGR = TIM_EGR_UG;
+    TIM3->CCMR2 = (0x1 << 12);
+    TIM3->CCER = TIM_CCER_CC4E | TIM_CCER_CC4P;
+    TIM3->DIER = TIM_DIER_CC4IE;
+    TIM3->SR = 0;
 }
 
-/* Генерация импульса и запуск измерения С УПРАВЛЕНИЕМ транзисторами через PB7 */
 void generate_pulse_and_measure(void)
 {
     tof_measurement_done = 0;
@@ -376,22 +383,17 @@ void generate_pulse_and_measure(void)
     TIM3->CR1 |= TIM_CR1_CEN;
     __NOP();
 
-    /* ГАРАНТИРОВАННО ВЫКЛЮЧАЕМ транзистор ПЕРЕД ИМПУЛЬСОМ (PB7 = LOW) */
     HAL_GPIO_WritePin(SWITCH_PORT, SWITCH_PIN, GPIO_PIN_RESET);
 
-    /* ГЕНЕРАЦИЯ ИМПУЛЬСА 10 МКС НА Gen_Impuls (PB5) */
     GPIOB->BSRR = GPIO_PIN_5;
     for (volatile uint32_t i = 0; i < PULSE_DELAY_ITERATIONS; i++) __NOP();
     GPIOB->BRR = GPIO_PIN_5;
 
-    /* ЗАДЕРЖКА 15-20 МКС (18 МКС) ПОСЛЕ ИМПУЛЬСА */
     for (volatile uint32_t i = 0; i < DELAY_AFTER_PULSE_ITER; i++) __NOP();
 
-    /* ВКЛЮЧАЕМ транзистор через 15-20 мкс после импульса (PB7 = HIGH) */
     HAL_GPIO_WritePin(SWITCH_PORT, SWITCH_PIN, GPIO_PIN_SET);
 }
 
-/* Измерение времени пролёта С УПРАВЛЕНИЕМ транзисторами через PB7 */
 uint32_t measure_time_of_flight(void)
 {
     generate_pulse_and_measure();
@@ -409,19 +411,13 @@ uint32_t measure_time_of_flight(void)
     TIM3->CR1 &= ~TIM_CR1_CEN;
     TIM3->SR = 0;
 
-    /* УДЕРЖИВАЕМ транзистор ВКЛЮЧЁННЫМ в течение времени прохождения сигнала по волноводу */
-    /* Для длины 6000 мм: время = 2.14 мс = 11586 итераций */
-    /* Используем фиксированное значение 12000 итераций (2.22 мс) для надёжности */
     for (volatile uint32_t i = 0; i < SWITCH_HOLD_ITERATIONS; i++) __NOP();
 
-    /* ВЫКЛЮЧАЕМ транзистор НЕПОСРЕДСТВЕННО ПЕРЕД ПОВТОРНОЙ ОТПРАВКОЙ (в начале следующего цикла) */
-    /* В следующем цикле измерения транзистор будет выключен в начале generate_pulse_and_measure() */
     HAL_GPIO_WritePin(SWITCH_PORT, SWITCH_PIN, GPIO_PIN_RESET);
 
     return tof_capture_value;
 }
 
-/* Чтение температуры с датчика (ОДИН датчик через базовую функцию) */
 void Read_Temperature(void)
 {
     if (!lm75b_initialized) {
@@ -430,19 +426,17 @@ void Read_Temperature(void)
         return;
     }
 
-    /* Используем базовую функцию чтения (вместо несуществующей LM75B_ReadAllTemperatures) */
-    if (LM75B_ReadRawTemperature(LM75B_DEFAULT_ADDRESS, &current_temperature) != HAL_OK) {
+    uint16_t raw_temp = 0;
+    if (LM75B_ReadRawTemperature(LM75B_DEFAULT_ADDRESS, &raw_temp) != HAL_OK) {
         current_temperature = -127.0f;
         temp_error = 1;
         USART2_Print("[I2C] Ошибка чтения температуры.\r\n");
     } else {
         temp_error = 0;
+        current_temperature = (float)((int16_t)raw_temp) / 256.0f;
     }
 }
 
-/* ============================================================================
- * ИЗМЕРЕНИЕ НАПРЯЖЕНИЙ С КАЛИБРОВКОЙ VREFINT
- * ========================================================================== */
 void Read_All_Voltages(void)
 {
     uint32_t adc_raw_vdda = 0;
@@ -450,7 +444,7 @@ void Read_All_Voltages(void)
     uint32_t adc_raw_12v = 0;
     uint32_t adc_raw_5v = 0;
 
-    /* --- КАЛИБРОВКА VDDA ЧЕРЕЗ ВНУТРЕННИЙ ИСТОЧНИК ОПОРНОГО НАПРЯЖЕНИЯ --- */
+    /* --- VDDA --- */
     ADC1->CR2 |= ADC_CR2_TSVREFE;
     HAL_Delay(10);
     adc_raw_vdda = Read_ADC_Average(&hadc1, ADC_CHANNEL_VREFINT, ADC_SAMPLETIME_239CYCLES_5, ADC_SAMPLES);
@@ -465,7 +459,7 @@ void Read_All_Voltages(void)
         vdda_error = 1;
     }
 
-    /* --- ИЗМЕРЕНИЕ 24В (PA0, ADC1) --- */
+    /* --- 24В --- */
     adc_raw_24v = Read_ADC_Average(&hadc1, ADC_CHANNEL_0, ADC_SAMPLETIME_239CYCLES_5, ADC_SAMPLES);
     if (adc_raw_24v > 100 && adc_raw_24v < 4000) {
         float adc_voltage = (float)adc_raw_24v * current_vdda / 4095.0f;
@@ -476,7 +470,7 @@ void Read_All_Voltages(void)
         v24_error = 1;
     }
 
-    /* --- ИЗМЕРЕНИЕ 12В (PA1, ADC2) --- */
+    /* --- 12В --- */
     adc_raw_12v = Read_ADC_Average(&hadc2, ADC_CHANNEL_1, ADC_SAMPLETIME_239CYCLES_5, ADC_SAMPLES);
     if (adc_raw_12v > 100 && adc_raw_12v < 4000) {
         float adc_voltage = (float)adc_raw_12v * current_vdda / 4095.0f;
@@ -487,7 +481,7 @@ void Read_All_Voltages(void)
         v12_error = 1;
     }
 
-    /* --- ИЗМЕРЕНИЕ 5В (PA5, ADC2) --- */
+    /* --- 5В --- */
     adc_raw_5v = Read_ADC_Average(&hadc2, ADC_CHANNEL_5, ADC_SAMPLETIME_239CYCLES_5, ADC_SAMPLES);
     if (adc_raw_5v > 100 && adc_raw_5v < 4000) {
         float adc_voltage = (float)adc_raw_5v * current_vdda / 4095.0f;
@@ -497,11 +491,14 @@ void Read_All_Voltages(void)
         current_5v = 5.0f;
         v5_error = 1;
     }
+
+    /* === ВЫВОД ИЗМЕНЕНИЙ НАПРЯЖЕНИЙ === */
+    Check_Voltage_Change("VDDA", current_vdda, prev_vdda, &prev_vdda);
+    Check_Voltage_Change("+24V", current_24v, prev_24v, &prev_24v);
+    Check_Voltage_Change("+12V", current_12v, prev_12v, &prev_12v);
+    Check_Voltage_Change("+5V ", current_5v, prev_5v, &prev_5v);
 }
 
-/* ============================================================================
- * ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ АЦП
- * ========================================================================== */
 uint32_t Read_ADC_Single(ADC_HandleTypeDef* hadc, uint32_t channel, uint32_t sampling_time)
 {
     ADC_ChannelConfTypeDef sConfig = {0};
@@ -539,7 +536,6 @@ uint32_t Read_ADC_Average(ADC_HandleTypeDef* hadc, uint32_t channel, uint32_t sa
     return sum / valid_samples;
 }
 
-/* Системная конфигурация тактирования */
 void SystemClock_Config(void)
 {
     RCC_OscInitTypeDef RCC_OscInitStruct = {0};
@@ -568,7 +564,6 @@ void SystemClock_Config(void)
     HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit);
 }
 
-/* Инициализация портов ввода-вывода */
 static void MX_GPIO_Init(void)
 {
     GPIO_InitTypeDef GPIO_InitStruct = {0};
@@ -578,7 +573,6 @@ static void MX_GPIO_Init(void)
     __HAL_RCC_GPIOB_CLK_ENABLE();
     __HAL_RCC_AFIO_CLK_ENABLE();
 
-    // UART1 (ModBus RS485)
     GPIO_InitStruct.Pin = GPIO_PIN_9;
     GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
@@ -589,7 +583,6 @@ static void MX_GPIO_Init(void)
     GPIO_InitStruct.Pull = GPIO_PULLUP;
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-    // UART2 (Отладка)
     GPIO_InitStruct.Pin = GPIO_PIN_2;
     GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
@@ -600,29 +593,25 @@ static void MX_GPIO_Init(void)
     GPIO_InitStruct.Pull = GPIO_PULLUP;
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-    // TIM3_CH4 (Вход захвата - PB1 = CLIK)
     GPIO_InitStruct.Pin = GPIO_PIN_1;
     GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-    // Импульсный выход (PB5 = Gen_Impuls)
     GPIO_InitStruct.Pin = GPIO_PIN_5;
     GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-    // Switch_In_impuls (PB7) - управление транзисторами
-    GPIO_InitStruct.Pin = SWITCH_PIN;  // PB7
+    GPIO_InitStruct.Pin = SWITCH_PIN;
     GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
     HAL_GPIO_Init(SWITCH_PORT, &GPIO_InitStruct);
-    HAL_GPIO_WritePin(SWITCH_PORT, SWITCH_PIN, GPIO_PIN_RESET); // Начальное состояние: ВЫКЛ
+    HAL_GPIO_WritePin(SWITCH_PORT, SWITCH_PIN, GPIO_PIN_RESET);
 
-    // Светодиоды
     GPIO_InitStruct.Pin = LED_RED_PIN | LED_BLUE_PIN;
     GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
@@ -631,7 +620,6 @@ static void MX_GPIO_Init(void)
     HAL_GPIO_WritePin(GPIOB, LED_RED_PIN, LED_RED_OFF);
     HAL_GPIO_WritePin(GPIOB, LED_BLUE_PIN, LED_BLUE_OFF);
 
-    // Управление направлением линии RS485
     GPIO_InitStruct.Pin = RS485_CTRL_PIN;
     GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
@@ -639,14 +627,12 @@ static void MX_GPIO_Init(void)
     HAL_GPIO_Init(RS485_CTRL_PORT, &GPIO_InitStruct);
     HAL_GPIO_WritePin(RS485_CTRL_PORT, RS485_CTRL_PIN, GPIO_PIN_RESET);
 
-    // I2C2 (PB10=SCL, PB11=SDA)
     GPIO_InitStruct.Pin = GPIO_PIN_10 | GPIO_PIN_11;
     GPIO_InitStruct.Mode = GPIO_MODE_AF_OD;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 }
 
-/* Инициализация модуля обмена данными 1 */
 static void MX_USART1_UART_Init(void)
 {
     huart1.Instance = USART1;
@@ -660,7 +646,6 @@ static void MX_USART1_UART_Init(void)
     HAL_UART_Init(&huart1);
 }
 
-/* Инициализация модуля обмена данными 2 */
 static void MX_USART2_UART_Init(void)
 {
     huart2.Instance = USART2;
@@ -674,7 +659,6 @@ static void MX_USART2_UART_Init(void)
     HAL_UART_Init(&huart2);
 }
 
-/* Инициализация аналого-цифрового преобразователя 1 */
 static void MX_ADC1_Init(void)
 {
     hadc1.Instance = ADC1;
@@ -687,7 +671,6 @@ static void MX_ADC1_Init(void)
     HAL_ADC_Init(&hadc1);
 }
 
-/* Инициализация аналого-цифрового преобразователя 2 */
 static void MX_ADC2_Init(void)
 {
     hadc2.Instance = ADC2;
@@ -700,7 +683,6 @@ static void MX_ADC2_Init(void)
     HAL_ADC_Init(&hadc2);
 }
 
-/* Обработчик ошибок */
 void Error_Handler(void)
 {
     __disable_irq();
