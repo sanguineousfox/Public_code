@@ -1406,7 +1406,7 @@ static void Check_Voltage_Change(const char* name, float new_val, float old_val,
 
 08000c8c <Update_Poll_Period_From_Modbus>:
 
-/* ★ НОВАЯ ФУНКЦИЯ: Обновление периода опроса из Modbus */
+/*  НОВАЯ ФУНКЦИЯ: Обновление периода опроса из Modbus */
 static void Update_Poll_Period_From_Modbus(void)
 {
  8000c8c:	b580      	push	{r7, lr}
@@ -1804,7 +1804,7 @@ __STATIC_FORCEINLINE void __enable_irq(void)
  8000f4a:	681b      	ldr	r3, [r3, #0]
  8000f4c:	f001 fd96 	bl	8002a7c <ModBus_UpdateVoltages>
 
-    /* ★ Чтение периода опроса из Modbus */
+    /*  Чтение периода опроса из Modbus */
     Update_Poll_Period_From_Modbus();
  8000f50:	f7ff fe9c 	bl	8000c8c <Update_Poll_Period_From_Modbus>
 
@@ -1915,7 +1915,7 @@ __STATIC_FORCEINLINE void __enable_irq(void)
  800101c:	f001 ffd0 	bl	8002fc0 <HAL_GetTick>
  8001020:	63f8      	str	r0, [r7, #60]	; 0x3c
 
-            /* ★ Проверка: не изменился ли период через Modbus */
+            /*  Проверка: не изменился ли период через Modbus */
             Update_Poll_Period_From_Modbus();
  8001022:	f7ff fe33 	bl	8000c8c <Update_Poll_Period_From_Modbus>
 
@@ -2235,7 +2235,7 @@ __STATIC_FORCEINLINE void __enable_irq(void)
  80012ba:	bf00      	nop
  80012bc:	3dc710cb 	.word	0x3dc710cb
  80012c0:	3a83126f 	.word	0x3a83126f
- 80012c4:	452f0000 	.word	0x452f0000
+ 80012c4:	45992000 	.word	0x45992000
  80012c8:	08006c78 	.word	0x08006c78
  80012cc:	08006c80 	.word	0x08006c80
  80012d0:	08006c84 	.word	0x08006c84

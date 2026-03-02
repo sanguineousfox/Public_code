@@ -38,8 +38,8 @@
 /* Базовое значение (будет перезаписано из Modbus при инициализации) */
 #define PULSE_PERIOD_MS_DEFAULT  10000
 
-/* === СКОРОСТЬ ЗВУКА === */
-#define SOUND_SPEED_MPS     2800.0f
+/* === СКОРОСТЬ РАСПРОСТРАНЕНИЯ ЗВУКА В МАТЕРИАЛЕ === */
+#define SOUND_SPEED_MPS     4900.0f
 
 /* === СВЕТОДИОДЫ === */
 #define LED_RED_PIN         GPIO_PIN_13
@@ -95,7 +95,7 @@ static float current_12v = 12.0f;
 static float current_5v = 5.0f;
 static float current_temperature = 0.0f;
 
-/* ★ НОВОЕ: Период опроса (читается из Modbus) */
+/*  НОВОЕ: Период опроса (читается из Modbus) */
 static uint32_t current_poll_period_ms = PULSE_PERIOD_MS_DEFAULT;
 
 /* Предыдущие значения для отслеживания изменений */
@@ -208,7 +208,7 @@ static void Check_Voltage_Change(const char* name, float new_val, float old_val,
     }
 }
 
-/* ★ НОВАЯ ФУНКЦИЯ: Обновление периода опроса из Modbus */
+/*  НОВАЯ ФУНКЦИЯ: Обновление периода опроса из Modbus */
 static void Update_Poll_Period_From_Modbus(void)
 {
     float period_sec = ModBus_GetParameter_Float(MB_ADDR_POLL_PERIOD);
@@ -341,7 +341,7 @@ int main(void)
     Read_Temperature();
     ModBus_UpdateVoltages(current_vdda, current_24v, current_12v, current_5v);
 
-    /* ★ Чтение периода опроса из Modbus */
+    /*  Чтение периода опроса из Modbus */
     Update_Poll_Period_From_Modbus();
 
     USART2_Print("ПМП-201Е запущен. Адрес модбас: 1, скорость: 19200 бод.\r\n");
@@ -374,7 +374,7 @@ int main(void)
         if (HAL_GetTick() - last_measure_time >= current_poll_period_ms) {
             last_measure_time = HAL_GetTick();
 
-            /* ★ Проверка: не изменился ли период через Modbus */
+            /*  Проверка: не изменился ли период через Modbus */
             Update_Poll_Period_From_Modbus();
 
             HAL_GPIO_WritePin(GPIOB, LED_RED_PIN, LED_RED_OFF);
