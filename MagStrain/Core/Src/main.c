@@ -38,8 +38,8 @@
 /* Базовое значение (будет перезаписано из Modbus при инициализации) */
 #define PULSE_PERIOD_MS_DEFAULT  10000
 
-/* === СКОРОСТЬ В МАТЕРИАЛЕ ЗВУКА === */
-#define SOUND_SPEED_MPS     4900.0f
+/* === СКОРОСТЬ ЗВУКА === */
+#define SOUND_SPEED_MPS     2800.0f
 
 /* === СВЕТОДИОДЫ === */
 #define LED_RED_PIN         GPIO_PIN_13
