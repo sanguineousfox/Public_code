@@ -18,48 +18,50 @@
 
 /* Private define ------------------------------------------------------------*/
 /* === ТАЙМЕР === */
-#define TIMER_CLOCK_HZ      72000000.0f
-#define TOF_TICK_US         0.0972f
+#define TIMER_CLOCK_HZ      72000000.0f           /* Частота таймера 72 МГц */
+#define TOF_TICK_US         0.0972f               /* Длительность 1 тика таймера в мкс (72МГц/7) */
 
 /* === АЦП === */
-#define VREFINT_CAL_ADDR    ((uint16_t*)0x1FFFF7BA)
-#define VREFINT_CAL_VALUE   (*VREFINT_CAL_ADDR)
-#define ADC_SAMPLES         16
+#define VREFINT_CAL_ADDR    ((uint16_t*)0x1FFFF7BA) /* Адрес калибровочного значения VREFINT */
+#define VREFINT_CAL_VALUE   (*VREFINT_CAL_ADDR)     /* Калибровочное значение VREFINT */
+#define ADC_SAMPLES         16                      /* Количество отсчётов АЦП для усреднения */
 
 /* === ТАЙМАУТЫ === */
-#define MEAS_TIMEOUT_MS     50
+#define MEAS_TIMEOUT_MS     50                      /* Таймаут ожидания сигнала в мс */
 
 /* === ДЕЛИТЕЛИ НАПРЯЖЕНИЯ === */
-#define DIV_24V_FACTOR      9.2f
-#define DIV_12V_FACTOR      4.6f
-#define DIV_5V_FACTOR       2.0f
+#define DIV_24V_FACTOR      9.2f                    /* Коэффициент делителя 24В */
+#define DIV_12V_FACTOR      4.6f                    /* Коэффициент делителя 12В */
+#define DIV_5V_FACTOR       2.0f                    /* Коэффициент делителя 5В */
 
 /* === ПЕРИОД ИЗМЕРЕНИЙ === */
-/* Базовое значение (будет перезаписано из Modbus при инициализации) */
-#define PULSE_PERIOD_MS_DEFAULT  10000
+#define PULSE_PERIOD_MS     10000                   /* Период между измерениями в мс (10 сек) */
 
 /* === СКОРОСТЬ ЗВУКА === */
-#define SOUND_SPEED_MPS     2800.0f
+#define SOUND_SPEED_MPS     2800.0f                 /* Скорость звука в волноводе м/с */
 
 /* === СВЕТОДИОДЫ === */
-#define LED_RED_PIN         GPIO_PIN_13
-#define LED_BLUE_PIN        GPIO_PIN_12
-#define LED_RED_ON_TIME_MS  1000
+#define LED_RED_PIN         GPIO_PIN_13             /* Пин красного светодиода */
+#define LED_BLUE_PIN        GPIO_PIN_12             /* Пин синего светодиода */
+#define LED_RED_ON_TIME_MS  1000                    /* Время горения красного светодиода в мс */
 
 /* === ИМПУЛЬС === */
-#define PULSE_DELAY_ITERATIONS 45
-#define SWITCH_PIN          GPIO_PIN_7
-#define SWITCH_PORT         GPIOB
-#define DELAY_AFTER_PULSE_ITER  97
-#define SWITCH_HOLD_ITERATIONS 12000
+#define PULSE_DELAY_ITERATIONS 45                   /* Длительность импульса в тактах */
+#define SWITCH_PIN          GPIO_PIN_7              /* Пин управления ключом */
+#define SWITCH_PORT         GPIOB                   /* Порт ключа */
+#define DELAY_AFTER_PULSE_ITER  97                  /* Задержка после импульса в тактах */
+#define SWITCH_HOLD_ITERATIONS 12000                /* Время удержания ключа в тактах */
+
+/* === ВОЛНОВОД === */
+#define WAVEGUIDE_LENGTH_MM 6000                    /* Длина волновода в мм */
 
 /* === MODBUS === */
-#define MODBUS_SILENCE_TIME_MS 4
-#define RS485_CTRL_PIN      GPIO_PIN_0
-#define RS485_CTRL_PORT     GPIOB
+#define MODBUS_SILENCE_TIME_MS 4                    /* Пауза тишины Modbus в мс */
+#define RS485_CTRL_PIN      GPIO_PIN_0              /* Пин управления RS485 */
+#define RS485_CTRL_PORT     GPIOB                   /* Порт управления RS485 */
 
 /* === ВЕРСИЯ === */
-#define FIRMWARE_VERSION    100
+#define FIRMWARE_VERSION    100                     /* Версия прошивки */
 
 /* === СОСТОЯНИЯ === */
 #define LED_RED_ON          GPIO_PIN_SET
@@ -68,14 +70,13 @@
 #define LED_BLUE_OFF        GPIO_PIN_RESET
 
 /* === МЁРТВОЕ ОКНО === */
-#define BLANKING_WINDOW_TICKS   515
+/* 50 мкс = ~515 тиков @ 10.28 MHz (72MHz / 7) */
+/* Увеличено с 45 до 50 мкс чтобы отсечь 11 мкс помехи */
+#define BLANKING_WINDOW_TICKS   515                 /* Мёртвое окно в тиках таймера (50 мкс) */
 
 /* === УСРЕДНЕНИЕ === */
-#define MEASUREMENT_AVG_COUNT   5
-
-/* === ДИАПАЗОН ПЕРИОДА ОПРОСА === */
-#define MIN_POLL_PERIOD_MS  1000    /* Минимум 1 секунда */
-#define MAX_POLL_PERIOD_MS  60000   /* Максимум 60 секунд */
+/* Количество измерений для усреднения (помогает отсечь выбросы) */
+#define MEASUREMENT_AVG_COUNT   5                   /* Увеличено с 3 до 5 для стабильности */
 
 /* Private variables ---------------------------------------------------------*/
 UART_HandleTypeDef huart1;
@@ -94,9 +95,6 @@ static float current_24v = 24.0f;
 static float current_12v = 12.0f;
 static float current_5v = 5.0f;
 static float current_temperature = 0.0f;
-
-/* ★ НОВОЕ: Период опроса (читается из Modbus) */
-static uint32_t current_poll_period_ms = PULSE_PERIOD_MS_DEFAULT;
 
 /* Предыдущие значения для отслеживания изменений */
 static float prev_vdda = 0.0f;
@@ -121,6 +119,7 @@ void ModBus_TransmitFrame(uint8_t *frame, uint16_t len)
 {
     if (len == 0) return;
 
+    /* Ждем пока линия не освободится (защита от коллизий) */
     uint32_t start_wait = HAL_GetTick();
     while (modbus_tx_active) {
         if (HAL_GetTick() - start_wait > 100) break;
@@ -129,21 +128,25 @@ void ModBus_TransmitFrame(uint8_t *frame, uint16_t len)
     RS485_SET_TRANSMIT();
     modbus_tx_active = 1;
 
+    /* Небольшая задержка перед передачей (направление шины) */
     for (volatile int i = 0; i < 150; i++) __NOP();
 
     HAL_UART_Transmit(&huart1, frame, len, 100);
 
+    /* Ждем окончания передачи (TC flag) */
     uint32_t timeout_start = HAL_GetTick();
     while ((USART1->SR & USART_SR_TC) == 0) {
         if (HAL_GetTick() - timeout_start > 50) break;
     }
 
+    /* Пауза тишины Modbus (3.5 символа) */
     for (volatile int i = 0; i < 800; i++) __NOP();
 
     RS485_SET_RECEIVE();
     modbus_tx_active = 0;
 }
 
+/* Вспомогательная функция для вывода целого числа */
 static void USART2_PrintInt(int32_t val)
 {
     char buf[12];
@@ -172,6 +175,7 @@ static void USART2_PrintInt(int32_t val)
     }
 }
 
+/* Вспомогательная функция для вывода float (2 знака) */
 static void USART2_PrintFloat(float val)
 {
     int32_t int_part = (int32_t)val;
@@ -186,11 +190,13 @@ static void USART2_PrintFloat(float val)
     USART2_PrintInt(frac_part);
 }
 
+/* Проверка и вывод изменения напряжения */
 static void Check_Voltage_Change(const char* name, float new_val, float old_val, float* store_val)
 {
     float diff = new_val - old_val;
     if (diff < 0) diff = -diff;
 
+    /* Если изменилось более чем на 0.1В или это первое измерение */
     if (diff > 0.1f || old_val == 0.0f)
     {
         USART2_Print("[VOLT] ");
@@ -206,27 +212,6 @@ static void Check_Voltage_Change(const char* name, float new_val, float old_val,
         USART2_Print(")\r\n");
         *store_val = new_val;
     }
-}
-
-/* ★ НОВАЯ ФУНКЦИЯ: Обновление периода опроса из Modbus */
-static void Update_Poll_Period_From_Modbus(void)
-{
-    float period_sec = ModBus_GetParameter_Float(MB_ADDR_POLL_PERIOD);
-
-    /* Конвертация секунд в миллисекунды */
-    uint32_t period_ms = (uint32_t)(period_sec * 1000.0f);
-
-    /* Проверка диапазона */
-    if (period_ms < MIN_POLL_PERIOD_MS) {
-        period_ms = MIN_POLL_PERIOD_MS;
-        ModBus_SetParameter_Float(MB_ADDR_POLL_PERIOD, (float)MIN_POLL_PERIOD_MS / 1000.0f);
-    }
-    if (period_ms > MAX_POLL_PERIOD_MS) {
-        period_ms = MAX_POLL_PERIOD_MS;
-        ModBus_SetParameter_Float(MB_ADDR_POLL_PERIOD, (float)MAX_POLL_PERIOD_MS / 1000.0f);
-    }
-
-    current_poll_period_ms = period_ms;
 }
 /* USER CODE END 0 */
 
@@ -249,32 +234,19 @@ uint32_t Read_ADC_Average(ADC_HandleTypeDef* hadc, uint32_t channel, uint32_t sa
 /* USER CODE BEGIN 1 */
 void Process_Measurement_Results(float tof_us, float position_mm, uint8_t signal_captured)
 {
-    float waveguide_len = ModBus_GetWaveguideLength();
-
-    ModBus_UpdateMeasurements(position_mm, current_temperature, waveguide_len);
+    ModBus_UpdateMeasurements(position_mm, current_temperature, WAVEGUIDE_LENGTH_MM);
     ModBus_UpdateVoltages(current_24v, current_12v, current_5v, current_vdda);
     ModBus_UpdateFirmwareVersion(FIRMWARE_VERSION);
 
     if (signal_captured)
     {
-        float level_percent = 0.0f;
-        if (waveguide_len > 0.0f) {
-            level_percent = (position_mm / waveguide_len) * 100.0f;
-        }
-
         USART2_Print("[ИЗМ] ToF: ");
         USART2_PrintFloat(tof_us);
         USART2_Print(" мкс, Уровень: ");
         USART2_PrintFloat(position_mm);
-        USART2_Print(" мм (");
-        USART2_PrintFloat(level_percent);
-        USART2_Print("%), Волновод: ");
-        USART2_PrintFloat(waveguide_len);
         USART2_Print(" мм, Температура: ");
         USART2_PrintFloat(current_temperature);
-        USART2_Print(" C, Период: ");
-        USART2_PrintInt(current_poll_period_ms / 1000);
-        USART2_Print(" сек\r\n");
+        USART2_Print(" C\r\n");
     }
     else
     {
@@ -341,12 +313,9 @@ int main(void)
     Read_Temperature();
     ModBus_UpdateVoltages(current_vdda, current_24v, current_12v, current_5v);
 
-    /* ★ Чтение периода опроса из Modbus */
-    Update_Poll_Period_From_Modbus();
-
     USART2_Print("ПМП-201Е запущен. Адрес модбас: 1, скорость: 19200 бод.\r\n");
     USART2_Print("[DBG] Период измерений: ");
-    USART2_PrintInt(current_poll_period_ms / 1000);
+    USART2_PrintInt(PULSE_PERIOD_MS / 1000);
     USART2_Print(" сек, Мёртвое окно: ");
     USART2_PrintInt((uint32_t)(BLANKING_WINDOW_TICKS * TOF_TICK_US));
     USART2_Print(" мкс\r\n");
@@ -370,17 +339,15 @@ int main(void)
             red_led_state = 0;
         }
 
-        /* Измерение уровня с динамическим периодом */
-        if (HAL_GetTick() - last_measure_time >= current_poll_period_ms) {
+        /* Измерение уровня каждые 10 сек */
+        if (HAL_GetTick() - last_measure_time >= PULSE_PERIOD_MS) {
             last_measure_time = HAL_GetTick();
-
-            /* ★ Проверка: не изменился ли период через Modbus */
-            Update_Poll_Period_From_Modbus();
 
             HAL_GPIO_WritePin(GPIOB, LED_RED_PIN, LED_RED_OFF);
             red_led_state = 0;
             signal_captured = 0;
 
+            /* === УСРЕДНЕНИЕ ИЗМЕРЕНИЙ === */
             uint32_t total_ticks = 0;
             uint8_t valid_count = 0;
             uint32_t measurements[MEASUREMENT_AVG_COUNT];
@@ -400,6 +367,8 @@ int main(void)
             float position_mm = 0.0f;
 
             if (valid_count > 0) {
+                /* === МЕДИАНА ДЛЯ ОТСЕЧКИ ВЫБРОСОВ === */
+                /* Сортируем массив для нахождения медианы */
                 for (uint8_t i = 0; i < valid_count - 1; i++) {
                     for (uint8_t j = 0; j < valid_count - i - 1; j++) {
                         if (measurements[j] > measurements[j + 1]) {
@@ -409,6 +378,7 @@ int main(void)
                         }
                     }
                 }
+                /* Берём медиану (средний элемент) */
                 uint32_t median_ticks = measurements[valid_count / 2];
 
                 tof_us = median_ticks * TOF_TICK_US;
@@ -474,12 +444,14 @@ void TIM3_InputCapture_Init(void)
     TIM3->CNT = 0;
     TIM3->EGR = TIM_EGR_UG;
 
+    /* Цифровой фильтр IC4F=0101 (8 событий @ fDTS/8 ≈ 0.9 мкс) */
     TIM3->CCMR2 = (0x1 << 12) | (0x5 << 8);
 
     TIM3->CCER = TIM_CCER_CC4E | TIM_CCER_CC4P;
+    /* ЗАХВАТ ОТКЛЮЧЕН до выхода из мёртвого окна! */
     TIM3->DIER = 0;
     TIM3->SR = 0;
-    TIM3->CR1 = TIM_CR1_CEN;
+    TIM3->CR1 = TIM_CR1_CEN;  /* Таймер запущен сразу после инициализации */
 }
 
 void generate_pulse_and_measure(void)
@@ -488,11 +460,13 @@ void generate_pulse_and_measure(void)
     tof_timeout = 0;
     tof_capture_value = 0;
 
-    TIM3->DIER &= ~TIM_DIER_CC4IE;
-    TIM3->SR = 0;
-    TIM3->CNT = 0;
-    __DSB();
+    /* === КРИТИЧНО: ПОЛНЫЙ СБРОС ПЕРЕД ИЗМЕРЕНИЕМ === */
+    TIM3->DIER &= ~TIM_DIER_CC4IE;  /* Отключаем прерывание ПЕРЕД сбросом */
+    TIM3->SR = 0;                    /* Сбрасываем все флаги */
+    TIM3->CNT = 0;                   /* Сбрасываем счётчик */
+    __DSB();                         /* Барьер памяти для гарантии порядка операций */
 
+    /* Убеждаемся что таймер запущен */
     TIM3->CR1 |= TIM_CR1_CEN;
     __NOP();
 
@@ -513,18 +487,23 @@ uint32_t measure_time_of_flight(void)
 
     uint32_t start_wait = HAL_GetTick();
 
+    /* === ЖДЁМ ВЫХОДА ИЗ МЁРТВОГО ОКНА === */
     volatile uint32_t cnt_value;
+    uint32_t blank_timeout = 0;
 
     do {
         cnt_value = TIM3->CNT;
-        if ((HAL_GetTick() - start_wait) >= 2) {
+        if ((HAL_GetTick() - start_wait) >= 2) {  /* 2 мс достаточно для 50 мкс */
+            blank_timeout = 1;
             break;
         }
     } while (cnt_value < BLANKING_WINDOW_TICKS);
 
-    TIM3->SR = 0;
-    TIM3->DIER |= TIM_DIER_CC4IE;
+    /* === МЁРТВОЕ ОКНО ПРОЙДЕНО — ВКЛЮЧАЕМ ЗАХВАТ === */
+    TIM3->SR = 0;                  /* Ещё раз сбрасываем флаги перед включением */
+    TIM3->DIER |= TIM_DIER_CC4IE;  /* Включаем прерывание ТОЛЬКО после мёртвого окна */
 
+    /* === ЖДЁМ ЗАХВАТА === */
     while (!tof_measurement_done && !tof_timeout) {
         if ((HAL_GetTick() - start_wait) >= MEAS_TIMEOUT_MS) {
             tof_timeout = 1;
@@ -570,6 +549,7 @@ void Read_All_Voltages(void)
     uint32_t adc_raw_12v = 0;
     uint32_t adc_raw_5v = 0;
 
+    /* --- VDDA --- */
     ADC1->CR2 |= ADC_CR2_TSVREFE;
     HAL_Delay(10);
     adc_raw_vdda = Read_ADC_Average(&hadc1, ADC_CHANNEL_VREFINT, ADC_SAMPLETIME_239CYCLES_5, ADC_SAMPLES);
@@ -584,6 +564,7 @@ void Read_All_Voltages(void)
         vdda_error = 1;
     }
 
+    /* --- 24В --- */
     adc_raw_24v = Read_ADC_Average(&hadc1, ADC_CHANNEL_0, ADC_SAMPLETIME_239CYCLES_5, ADC_SAMPLES);
     if (adc_raw_24v > 100 && adc_raw_24v < 4000) {
         float adc_voltage = (float)adc_raw_24v * current_vdda / 4095.0f;
@@ -594,6 +575,7 @@ void Read_All_Voltages(void)
         v24_error = 1;
     }
 
+    /* --- 12В --- */
     adc_raw_12v = Read_ADC_Average(&hadc2, ADC_CHANNEL_1, ADC_SAMPLETIME_239CYCLES_5, ADC_SAMPLES);
     if (adc_raw_12v > 100 && adc_raw_12v < 4000) {
         float adc_voltage = (float)adc_raw_12v * current_vdda / 4095.0f;
@@ -604,6 +586,7 @@ void Read_All_Voltages(void)
         v12_error = 1;
     }
 
+    /* --- 5В --- */
     adc_raw_5v = Read_ADC_Average(&hadc2, ADC_CHANNEL_5, ADC_SAMPLETIME_239CYCLES_5, ADC_SAMPLES);
     if (adc_raw_5v > 100 && adc_raw_5v < 4000) {
         float adc_voltage = (float)adc_raw_5v * current_vdda / 4095.0f;
@@ -614,6 +597,7 @@ void Read_All_Voltages(void)
         v5_error = 1;
     }
 
+    /* === ВЫВОД ИЗМЕНЕНИЙ НАПРЯЖЕНИЙ === */
     Check_Voltage_Change("VDDA", current_vdda, prev_vdda, &prev_vdda);
     Check_Voltage_Change("+24V", current_24v, prev_24v, &prev_24v);
     Check_Voltage_Change("+12V", current_12v, prev_12v, &prev_12v);
