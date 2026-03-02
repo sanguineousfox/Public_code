@@ -17,35 +17,66 @@
 #include <string.h>
 
 /* Private define ------------------------------------------------------------*/
-#define TIMER_CLOCK_HZ      72000000.0f
-#define VREFINT_CAL_ADDR    ((uint16_t*)0x1FFFF7BA)
-#define VREFINT_CAL_VALUE   (*VREFINT_CAL_ADDR)
-#define ADC_SAMPLES         16
-#define MEAS_TIMEOUT_MS     10
-#define DIV_24V_FACTOR      9.2f
-#define DIV_12V_FACTOR      4.6f
-#define DIV_5V_FACTOR       2.0f
-#define PULSE_PERIOD_MS     1000
-#define SOUND_SPEED_MPS     2800.0f
-#define TOF_TICK_US         (1000000.0f / (TIMER_CLOCK_HZ / 7.0f))
-#define LED_RED_PIN         GPIO_PIN_13
-#define LED_BLUE_PIN        GPIO_PIN_12
-#define LED_RED_ON_TIME_MS  1000
-#define PULSE_DELAY_ITERATIONS 45
-#define SWITCH_PIN          GPIO_PIN_7
-#define SWITCH_PORT         GPIOB
-#define DELAY_AFTER_PULSE_ITER  97
-#define WAVEGUIDE_LENGTH_MM 6000
-#define SWITCH_HOLD_ITERATIONS 12000
-#define MODBUS_SILENCE_TIME_MS 4
-#define RS485_CTRL_PIN      GPIO_PIN_0
-#define RS485_CTRL_PORT     GPIOB
-#define FIRMWARE_VERSION    100
+/* === ТАЙМЕР === */
+#define TIMER_CLOCK_HZ      72000000.0f           /* Частота таймера 72 МГц */
+#define TOF_TICK_US         0.0972f               /* Длительность 1 тика таймера в мкс (72МГц/7) */
 
+/* === АЦП === */
+#define VREFINT_CAL_ADDR    ((uint16_t*)0x1FFFF7BA) /* Адрес калибровочного значения VREFINT */
+#define VREFINT_CAL_VALUE   (*VREFINT_CAL_ADDR)     /* Калибровочное значение VREFINT */
+#define ADC_SAMPLES         16                      /* Количество отсчётов АЦП для усреднения */
+
+/* === ТАЙМАУТЫ === */
+#define MEAS_TIMEOUT_MS     50                      /* Таймаут ожидания сигнала в мс */
+
+/* === ДЕЛИТЕЛИ НАПРЯЖЕНИЯ === */
+#define DIV_24V_FACTOR      9.2f                    /* Коэффициент делителя 24В */
+#define DIV_12V_FACTOR      4.6f                    /* Коэффициент делителя 12В */
+#define DIV_5V_FACTOR       2.0f                    /* Коэффициент делителя 5В */
+
+/* === ПЕРИОД ИЗМЕРЕНИЙ === */
+#define PULSE_PERIOD_MS     10000                   /* Период между измерениями в мс (10 сек) */
+
+/* === СКОРОСТЬ ЗВУКА === */
+#define SOUND_SPEED_MPS     2800.0f                 /* Скорость звука в волноводе м/с */
+
+/* === СВЕТОДИОДЫ === */
+#define LED_RED_PIN         GPIO_PIN_13             /* Пин красного светодиода */
+#define LED_BLUE_PIN        GPIO_PIN_12             /* Пин синего светодиода */
+#define LED_RED_ON_TIME_MS  1000                    /* Время горения красного светодиода в мс */
+
+/* === ИМПУЛЬС === */
+#define PULSE_DELAY_ITERATIONS 45                   /* Длительность импульса в тактах */
+#define SWITCH_PIN          GPIO_PIN_7              /* Пин управления ключом */
+#define SWITCH_PORT         GPIOB                   /* Порт ключа */
+#define DELAY_AFTER_PULSE_ITER  97                  /* Задержка после импульса в тактах */
+#define SWITCH_HOLD_ITERATIONS 12000                /* Время удержания ключа в тактах */
+
+/* === ВОЛНОВОД === */
+#define WAVEGUIDE_LENGTH_MM 6000                    /* Длина волновода в мм */
+
+/* === MODBUS === */
+#define MODBUS_SILENCE_TIME_MS 4                    /* Пауза тишины Modbus в мс */
+#define RS485_CTRL_PIN      GPIO_PIN_0              /* Пин управления RS485 */
+#define RS485_CTRL_PORT     GPIOB                   /* Порт управления RS485 */
+
+/* === ВЕРСИЯ === */
+#define FIRMWARE_VERSION    100                     /* Версия прошивки */
+
+/* === СОСТОЯНИЯ === */
 #define LED_RED_ON          GPIO_PIN_SET
 #define LED_RED_OFF         GPIO_PIN_RESET
 #define LED_BLUE_ON         GPIO_PIN_SET
 #define LED_BLUE_OFF        GPIO_PIN_RESET
+
+/* === МЁРТВОЕ ОКНО === */
+/* 50 мкс = ~515 тиков @ 10.28 MHz (72MHz / 7) */
+/* Увеличено с 45 до 50 мкс чтобы отсечь 11 мкс помехи */
+#define BLANKING_WINDOW_TICKS   515                 /* Мёртвое окно в тиках таймера (50 мкс) */
+
+/* === УСРЕДНЕНИЕ === */
+/* Количество измерений для усреднения (помогает отсечь выбросы) */
+#define MEASUREMENT_AVG_COUNT   5                   /* Увеличено с 3 до 5 для стабильности */
 
 /* Private variables ---------------------------------------------------------*/
 UART_HandleTypeDef huart1;
@@ -209,13 +240,13 @@ void Process_Measurement_Results(float tof_us, float position_mm, uint8_t signal
 
     if (signal_captured)
     {
-        USART2_Print("[ИЗМ] Уровень: ");
+        USART2_Print("[ИЗМ] ToF: ");
+        USART2_PrintFloat(tof_us);
+        USART2_Print(" мкс, Уровень: ");
         USART2_PrintFloat(position_mm);
         USART2_Print(" мм, Температура: ");
         USART2_PrintFloat(current_temperature);
-        USART2_Print(" C, ToF: ");
-        USART2_PrintFloat(tof_us);
-        USART2_Print(" мкс\r\n");
+        USART2_Print(" C\r\n");
     }
     else
     {
@@ -283,6 +314,11 @@ int main(void)
     ModBus_UpdateVoltages(current_vdda, current_24v, current_12v, current_5v);
 
     USART2_Print("ПМП-201Е запущен. Адрес модбас: 1, скорость: 19200 бод.\r\n");
+    USART2_Print("[DBG] Период измерений: ");
+    USART2_PrintInt(PULSE_PERIOD_MS / 1000);
+    USART2_Print(" сек, Мёртвое окно: ");
+    USART2_PrintInt((uint32_t)(BLANKING_WINDOW_TICKS * TOF_TICK_US));
+    USART2_Print(" мкс\r\n");
 
     uint32_t last_measure_time = 0;
     uint32_t last_debug_time = 0;
@@ -311,13 +347,53 @@ int main(void)
             red_led_state = 0;
             signal_captured = 0;
 
-            uint32_t tof_ticks = measure_time_of_flight();
-            float tof_us = tof_ticks * TOF_TICK_US;
+            /* === УСРЕДНЕНИЕ ИЗМЕРЕНИЙ === */
+            uint32_t total_ticks = 0;
+            uint8_t valid_count = 0;
+            uint32_t measurements[MEASUREMENT_AVG_COUNT];
+
+            for (uint8_t i = 0; i < MEASUREMENT_AVG_COUNT; i++) {
+                measurements[i] = measure_time_of_flight();
+                if (measurements[i] > 0 && !tof_timeout) {
+                    total_ticks += measurements[i];
+                    valid_count++;
+                }
+                if (i < MEASUREMENT_AVG_COUNT - 1) {
+                    HAL_Delay(10);
+                }
+            }
+
+            float tof_us = 0.0f;
             float position_mm = 0.0f;
 
-            if (tof_ticks > 0 && !tof_timeout) {
-                if (tof_us > 10.0f) tof_us -= 10.0f;
+            if (valid_count > 0) {
+                /* === МЕДИАНА ДЛЯ ОТСЕЧКИ ВЫБРОСОВ === */
+                /* Сортируем массив для нахождения медианы */
+                for (uint8_t i = 0; i < valid_count - 1; i++) {
+                    for (uint8_t j = 0; j < valid_count - i - 1; j++) {
+                        if (measurements[j] > measurements[j + 1]) {
+                            uint32_t temp = measurements[j];
+                            measurements[j] = measurements[j + 1];
+                            measurements[j + 1] = temp;
+                        }
+                    }
+                }
+                /* Берём медиану (средний элемент) */
+                uint32_t median_ticks = measurements[valid_count / 2];
+
+                tof_us = median_ticks * TOF_TICK_US;
                 position_mm = (tof_us * 0.001f * SOUND_SPEED_MPS) / 2.0f;
+
+                USART2_Print("[AVG] ");
+                USART2_PrintInt(valid_count);
+                USART2_Print("/");
+                USART2_PrintInt(MEASUREMENT_AVG_COUNT);
+                USART2_Print(" valid, Median: ");
+                USART2_PrintInt(median_ticks);
+                USART2_Print(" тиков (");
+                USART2_PrintFloat(tof_us);
+                USART2_Print(" мкс)\r\n");
+
                 HAL_GPIO_WritePin(GPIOB, LED_RED_PIN, LED_RED_ON);
                 red_led_state = 1;
                 led_red_off_time = HAL_GetTick();
@@ -357,7 +433,7 @@ void TIM3_InputCapture_Init(void)
     GPIO_InitTypeDef GPIO_InitStruct = {0};
     GPIO_InitStruct.Pin = GPIO_PIN_1;
     GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Pull = GPIO_PULLUP;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
@@ -367,10 +443,15 @@ void TIM3_InputCapture_Init(void)
     TIM3->ARR = 0xFFFF;
     TIM3->CNT = 0;
     TIM3->EGR = TIM_EGR_UG;
-    TIM3->CCMR2 = (0x1 << 12);
+
+    /* Цифровой фильтр IC4F=0101 (8 событий @ fDTS/8 ≈ 0.9 мкс) */
+    TIM3->CCMR2 = (0x1 << 12) | (0x5 << 8);
+
     TIM3->CCER = TIM_CCER_CC4E | TIM_CCER_CC4P;
-    TIM3->DIER = TIM_DIER_CC4IE;
+    /* ЗАХВАТ ОТКЛЮЧЕН до выхода из мёртвого окна! */
+    TIM3->DIER = 0;
     TIM3->SR = 0;
+    TIM3->CR1 = TIM_CR1_CEN;  /* Таймер запущен сразу после инициализации */
 }
 
 void generate_pulse_and_measure(void)
@@ -378,8 +459,14 @@ void generate_pulse_and_measure(void)
     tof_measurement_done = 0;
     tof_timeout = 0;
     tof_capture_value = 0;
-    TIM3->SR = 0;
-    TIM3->CNT = 0;
+
+    /* === КРИТИЧНО: ПОЛНЫЙ СБРОС ПЕРЕД ИЗМЕРЕНИЕМ === */
+    TIM3->DIER &= ~TIM_DIER_CC4IE;  /* Отключаем прерывание ПЕРЕД сбросом */
+    TIM3->SR = 0;                    /* Сбрасываем все флаги */
+    TIM3->CNT = 0;                   /* Сбрасываем счётчик */
+    __DSB();                         /* Барьер памяти для гарантии порядка операций */
+
+    /* Убеждаемся что таймер запущен */
     TIM3->CR1 |= TIM_CR1_CEN;
     __NOP();
 
@@ -399,6 +486,24 @@ uint32_t measure_time_of_flight(void)
     generate_pulse_and_measure();
 
     uint32_t start_wait = HAL_GetTick();
+
+    /* === ЖДЁМ ВЫХОДА ИЗ МЁРТВОГО ОКНА === */
+    volatile uint32_t cnt_value;
+    uint32_t blank_timeout = 0;
+
+    do {
+        cnt_value = TIM3->CNT;
+        if ((HAL_GetTick() - start_wait) >= 2) {  /* 2 мс достаточно для 50 мкс */
+            blank_timeout = 1;
+            break;
+        }
+    } while (cnt_value < BLANKING_WINDOW_TICKS);
+
+    /* === МЁРТВОЕ ОКНО ПРОЙДЕНО — ВКЛЮЧАЕМ ЗАХВАТ === */
+    TIM3->SR = 0;                  /* Ещё раз сбрасываем флаги перед включением */
+    TIM3->DIER |= TIM_DIER_CC4IE;  /* Включаем прерывание ТОЛЬКО после мёртвого окна */
+
+    /* === ЖДЁМ ЗАХВАТА === */
     while (!tof_measurement_done && !tof_timeout) {
         if ((HAL_GetTick() - start_wait) >= MEAS_TIMEOUT_MS) {
             tof_timeout = 1;
