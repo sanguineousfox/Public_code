@@ -2,270 +2,108 @@
 /**
   ******************************************************************************
   * @file    stm32f1xx_it.c
-  * @brief   Interrupt Service Routines for magnetostrictive sensor TOF measurement
-  *          CRITICAL: ABSOLUTELY MINIMAL latency for 2 us signal capture
+  * @brief   Interrupt Service Routines
   ******************************************************************************
   */
 /* USER CODE END Header */
 
-/* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "stm32f1xx_it.h"
 
-/* Private includes ----------------------------------------------------------*/
-/* USER CODE BEGIN Includes */
-/* USER CODE END Includes */
-
-/* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN TD */
-
-/* Глобальные переменные для измерения времени пролёта (объявлены в main.c) */
 extern volatile uint32_t tof_capture_value;
 extern volatile uint8_t tof_measurement_done;
-
+extern volatile uint32_t captured_pulses[];
+extern volatile uint8_t capture_count;
+extern volatile uint8_t expected_pulse_pairs;
+extern volatile uint32_t last_capture_cnt;
+extern volatile uint8_t dead_time_active;
 /* USER CODE END TD */
 
-/* Private define ------------------------------------------------------------*/
-/* USER CODE BEGIN PD */
-/* USER CODE END PD */
-
-/* Private macro -------------------------------------------------------------*/
-/* USER CODE BEGIN PM */
-/* USER CODE END PM */
-
-/* Private variables ---------------------------------------------------------*/
-/* USER CODE BEGIN PV */
-/* USER CODE END PV */
-
-/* Private function prototypes -----------------------------------------------*/
-/* USER CODE BEGIN PFP */
-/* USER CODE END PFP */
-
-/* Private user code ---------------------------------------------------------*/
-/* USER CODE BEGIN 0 */
-/* USER CODE END 0 */
-
-/* External variables --------------------------------------------------------*/
 extern UART_HandleTypeDef huart1;
 extern UART_HandleTypeDef huart2;
 extern ADC_HandleTypeDef hadc1;
 extern ADC_HandleTypeDef hadc2;
 
-/******************************************************************************/
-/*           Cortex-M3 Processor Interruption and Exception Handlers          */
-/******************************************************************************/
-/**
-  * @brief This function handles Non maskable interrupt.
-  */
-void NMI_Handler(void)
-{
-  /* USER CODE BEGIN NonMaskableInt_IRQn 0 */
+void NMI_Handler(void) { while (1) { } }
+void HardFault_Handler(void) { while (1) { } }
+void MemManage_Handler(void) { while (1) { } }
+void BusFault_Handler(void) { while (1) { } }
+void UsageFault_Handler(void) { while (1) { } }
+void SVC_Handler(void) { }
+void DebugMon_Handler(void) { }
+void PendSV_Handler(void) { }
 
-  /* USER CODE END NonMaskableInt_IRQn 0 */
-  while (1)
-  {
-  }
-  /* USER CODE BEGIN NonMaskableInt_IRQn 1 */
-
-  /* USER CODE END NonMaskableInt_IRQn 1 */
-}
-
-/**
-  * @brief This function handles Hard fault interrupt.
-  */
-void HardFault_Handler(void)
-{
-  /* USER CODE BEGIN HardFault_IRQn 0 */
-
-  /* USER CODE END HardFault_IRQn 0 */
-  while (1)
-  {
-  }
-  /* USER CODE BEGIN HardFault_IRQn 1 */
-
-  /* USER CODE END HardFault_IRQn 1 */
-}
-
-/**
-  * @brief This function handles Memory management fault.
-  */
-void MemManage_Handler(void)
-{
-  /* USER CODE BEGIN MemoryManagement_IRQn 0 */
-
-  /* USER CODE END MemoryManagement_IRQn 0 */
-  while (1)
-  {
-  }
-  /* USER CODE BEGIN MemoryManagement_IRQn 1 */
-
-  /* USER CODE END MemoryManagement_IRQn 1 */
-}
-
-/**
-  * @brief This function handles Prefetch fault, memory access fault.
-  */
-void BusFault_Handler(void)
-{
-  /* USER CODE BEGIN BusFault_IRQn 0 */
-
-  /* USER CODE END BusFault_IRQn 0 */
-  while (1)
-  {
-  }
-  /* USER CODE BEGIN BusFault_IRQn 1 */
-
-  /* USER CODE END BusFault_IRQn 1 */
-}
-
-/**
-  * @brief This function handles Undefined instruction or illegal state.
-  */
-void UsageFault_Handler(void)
-{
-  /* USER CODE BEGIN UsageFault_IRQn 0 */
-
-  /* USER CODE END UsageFault_IRQn 0 */
-  while (1)
-  {
-  }
-  /* USER CODE BEGIN UsageFault_IRQn 1 */
-
-  /* USER CODE END UsageFault_IRQn 1 */
-}
-
-/**
-  * @brief This function handles System service call via SWI instruction.
-  */
-void SVC_Handler(void)
-{
-  /* USER CODE BEGIN SVCall_IRQn 0 */
-
-  /* USER CODE END SVCall_IRQn 0 */
-  /* USER CODE BEGIN SVCall_IRQn 1 */
-
-  /* USER CODE END SVCall_IRQn 1 */
-}
-
-/**
-  * @brief This function handles Debug monitor.
-  */
-void DebugMon_Handler(void)
-{
-  /* USER CODE BEGIN DebugMonitor_IRQn 0 */
-
-  /* USER CODE END DebugMonitor_IRQn 0 */
-  /* USER CODE BEGIN DebugMonitor_IRQn 1 */
-
-  /* USER CODE END DebugMonitor_IRQn 1 */
-}
-
-/**
-  * @brief This function handles Pendable request for system service.
-  */
-void PendSV_Handler(void)
-{
-  /* USER CODE BEGIN PendSV_IRQn 0 */
-
-  /* USER CODE END PendSV_IRQn 0 */
-  /* USER CODE BEGIN PendSV_IRQn 1 */
-
-  /* USER CODE END PendSV_IRQn 1 */
-}
-
-/**
-  * @brief This function handles System tick timer.
-  */
 void SysTick_Handler(void)
 {
-  /* USER CODE BEGIN SysTick_IRQn 0 */
-
-  /* USER CODE END SysTick_IRQn 0 */
   HAL_IncTick();
-  /* USER CODE BEGIN SysTick_IRQn 1 */
-
-  /* USER CODE END SysTick_IRQn 1 */
 }
 
-/******************************************************************************/
-/* STM32F1xx Peripheral Interrupt Handlers                                    */
-/* Add here the Interrupt Handlers for the used peripherals.                  */
-/* For the available peripheral interrupt handler names,                      */
-/* please refer to the startup file (startup_stm32f1xx.s).                    */
-/******************************************************************************/
-
-/**
-  * @brief This function handles TIM3 global interrupt (CLIK input capture).
-  *        ABSOLUTELY MINIMAL CODE - ONLY 4 OPERATIONS!
-  */
 void TIM3_IRQHandler(void)
 {
-  /* USER CODE BEGIN TIM3_IRQn 0 */
-
-  /* ПРОВЕРКА ФЛАГА ЗАХВАТА */
   if (TIM3->SR & TIM_SR_CC4IF) {
-      /* 1. Сразу сохраняем значение захвата */
-      tof_capture_value = TIM3->CCR4;
+      uint32_t cnt_now = TIM3->CNT;
 
-      /* 2. Останавливаем таймер */
-      TIM3->CR1 = 0;
+      /* 1. Проверка мёртвого времени 65 мкс ТОЛЬКО перед нечётными */
+      if (dead_time_active) {
+          uint32_t elapsed;
+          if (cnt_now >= last_capture_cnt) {
+              elapsed = cnt_now - last_capture_cnt;
+          } else {
+              elapsed = (0xFFFF - last_capture_cnt) + cnt_now;
+          }
 
-      /* 3. Устанавливаем флаг завершения измерения */
-      tof_measurement_done = 1;
+          if (elapsed < DEAD_TIME_TICKS) {
+              TIM3->SR = 0;
+              return;
+          }
 
-      /* 4. Сбрасываем флаг прерывания */
+          dead_time_active = 0;
+      }
+
+      /* 2. Сохраняем импульс в массив */
+      if (capture_count < MAX_CAPTURED_PULSES) {
+          captured_pulses[capture_count] = cnt_now;
+          capture_count++;
+      }
+
+      /* 3. Запоминаем время */
+      last_capture_cnt = cnt_now;
+
+      /* 4. Включаем мёртвое время ТОЛЬКО после чётных (2, 4) */
+      if ((capture_count % 2) == 0) {
+          dead_time_active = 1;
+      }
+      /* После нечётных (1, 3) dead_time_active = 0 — чётный ловится сразу */
+
+      /* 5. ToF = первый импульс */
+      if (capture_count >= 1) {
+          tof_capture_value = captured_pulses[0];
+      }
+
+      /* 6. Проверка количества импульсов (4 импульса) */
+      uint8_t expected_pulses = expected_pulse_pairs * 2;
+      if (capture_count >= expected_pulses) {
+          tof_measurement_done = 1;
+      }
+
+      /* 7. Сброс флага */
       TIM3->SR = 0;
   }
-
-  /* USER CODE END TIM3_IRQn 0 */
-  /* USER CODE BEGIN TIM3_IRQn 1 */
-
-  /* USER CODE END TIM3_IRQn 1 */
 }
 
-/**
-  * @brief This function handles USART1 global interrupt.
-  */
 void USART1_IRQHandler(void)
 {
-  /* USER CODE BEGIN USART1_IRQn 0 */
-
-  /* USER CODE END USART1_IRQn 0 */
   HAL_UART_IRQHandler(&huart1);
-  /* USER CODE BEGIN USART1_IRQn 1 */
-
-  /* USER CODE END USART1_IRQn 1 */
 }
 
-/**
-  * @brief This function handles USART2 global interrupt.
-  */
 void USART2_IRQHandler(void)
 {
-  /* USER CODE BEGIN USART2_IRQn 0 */
-
-  /* USER CODE END USART2_IRQn 0 */
   HAL_UART_IRQHandler(&huart2);
-  /* USER CODE BEGIN USART2_IRQn 1 */
-
-  /* USER CODE END USART2_IRQn 1 */
 }
 
-/**
-  * @brief This function handles ADC1 and ADC2 global interrupts.
-  */
 void ADC1_2_IRQHandler(void)
 {
-  /* USER CODE BEGIN ADC1_2_IRQn 0 */
-
-  /* USER CODE END ADC1_2_IRQn 0 */
   HAL_ADC_IRQHandler(&hadc1);
   HAL_ADC_IRQHandler(&hadc2);
-  /* USER CODE BEGIN ADC1_2_IRQn 1 */
-
-  /* USER CODE END ADC1_2_IRQn 1 */
 }
-
-/* USER CODE BEGIN 1 */
-
-/* USER CODE END 1 */

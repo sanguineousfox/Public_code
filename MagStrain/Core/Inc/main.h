@@ -5,20 +5,14 @@
 extern "C" {
 #endif
 
-/* Includes ------------------------------------------------------------------*/
 #include "stm32f1xx_hal.h"
 
-/* ВАЖНО: УБРАТЬ #include "modbus.h" отсюда! */
-/* modbus.h должен включать main.h, а не наоборот */
-
-/* Exported functions prototypes ---------------------------------------------*/
 void Error_Handler(void);
 void USART2_Print(const char* str);
 void uint32_to_dec_str(uint32_t value, char* buffer);
 void USART2_PrintHexByte(uint8_t byte);
 void USART2_PrintHexBuffer(const uint8_t* buffer, uint16_t length);
 
-/* Private defines -----------------------------------------------------------*/
 #define Read_24V_Pin GPIO_PIN_0
 #define Read_24V_GPIO_Port GPIOA
 #define Read_12V_Pin GPIO_PIN_1
@@ -40,9 +34,12 @@ void USART2_PrintHexBuffer(const uint8_t* buffer, uint16_t length);
 #define Switch_In_impuls_Pin GPIO_PIN_7
 #define Switch_In_impuls_GPIO_Port GPIOB
 
-/* ==========================================================================
- * ВАЖНО: Объявления внешних переменных должны быть ЗДЕСЬ (перед #endif)
- * ========================================================================== */
+/* === КОНСТАНТЫ ЗАХВАТА === */
+#define MAX_PULSE_PAIRS             4
+#define MAX_CAPTURED_PULSES         (MAX_PULSE_PAIRS * 2)
+#define BLANKING_WINDOW_TICKS       65     /* 50 мкс — пропускаем триггер */
+#define DEAD_TIME_TICKS             670     /* 65 мкс — между КАЖДЫМИ двумя импульсами */
+
 extern UART_HandleTypeDef huart1;
 extern UART_HandleTypeDef huart2;
 extern ADC_HandleTypeDef hadc1;
