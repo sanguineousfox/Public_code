@@ -2,7 +2,6 @@
 /**
   @file           : modbus.c
   @brief          : Modbus RTU implementation (ПМП-201Е)
-                   : Поддержка чтения (0x03, 0x04) и записи (0x06, 0x10)
 */
 /* USER CODE END Header */
 
@@ -38,18 +37,18 @@ typedef struct {
 } Param_Float_Default;
 
 static const Param_Float_Default default_float_params[] = {
-    {MB_ADDR_WAVEGUIDE_LEN,   6000.0f},   /* 2096: Длина звукопровода (м) */
-    {MB_ADDR_CAL_LOW_LVL,     0.0f},      /* 2000: Нижняя калибровка уровня */
-    {MB_ADDR_CAL_HIGH_LVL,    100.0f},    /* 2002: Верхняя калибровка уровня */
-    {MB_ADDR_PROBE_DEPTH,     0.0f},      /* 2004: Глубина погружения поплавка */
-    {MB_ADDR_TANK_HEIGHT,     10000.0f},  /* 2010: Высота резервуара */
-    {MB_ADDR_DAMPING_TIME,    10.0f},     /* 2086: Демпфирование уровня */
-    {MB_ADDR_POLL_PERIOD,     1.0f},      /* 2088: Период опроса */
-    {MB_ADDR_LEVEL_OFFSET,    0.0f},      /* 2120: Поправка уровня */
-    {MB_ADDR_THRESH_LVL,      50.0f},     /* 2040: Порог обнуления уровня */
+    /* Адрес Modbus │ Значение │ Описание */
+    {MB_ADDR_WAVEGUIDE_LEN,   1.0f},      /* 2096 │ 1 м     │ Длина звукопровода (Lc).Физическая длина волновода резервуара.  Используется для расчёта % заполнения. */
+    {MB_ADDR_CAL_LOW_LVL,     0.1f},      /* 2000 │ 0.5 м   │ Нижняя калибровка уровня (h_).Минимальный уровень для расчёта мёртвого окна. Защищает от захвата триггерного импульса. */
+    {MB_ADDR_CAL_HIGH_LVL,    0.9f},      /* 2002 │ 3.0 м   │ Верхняя калибровка уровня (h¯).Максимальный уровень измерений. Используется для расчёта % заполнения. */
+    {MB_ADDR_PROBE_DEPTH,     0.0f},      /* 2004 │ 0.0 м   │ Глубина погружения поплавка (d1). Смещение датчика относительно нуля. */
+    {MB_ADDR_TANK_HEIGHT,     0.95f},     /* 2010 │ 4 м     │ Высота резервуара (H). Полный объём резервуара. */
+    {MB_ADDR_DAMPING_TIME,    10.0f},     /* 2086 │ 10 с    │ Время демпфирования (dt). Сглаживание колебаний уровня. */
+    {MB_ADDR_POLL_PERIOD,     1.0f},      /* 2088 │ 1 с     │ Период опроса. Как часто производить измерения. Диапазон: 1..60 секунд. */
+    {MB_ADDR_LEVEL_OFFSET,    0.0f},      /* 2120 │ 0.0 м   │ Поправка уровня (dh). Коррекция систематической погрешности. */
+    {MB_ADDR_THRESH_LVL,      0.9f},      /* 2040 │ 2.9 м   │ Порог обнуления уровня (d7). При уровне ниже этого — показание = 0. */
 };
-
-/* ЕДИНСТВЕННОЕ определение (убран дубликат!) */
+/* ★ ЕДИНСТВЕННОЕ ОПРЕДЕЛЕНИЕ (убран дубликат!) ★ */
 #define DEFAULT_FLOAT_PARAMS_COUNT (sizeof(default_float_params) / sizeof(default_float_params[0]))
 
 typedef struct {
@@ -58,17 +57,17 @@ typedef struct {
 } Param_Int_Default;
 
 static const Param_Int_Default default_int_params[] = {
-    {MB_ADDR_MB_ADDR_SET,     1},
-    {MB_ADDR_MB_BAUD_SET,     19200},
-    {MB_ADDR_MEDIUM_TYPE,     1},
-    {MB_ADDR_UNIT_LEVEL,      0},
-    {MB_ADDR_UNIT_TEMP,       0},
-    {MB_ADDR_FW_VERSION,      100},
+    /* Адрес Modbus │ Значение │ Описание */
+    {MB_ADDR_MB_ADDR_SET,     1},       /* 35   │ 1       │ Адрес устройства в сети Modbus.   Диапазон: 1..247. */
+    {MB_ADDR_MB_BAUD_SET,     19200},   /* 36   │ 19200   │ Скорость RS-485 (бит/с). Стандартные: 9600, 19200, 38400, 57600, 115200. */
+    {MB_ADDR_MEDIUM_TYPE,     1},       /* 2154 │ 1       │ Тип среды (cE). 0=произвольная, 1=нефтепродукты, 2=СУГ. */
+    {MB_ADDR_UNIT_LEVEL,      0},       /* 2160 │ 0       │ Единицы уровня (Eh). 8=мм, 9=м. */
+    {MB_ADDR_UNIT_TEMP,       0},       /* 2162 │ 0       │ Единицы температуры (Et).   24=°C. */
+    {MB_ADDR_FW_VERSION,      100},     /* 2420 │ 100     │ Версия прошивки. 100 = v1.00, 101 = v1.01, и т.д. */
 };
 
 #define DEFAULT_INT_PARAMS_COUNT (sizeof(default_int_params) / sizeof(default_int_params[0]))
 
-/* Внешние переменные */
 extern UART_HandleTypeDef huart1;
 
 /* ==========================================================================
@@ -116,14 +115,12 @@ static float RegistersToFloat(uint16_t reg_high, uint16_t reg_low)
    ========================================================================== */
 static uint16_t ModBus_AddressToIndex(uint16_t addr)
 {
-    /* Группа 3: Адреса 2000-2418 -> Индексы 0-209 */
     if (addr >= 2000 && addr <= 2418) {
         uint16_t idx = (addr - 2000) / 2;
         if (idx < MODBUS_REG_ARRAY_SIZE) {
             return idx;
         }
     }
-    /* Группа 2: Адреса 1000-1040 -> Индексы 0-20 */
     if (addr >= 1000 && addr <= 1040) {
         uint16_t idx = (addr - 1000) / 2;
         if (idx < 32) {
@@ -141,13 +138,12 @@ float ModBus_GetWaveguideLength(void)
     uint16_t idx = ModBus_AddressToIndex(MB_ADDR_WAVEGUIDE_LEN);
     if (idx != 0xFFFF) {
         float value = RegistersToFloat(modbus.regs[idx], modbus.regs[idx + 1]);
-        /* Защита от некорректных значений */
         if (value < 100.0f || value > 50000.0f) {
-            return 6000.0f;
+            return 3000.0f;
         }
         return value;
     }
-    return 6000.0f;
+    return 3000.0f;
 }
 
 void ModBus_SetWaveguideLength(float length_m)
@@ -430,12 +426,6 @@ void ModBus_Init(void)
         ModBus_SetParameter_Int(default_int_params[i].address, default_int_params[i].default_value);
     }
 
-    /* Проверка длины волновода после инициализации */
-    float check_len = ModBus_GetWaveguideLength();
-    if (check_len < 100.0f) {
-        ModBus_SetWaveguideLength(6000.0f);
-    }
-
     HAL_UART_Receive_IT(&huart1, &modbus.rx_byte, 1);
 }
 
@@ -480,12 +470,10 @@ void ModBus_UpdateMeasurements(float level, float temp, float waveguide)
     FloatToRegisters(temp, &modbus.regs[2], &modbus.regs[3]);
 
     float level_pct = 0.0f;
-    if (waveguide > 100.0f) {
+    if (waveguide > 0.0f) {
         level_pct = (level / waveguide) * 100.0f;
     }
     FloatToRegisters(level_pct, &modbus.regs[4], &modbus.regs[5]);
-
-    /* НЕ перезаписываем волновод из измерений! */
 }
 
 void ModBus_UpdateFirmwareVersion(uint16_t version)
