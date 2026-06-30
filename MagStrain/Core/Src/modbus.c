@@ -1,7 +1,7 @@
 /* USER CODE BEGIN Header */
 /**
   @file           : modbus.c
-  @brief          : Modbus RTU implementation (ПМП-201Е)
+  @brief          : Modbus RTU implementation
 */
 /* USER CODE END Header */
 
@@ -13,6 +13,7 @@
    КОНФИГУРАЦИЯ ПАМЯТИ
    ========================================================================== */
 #define MODBUS_REG_ARRAY_SIZE   256
+#define INPUT_REGS_COUNT        64
 
 /* ==========================================================================
    СТРУКТУРА ДАННЫХ MODBUS
@@ -37,18 +38,17 @@ typedef struct {
 } Param_Float_Default;
 
 static const Param_Float_Default default_float_params[] = {
-    /* Адрес Modbus │ Значение │ Описание */
-    {MB_ADDR_WAVEGUIDE_LEN,   1.0f},      /* 2096 │ 1 м     │ Длина звукопровода (Lc).Физическая длина волновода резервуара.  Используется для расчёта % заполнения. */
-    {MB_ADDR_CAL_LOW_LVL,     0.1f},      /* 2000 │ 0.5 м   │ Нижняя калибровка уровня (h_).Минимальный уровень для расчёта мёртвого окна. Защищает от захвата триггерного импульса. */
-    {MB_ADDR_CAL_HIGH_LVL,    0.9f},      /* 2002 │ 3.0 м   │ Верхняя калибровка уровня (h¯).Максимальный уровень измерений. Используется для расчёта % заполнения. */
-    {MB_ADDR_PROBE_DEPTH,     0.0f},      /* 2004 │ 0.0 м   │ Глубина погружения поплавка (d1). Смещение датчика относительно нуля. */
-    {MB_ADDR_TANK_HEIGHT,     0.95f},     /* 2010 │ 4 м     │ Высота резервуара (H). Полный объём резервуара. */
-    {MB_ADDR_DAMPING_TIME,    10.0f},     /* 2086 │ 10 с    │ Время демпфирования (dt). Сглаживание колебаний уровня. */
-    {MB_ADDR_POLL_PERIOD,     1.0f},      /* 2088 │ 1 с     │ Период опроса. Как часто производить измерения. Диапазон: 1..60 секунд. */
-    {MB_ADDR_LEVEL_OFFSET,    0.0f},      /* 2120 │ 0.0 м   │ Поправка уровня (dh). Коррекция систематической погрешности. */
-    {MB_ADDR_THRESH_LVL,      0.9f},      /* 2040 │ 2.9 м   │ Порог обнуления уровня (d7). При уровне ниже этого — показание = 0. */
+    {MB_ADDR_WAVEGUIDE_LEN,   1.0f},
+    {MB_ADDR_CAL_LOW_LVL,     0.1f},
+    {MB_ADDR_CAL_HIGH_LVL,    0.9f},
+    {MB_ADDR_PROBE_DEPTH,     0.0f},
+    {MB_ADDR_TANK_HEIGHT,     0.95f},
+    {MB_ADDR_DAMPING_TIME,    10.0f},
+    {MB_ADDR_POLL_PERIOD,     1.0f},
+    {MB_ADDR_LEVEL_OFFSET,    0.0f},
+    {MB_ADDR_THRESH_LVL,      0.9f},
 };
-/* ★ ЕДИНСТВЕННОЕ ОПРЕДЕЛЕНИЕ (убран дубликат!) ★ */
+
 #define DEFAULT_FLOAT_PARAMS_COUNT (sizeof(default_float_params) / sizeof(default_float_params[0]))
 
 typedef struct {
@@ -57,13 +57,12 @@ typedef struct {
 } Param_Int_Default;
 
 static const Param_Int_Default default_int_params[] = {
-    /* Адрес Modbus │ Значение │ Описание */
-    {MB_ADDR_MB_ADDR_SET,     1},       /* 35   │ 1       │ Адрес устройства в сети Modbus.   Диапазон: 1..247. */
-    {MB_ADDR_MB_BAUD_SET,     19200},   /* 36   │ 19200   │ Скорость RS-485 (бит/с). Стандартные: 9600, 19200, 38400, 57600, 115200. */
-    {MB_ADDR_MEDIUM_TYPE,     1},       /* 2154 │ 1       │ Тип среды (cE). 0=произвольная, 1=нефтепродукты, 2=СУГ. */
-    {MB_ADDR_UNIT_LEVEL,      0},       /* 2160 │ 0       │ Единицы уровня (Eh). 8=мм, 9=м. */
-    {MB_ADDR_UNIT_TEMP,       0},       /* 2162 │ 0       │ Единицы температуры (Et).   24=°C. */
-    {MB_ADDR_FW_VERSION,      100},     /* 2420 │ 100     │ Версия прошивки. 100 = v1.00, 101 = v1.01, и т.д. */
+    {MB_ADDR_MB_ADDR_SET,     1},
+    {MB_ADDR_MB_BAUD_SET,     19200},
+    {MB_ADDR_MEDIUM_TYPE,     1},
+    {MB_ADDR_UNIT_LEVEL,      0},
+    {MB_ADDR_UNIT_TEMP,       0},
+    {MB_ADDR_FW_VERSION,      100},
 };
 
 #define DEFAULT_INT_PARAMS_COUNT (sizeof(default_int_params) / sizeof(default_int_params[0]))
@@ -73,6 +72,7 @@ extern UART_HandleTypeDef huart1;
 /* ==========================================================================
    ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
    ========================================================================== */
+
 uint16_t ModBus_CRC16(const uint8_t *data, uint16_t length)
 {
     uint16_t crc = 0xFFFF;
@@ -111,19 +111,22 @@ static float RegistersToFloat(uint16_t reg_high, uint16_t reg_low)
 }
 
 /* ==========================================================================
-   ПРЕОБРАЗОВАНИЕ АДРЕСОВ
+   ПРЕОБРАЗОВАНИЕ АДРЕСОВ (РАСШИРЕННЫЕ ДИАПАЗОНЫ)
    ========================================================================== */
+
 static uint16_t ModBus_AddressToIndex(uint16_t addr)
 {
-    if (addr >= 2000 && addr <= 2418) {
+    /* Holding registers: 2000-2498 */
+    if (addr >= 2000 && addr <= 2498) {
         uint16_t idx = (addr - 2000) / 2;
         if (idx < MODBUS_REG_ARRAY_SIZE) {
             return idx;
         }
     }
-    if (addr >= 1000 && addr <= 1040) {
+    /* Input registers: 1000-1126 (64 регистра) */
+    if (addr >= 1000 && addr <= 1126) {
         uint16_t idx = (addr - 1000) / 2;
-        if (idx < 32) {
+        if (idx < INPUT_REGS_COUNT) {
             return idx;
         }
     }
@@ -133,6 +136,7 @@ static uint16_t ModBus_AddressToIndex(uint16_t addr)
 /* ==========================================================================
    ФУНКЦИИ ДЛЯ РАБОТЫ С ПАРАМЕТРАМИ
    ========================================================================== */
+
 float ModBus_GetWaveguideLength(void)
 {
     uint16_t idx = ModBus_AddressToIndex(MB_ADDR_WAVEGUIDE_LEN);
@@ -193,6 +197,7 @@ void ModBus_SetParameter_Int(uint16_t addr, uint16_t value)
 /* ==========================================================================
    ФУНКЦИИ MODBUS
    ========================================================================== */
+
 static void ModBus_SendException(uint8_t function, uint8_t exception_code)
 {
     uint8_t response[5];
@@ -207,7 +212,7 @@ static void ModBus_SendException(uint8_t function, uint8_t exception_code)
 
 static void ModBus_ReadHoldingRegisters(uint16_t start_addr, uint16_t reg_count)
 {
-    if (start_addr < 2000 || start_addr > 2418) {
+    if (start_addr < 2000 || start_addr > 2498) {
         ModBus_SendException(0x03, 0x02);
         return;
     }
@@ -243,7 +248,8 @@ static void ModBus_ReadHoldingRegisters(uint16_t start_addr, uint16_t reg_count)
 
 static void ModBus_ReadInputRegisters(uint16_t start_addr, uint16_t reg_count)
 {
-    if (start_addr < 1000 || start_addr > 1040) {
+    /*  РАСШИРЕННЫЙ ДИАПАЗОН: 1000-1126 */
+    if (start_addr < 1000 || start_addr > 1126) {
         ModBus_SendException(0x04, 0x02);
         return;
     }
@@ -253,7 +259,7 @@ static void ModBus_ReadInputRegisters(uint16_t start_addr, uint16_t reg_count)
     }
 
     uint16_t idx = ModBus_AddressToIndex(start_addr);
-    if (idx == 0xFFFF || (idx + reg_count) > 32) {
+    if (idx == 0xFFFF || (idx + reg_count) > INPUT_REGS_COUNT) {
         ModBus_SendException(0x04, 0x02);
         return;
     }
@@ -279,7 +285,7 @@ static void ModBus_ReadInputRegisters(uint16_t start_addr, uint16_t reg_count)
 
 static void ModBus_WriteSingleRegister(uint16_t reg_addr, uint16_t value)
 {
-    if (reg_addr < 2000 || reg_addr > 2418) {
+    if (reg_addr < 2000 || reg_addr > 2498) {
         ModBus_SendException(0x06, 0x02);
         return;
     }
@@ -309,7 +315,7 @@ static void ModBus_WriteSingleRegister(uint16_t reg_addr, uint16_t value)
 
 static void ModBus_WriteMultipleRegisters(uint16_t start_addr, uint16_t reg_count, uint8_t *data)
 {
-    if (start_addr < 2000 || start_addr > 2418) {
+    if (start_addr < 2000 || start_addr > 2498) {
         ModBus_SendException(0x10, 0x02);
         return;
     }
@@ -325,7 +331,7 @@ static void ModBus_WriteMultipleRegisters(uint16_t start_addr, uint16_t reg_coun
     }
 
     for(uint16_t i = 0; i < reg_count; i++) {
-        uint16_t val = (data[i * 2] << 8) | data[i * 2 + 1];
+        uint16_t val = ((uint16_t)data[i * 2] << 8) | data[i * 2 + 1];
         modbus.regs[idx + i] = val;
     }
 
@@ -352,7 +358,7 @@ static void ModBus_ProcessFrame(void)
         return;
     }
 
-    uint16_t received_crc = (modbus.rx_buffer[modbus.rx_index - 1] << 8) |
+    uint16_t received_crc = ((uint16_t)modbus.rx_buffer[modbus.rx_index - 1] << 8) |
                            modbus.rx_buffer[modbus.rx_index - 2];
     uint16_t calculated_crc = ModBus_CRC16(modbus.rx_buffer, modbus.rx_index - 2);
 
@@ -370,32 +376,32 @@ static void ModBus_ProcessFrame(void)
     switch(modbus.rx_buffer[1]) {
         case 0x03:
             if (modbus.rx_index >= 8) {
-                uint16_t start_addr = (modbus.rx_buffer[2] << 8) | modbus.rx_buffer[3];
-                uint16_t reg_count = (modbus.rx_buffer[4] << 8) | modbus.rx_buffer[5];
+                uint16_t start_addr = ((uint16_t)modbus.rx_buffer[2] << 8) | modbus.rx_buffer[3];
+                uint16_t reg_count = ((uint16_t)modbus.rx_buffer[4] << 8) | modbus.rx_buffer[5];
                 ModBus_ReadHoldingRegisters(start_addr, reg_count);
             }
             break;
 
         case 0x04:
             if (modbus.rx_index >= 8) {
-                uint16_t start_addr = (modbus.rx_buffer[2] << 8) | modbus.rx_buffer[3];
-                uint16_t reg_count = (modbus.rx_buffer[4] << 8) | modbus.rx_buffer[5];
+                uint16_t start_addr = ((uint16_t)modbus.rx_buffer[2] << 8) | modbus.rx_buffer[3];
+                uint16_t reg_count = ((uint16_t)modbus.rx_buffer[4] << 8) | modbus.rx_buffer[5];
                 ModBus_ReadInputRegisters(start_addr, reg_count);
             }
             break;
 
         case 0x06:
             if (modbus.rx_index >= 8) {
-                uint16_t reg_addr = (modbus.rx_buffer[2] << 8) | modbus.rx_buffer[3];
-                uint16_t reg_value = (modbus.rx_buffer[4] << 8) | modbus.rx_buffer[5];
+                uint16_t reg_addr = ((uint16_t)modbus.rx_buffer[2] << 8) | modbus.rx_buffer[3];
+                uint16_t reg_value = ((uint16_t)modbus.rx_buffer[4] << 8) | modbus.rx_buffer[5];
                 ModBus_WriteSingleRegister(reg_addr, reg_value);
             }
             break;
 
         case 0x10:
              if (modbus.rx_index >= 9) {
-                uint16_t start_addr = (modbus.rx_buffer[2] << 8) | modbus.rx_buffer[3];
-                uint16_t reg_count = (modbus.rx_buffer[4] << 8) | modbus.rx_buffer[5];
+                uint16_t start_addr = ((uint16_t)modbus.rx_buffer[2] << 8) | modbus.rx_buffer[3];
+                uint16_t reg_count = ((uint16_t)modbus.rx_buffer[4] << 8) | modbus.rx_buffer[5];
                 ModBus_WriteMultipleRegisters(start_addr, reg_count, &modbus.rx_buffer[7]);
             }
             break;

@@ -26,6 +26,7 @@ void USART2_PrintHexBuffer(const uint8_t* buffer, uint16_t length);
 void TIM3_InputCapture_Init(void);
 void generate_pulse_and_measure(void);
 uint32_t measure_time_of_flight(void);
+uint32_t measure_time_of_flight_test(void);
 void Read_All_Voltages(void);
 void Read_Temperature(void);
 void Process_Measurement_Results(float tof_us, float position_mm, uint8_t signal_captured);
