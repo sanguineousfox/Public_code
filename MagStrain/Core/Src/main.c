@@ -482,7 +482,7 @@ int main(void)
     USART2_Print("=== РЕЖИМ ТЕСТА ЛИНИИ ФИКСАЦИИ АКТИВЕН ===\r\n");
 #endif
 
-    USART2_Print("ПМП-201Е запущен. Адрес modbus: 1, скорость: 19200 бод.\r\n");
+    USART2_Print(" Адрес modbus: 1, скорость: 19200 бод.\r\n");
     USART2_Print("[DBG] Период измерений: ");
     USART2_PrintInt(current_poll_period_ms / 1000);
     USART2_Print(" сек, Мёртвое окно: ");

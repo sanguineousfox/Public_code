@@ -249,7 +249,7 @@ static void ModBus_ReadHoldingRegisters(uint16_t start_addr, uint16_t reg_count)
 static void ModBus_ReadInputRegisters(uint16_t start_addr, uint16_t reg_count)
 {
     /*  РАСШИРЕННЫЙ ДИАПАЗОН: 1000-1126 */
-    if (start_addr < 1000 || start_addr > 1126) {
+    if (start_addr < 999 || start_addr > 1126) {
         ModBus_SendException(0x04, 0x02);
         return;
     }

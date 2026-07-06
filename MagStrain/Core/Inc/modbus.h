@@ -1,7 +1,7 @@
 /* USER CODE BEGIN Header */
 /**
   @file           : modbus.h
-  @brief          : Заголовочный файл Modbus RTU (ПМП-201Е)
+  @brief          : Заголовочный файл Modbus RTU
                    : Карта регистров с подробными комментариями
 */
 /* USER CODE END Header */

@@ -7,23 +7,23 @@ Idx Name          Size      VMA       LMA       File off  Algn
                   CONTENTS, ALLOC, LOAD, READONLY, DATA
   1 .text         00006788  0800010c  0800010c  0001010c  2**2
                   CONTENTS, ALLOC, LOAD, READONLY, CODE
-  2 .rodata       000007e4  08006894  08006894  00016894  2**2
+  2 .rodata       000007c8  08006894  08006894  00016894  2**2
                   CONTENTS, ALLOC, LOAD, READONLY, DATA
-  3 .ARM.extab    00000000  08007078  08007078  00020024  2**0
+  3 .ARM.extab    00000000  0800705c  0800705c  00020024  2**0
                   CONTENTS
-  4 .ARM          00000000  08007078  08007078  00020024  2**0
+  4 .ARM          00000000  0800705c  0800705c  00020024  2**0
                   CONTENTS
-  5 .preinit_array 00000000  08007078  08007078  00020024  2**0
+  5 .preinit_array 00000000  0800705c  0800705c  00020024  2**0
                   CONTENTS, ALLOC, LOAD, DATA
-  6 .init_array   00000004  08007078  08007078  00017078  2**2
+  6 .init_array   00000004  0800705c  0800705c  0001705c  2**2
                   CONTENTS, ALLOC, LOAD, DATA
-  7 .fini_array   00000004  0800707c  0800707c  0001707c  2**2
+  7 .fini_array   00000004  08007060  08007060  00017060  2**2
                   CONTENTS, ALLOC, LOAD, DATA
-  8 .data         00000024  20000000  08007080  00020000  2**2
+  8 .data         00000024  20000000  08007064  00020000  2**2
                   CONTENTS, ALLOC, LOAD, DATA
-  9 .bss          000004cc  20000024  080070a4  00020024  2**2
+  9 .bss          000004cc  20000024  08007088  00020024  2**2
                   ALLOC
- 10 ._user_heap_stack 00000600  200004f0  080070a4  000204f0  2**0
+ 10 ._user_heap_stack 00000600  200004f0  08007088  000204f0  2**0
                   ALLOC
  11 .ARM.attributes 00000029  00000000  00000000  00020024  2**0
                   CONTENTS, READONLY
@@ -2286,7 +2286,7 @@ __STATIC_FORCEINLINE void __enable_irq(void)
     USART2_Print("=== РЕЖИМ ТЕСТА ЛИНИИ ФИКСАЦИИ АКТИВЕН ===\r\n");
 #endif
 
-    USART2_Print("ПМП-201Е запущен. Адрес modbus: 1, скорость: 19200 бод.\r\n");
+    USART2_Print(" Адрес modbus: 1, скорость: 19200 бод.\r\n");
  8001312:	4891      	ldr	r0, [pc, #580]	; (8001558 <main+0x3bc>)
  8001314:	f001 ff82 	bl	800321c <USART2_Print>
     USART2_Print("[DBG] Период измерений: ");
@@ -2602,13 +2602,13 @@ __STATIC_FORCEINLINE void __enable_irq(void)
  8001550:	2000000c 	.word	0x2000000c
  8001554:	20000010 	.word	0x20000010
  8001558:	08006e14 	.word	0x08006e14
- 800155c:	08006e6c 	.word	0x08006e6c
+ 800155c:	08006e50 	.word	0x08006e50
  8001560:	20000014 	.word	0x20000014
  8001564:	10624dd3 	.word	0x10624dd3
- 8001568:	08006e94 	.word	0x08006e94
- 800156c:	08006eb8 	.word	0x08006eb8
- 8001570:	08006ed4 	.word	0x08006ed4
- 8001574:	08006ef0 	.word	0x08006ef0
+ 8001568:	08006e78 	.word	0x08006e78
+ 800156c:	08006e9c 	.word	0x08006e9c
+ 8001570:	08006eb8 	.word	0x08006eb8
+ 8001574:	08006ed4 	.word	0x08006ed4
  8001578:	40010c00 	.word	0x40010c00
  800157c:	20000182 	.word	0x20000182
  8001580:	20000181 	.word	0x20000181
@@ -2616,12 +2616,12 @@ __STATIC_FORCEINLINE void __enable_irq(void)
  8001588:	3dc710cb 	.word	0x3dc710cb
  800158c:	3a83126f 	.word	0x3a83126f
  8001590:	45992000 	.word	0x45992000
- 8001594:	08006f2c 	.word	0x08006f2c
- 8001598:	08006f44 	.word	0x08006f44
- 800159c:	08006f54 	.word	0x08006f54
+ 8001594:	08006f10 	.word	0x08006f10
+ 8001598:	08006f28 	.word	0x08006f28
+ 800159c:	08006f38 	.word	0x08006f38
  80015a0:	200001c5 	.word	0x200001c5
- 80015a4:	08006f74 	.word	0x08006f74
- 80015a8:	08006f78 	.word	0x08006f78
+ 80015a4:	08006f58 	.word	0x08006f58
+ 80015a8:	08006f5c 	.word	0x08006f5c
  80015ac:	20000195 	.word	0x20000195
 
 080015b0 <HAL_UART_RxCpltCallback>:
@@ -3158,7 +3158,7 @@ void Read_Temperature(void)
  8001918:	200001c8 	.word	0x200001c8
  800191c:	c2fe0000 	.word	0xc2fe0000
  8001920:	200001dd 	.word	0x200001dd
- 8001924:	08006f8c 	.word	0x08006f8c
+ 8001924:	08006f70 	.word	0x08006f70
 
 08001928 <Read_All_Voltages>:
 
@@ -3473,11 +3473,11 @@ void Read_All_Voltages(void)
  8001b80:	200001db 	.word	0x200001db
  8001b84:	40a00000 	.word	0x40a00000
  8001b88:	200001cc 	.word	0x200001cc
- 8001b8c:	08006fc8 	.word	0x08006fc8
+ 8001b8c:	08006fac 	.word	0x08006fac
  8001b90:	200001d0 	.word	0x200001d0
- 8001b94:	08006fd0 	.word	0x08006fd0
+ 8001b94:	08006fb4 	.word	0x08006fb4
  8001b98:	200001d4 	.word	0x200001d4
- 8001b9c:	08006fd8 	.word	0x08006fd8
+ 8001b9c:	08006fbc 	.word	0x08006fbc
 
 08001ba0 <Read_ADC_Single>:
 
@@ -4858,197 +4858,197 @@ static void ModBus_ReadInputRegisters(uint16_t start_addr, uint16_t reg_count)
  800250a:	460a      	mov	r2, r1
  800250c:	801a      	strh	r2, [r3, #0]
     /*  РАСШИРЕННЫЙ ДИАПАЗОН: 1000-1126 */
-    if (start_addr < 1000 || start_addr > 1126) {
+    if (start_addr < 999 || start_addr > 1126) {
  800250e:	f507 738c 	add.w	r3, r7, #280	; 0x118
  8002512:	f5a3 7389 	sub.w	r3, r3, #274	; 0x112
  8002516:	881b      	ldrh	r3, [r3, #0]
- 8002518:	f5b3 7f7a 	cmp.w	r3, #1000	; 0x3e8
- 800251c:	d308      	bcc.n	8002530 <ModBus_ReadInputRegisters+0x40>
- 800251e:	f507 738c 	add.w	r3, r7, #280	; 0x118
- 8002522:	f5a3 7389 	sub.w	r3, r3, #274	; 0x112
- 8002526:	881b      	ldrh	r3, [r3, #0]
- 8002528:	f240 4266 	movw	r2, #1126	; 0x466
- 800252c:	4293      	cmp	r3, r2
- 800252e:	d904      	bls.n	800253a <ModBus_ReadInputRegisters+0x4a>
+ 8002518:	f240 32e6 	movw	r2, #998	; 0x3e6
+ 800251c:	4293      	cmp	r3, r2
+ 800251e:	d908      	bls.n	8002532 <ModBus_ReadInputRegisters+0x42>
+ 8002520:	f507 738c 	add.w	r3, r7, #280	; 0x118
+ 8002524:	f5a3 7389 	sub.w	r3, r3, #274	; 0x112
+ 8002528:	881b      	ldrh	r3, [r3, #0]
+ 800252a:	f240 4266 	movw	r2, #1126	; 0x466
+ 800252e:	4293      	cmp	r3, r2
+ 8002530:	d904      	bls.n	800253c <ModBus_ReadInputRegisters+0x4c>
         ModBus_SendException(0x04, 0x02);
- 8002530:	2102      	movs	r1, #2
- 8002532:	2004      	movs	r0, #4
- 8002534:	f7ff feb2 	bl	800229c <ModBus_SendException>
+ 8002532:	2102      	movs	r1, #2
+ 8002534:	2004      	movs	r0, #4
+ 8002536:	f7ff feb1 	bl	800229c <ModBus_SendException>
         return;
- 8002538:	e0cd      	b.n	80026d6 <ModBus_ReadInputRegisters+0x1e6>
+ 800253a:	e0cd      	b.n	80026d8 <ModBus_ReadInputRegisters+0x1e8>
     }
     if (reg_count == 0 || reg_count > 125) {
- 800253a:	f507 738c 	add.w	r3, r7, #280	; 0x118
- 800253e:	f5a3 738a 	sub.w	r3, r3, #276	; 0x114
- 8002542:	881b      	ldrh	r3, [r3, #0]
- 8002544:	2b00      	cmp	r3, #0
- 8002546:	d006      	beq.n	8002556 <ModBus_ReadInputRegisters+0x66>
- 8002548:	f507 738c 	add.w	r3, r7, #280	; 0x118
- 800254c:	f5a3 738a 	sub.w	r3, r3, #276	; 0x114
- 8002550:	881b      	ldrh	r3, [r3, #0]
- 8002552:	2b7d      	cmp	r3, #125	; 0x7d
- 8002554:	d904      	bls.n	8002560 <ModBus_ReadInputRegisters+0x70>
+ 800253c:	f507 738c 	add.w	r3, r7, #280	; 0x118
+ 8002540:	f5a3 738a 	sub.w	r3, r3, #276	; 0x114
+ 8002544:	881b      	ldrh	r3, [r3, #0]
+ 8002546:	2b00      	cmp	r3, #0
+ 8002548:	d006      	beq.n	8002558 <ModBus_ReadInputRegisters+0x68>
+ 800254a:	f507 738c 	add.w	r3, r7, #280	; 0x118
+ 800254e:	f5a3 738a 	sub.w	r3, r3, #276	; 0x114
+ 8002552:	881b      	ldrh	r3, [r3, #0]
+ 8002554:	2b7d      	cmp	r3, #125	; 0x7d
+ 8002556:	d904      	bls.n	8002562 <ModBus_ReadInputRegisters+0x72>
         ModBus_SendException(0x04, 0x03);
- 8002556:	2103      	movs	r1, #3
- 8002558:	2004      	movs	r0, #4
- 800255a:	f7ff fe9f 	bl	800229c <ModBus_SendException>
+ 8002558:	2103      	movs	r1, #3
+ 800255a:	2004      	movs	r0, #4
+ 800255c:	f7ff fe9e 	bl	800229c <ModBus_SendException>
         return;
- 800255e:	e0ba      	b.n	80026d6 <ModBus_ReadInputRegisters+0x1e6>
+ 8002560:	e0ba      	b.n	80026d8 <ModBus_ReadInputRegisters+0x1e8>
     }
 
     uint16_t idx = ModBus_AddressToIndex(start_addr);
- 8002560:	f507 738c 	add.w	r3, r7, #280	; 0x118
- 8002564:	f5a3 7389 	sub.w	r3, r3, #274	; 0x112
- 8002568:	881b      	ldrh	r3, [r3, #0]
- 800256a:	4618      	mov	r0, r3
- 800256c:	f7ff fdaf 	bl	80020ce <ModBus_AddressToIndex>
- 8002570:	4603      	mov	r3, r0
- 8002572:	f8a7 3112 	strh.w	r3, [r7, #274]	; 0x112
+ 8002562:	f507 738c 	add.w	r3, r7, #280	; 0x118
+ 8002566:	f5a3 7389 	sub.w	r3, r3, #274	; 0x112
+ 800256a:	881b      	ldrh	r3, [r3, #0]
+ 800256c:	4618      	mov	r0, r3
+ 800256e:	f7ff fdae 	bl	80020ce <ModBus_AddressToIndex>
+ 8002572:	4603      	mov	r3, r0
+ 8002574:	f8a7 3112 	strh.w	r3, [r7, #274]	; 0x112
     if (idx == 0xFFFF || (idx + reg_count) > INPUT_REGS_COUNT) {
- 8002576:	f8b7 3112 	ldrh.w	r3, [r7, #274]	; 0x112
- 800257a:	f64f 72ff 	movw	r2, #65535	; 0xffff
- 800257e:	4293      	cmp	r3, r2
- 8002580:	d009      	beq.n	8002596 <ModBus_ReadInputRegisters+0xa6>
- 8002582:	f8b7 2112 	ldrh.w	r2, [r7, #274]	; 0x112
- 8002586:	f507 738c 	add.w	r3, r7, #280	; 0x118
- 800258a:	f5a3 738a 	sub.w	r3, r3, #276	; 0x114
- 800258e:	881b      	ldrh	r3, [r3, #0]
- 8002590:	4413      	add	r3, r2
- 8002592:	2b40      	cmp	r3, #64	; 0x40
- 8002594:	dd04      	ble.n	80025a0 <ModBus_ReadInputRegisters+0xb0>
+ 8002578:	f8b7 3112 	ldrh.w	r3, [r7, #274]	; 0x112
+ 800257c:	f64f 72ff 	movw	r2, #65535	; 0xffff
+ 8002580:	4293      	cmp	r3, r2
+ 8002582:	d009      	beq.n	8002598 <ModBus_ReadInputRegisters+0xa8>
+ 8002584:	f8b7 2112 	ldrh.w	r2, [r7, #274]	; 0x112
+ 8002588:	f507 738c 	add.w	r3, r7, #280	; 0x118
+ 800258c:	f5a3 738a 	sub.w	r3, r3, #276	; 0x114
+ 8002590:	881b      	ldrh	r3, [r3, #0]
+ 8002592:	4413      	add	r3, r2
+ 8002594:	2b40      	cmp	r3, #64	; 0x40
+ 8002596:	dd04      	ble.n	80025a2 <ModBus_ReadInputRegisters+0xb2>
         ModBus_SendException(0x04, 0x02);
- 8002596:	2102      	movs	r1, #2
- 8002598:	2004      	movs	r0, #4
- 800259a:	f7ff fe7f 	bl	800229c <ModBus_SendException>
+ 8002598:	2102      	movs	r1, #2
+ 800259a:	2004      	movs	r0, #4
+ 800259c:	f7ff fe7e 	bl	800229c <ModBus_SendException>
         return;
- 800259e:	e09a      	b.n	80026d6 <ModBus_ReadInputRegisters+0x1e6>
+ 80025a0:	e09a      	b.n	80026d8 <ModBus_ReadInputRegisters+0x1e8>
     }
 
     uint8_t response[256];
     uint16_t index = 0;
- 80025a0:	2300      	movs	r3, #0
- 80025a2:	f8a7 3116 	strh.w	r3, [r7, #278]	; 0x116
+ 80025a2:	2300      	movs	r3, #0
+ 80025a4:	f8a7 3116 	strh.w	r3, [r7, #278]	; 0x116
     response[index++] = modbus.device_address;
- 80025a6:	f8b7 3116 	ldrh.w	r3, [r7, #278]	; 0x116
- 80025aa:	1c5a      	adds	r2, r3, #1
- 80025ac:	f8a7 2116 	strh.w	r2, [r7, #278]	; 0x116
- 80025b0:	461a      	mov	r2, r3
- 80025b2:	4b4b      	ldr	r3, [pc, #300]	; (80026e0 <ModBus_ReadInputRegisters+0x1f0>)
- 80025b4:	f893 1200 	ldrb.w	r1, [r3, #512]	; 0x200
- 80025b8:	f507 738c 	add.w	r3, r7, #280	; 0x118
- 80025bc:	f5a3 7386 	sub.w	r3, r3, #268	; 0x10c
- 80025c0:	5499      	strb	r1, [r3, r2]
+ 80025a8:	f8b7 3116 	ldrh.w	r3, [r7, #278]	; 0x116
+ 80025ac:	1c5a      	adds	r2, r3, #1
+ 80025ae:	f8a7 2116 	strh.w	r2, [r7, #278]	; 0x116
+ 80025b2:	461a      	mov	r2, r3
+ 80025b4:	4b4a      	ldr	r3, [pc, #296]	; (80026e0 <ModBus_ReadInputRegisters+0x1f0>)
+ 80025b6:	f893 1200 	ldrb.w	r1, [r3, #512]	; 0x200
+ 80025ba:	f507 738c 	add.w	r3, r7, #280	; 0x118
+ 80025be:	f5a3 7386 	sub.w	r3, r3, #268	; 0x10c
+ 80025c2:	5499      	strb	r1, [r3, r2]
     response[index++] = 0x04;
- 80025c2:	f8b7 3116 	ldrh.w	r3, [r7, #278]	; 0x116
- 80025c6:	1c5a      	adds	r2, r3, #1
- 80025c8:	f8a7 2116 	strh.w	r2, [r7, #278]	; 0x116
- 80025cc:	461a      	mov	r2, r3
- 80025ce:	f507 738c 	add.w	r3, r7, #280	; 0x118
- 80025d2:	f5a3 7386 	sub.w	r3, r3, #268	; 0x10c
- 80025d6:	2104      	movs	r1, #4
- 80025d8:	5499      	strb	r1, [r3, r2]
+ 80025c4:	f8b7 3116 	ldrh.w	r3, [r7, #278]	; 0x116
+ 80025c8:	1c5a      	adds	r2, r3, #1
+ 80025ca:	f8a7 2116 	strh.w	r2, [r7, #278]	; 0x116
+ 80025ce:	461a      	mov	r2, r3
+ 80025d0:	f507 738c 	add.w	r3, r7, #280	; 0x118
+ 80025d4:	f5a3 7386 	sub.w	r3, r3, #268	; 0x10c
+ 80025d8:	2104      	movs	r1, #4
+ 80025da:	5499      	strb	r1, [r3, r2]
     response[index++] = reg_count * 2;
- 80025da:	f507 738c 	add.w	r3, r7, #280	; 0x118
- 80025de:	f5a3 738a 	sub.w	r3, r3, #276	; 0x114
- 80025e2:	881b      	ldrh	r3, [r3, #0]
- 80025e4:	b2da      	uxtb	r2, r3
- 80025e6:	f8b7 3116 	ldrh.w	r3, [r7, #278]	; 0x116
- 80025ea:	1c59      	adds	r1, r3, #1
- 80025ec:	f8a7 1116 	strh.w	r1, [r7, #278]	; 0x116
- 80025f0:	4619      	mov	r1, r3
- 80025f2:	0053      	lsls	r3, r2, #1
- 80025f4:	b2da      	uxtb	r2, r3
- 80025f6:	f507 738c 	add.w	r3, r7, #280	; 0x118
- 80025fa:	f5a3 7386 	sub.w	r3, r3, #268	; 0x10c
- 80025fe:	545a      	strb	r2, [r3, r1]
+ 80025dc:	f507 738c 	add.w	r3, r7, #280	; 0x118
+ 80025e0:	f5a3 738a 	sub.w	r3, r3, #276	; 0x114
+ 80025e4:	881b      	ldrh	r3, [r3, #0]
+ 80025e6:	b2da      	uxtb	r2, r3
+ 80025e8:	f8b7 3116 	ldrh.w	r3, [r7, #278]	; 0x116
+ 80025ec:	1c59      	adds	r1, r3, #1
+ 80025ee:	f8a7 1116 	strh.w	r1, [r7, #278]	; 0x116
+ 80025f2:	4619      	mov	r1, r3
+ 80025f4:	0053      	lsls	r3, r2, #1
+ 80025f6:	b2da      	uxtb	r2, r3
+ 80025f8:	f507 738c 	add.w	r3, r7, #280	; 0x118
+ 80025fc:	f5a3 7386 	sub.w	r3, r3, #268	; 0x10c
+ 8002600:	545a      	strb	r2, [r3, r1]
 
     for(uint16_t i = 0; i < reg_count; i++) {
- 8002600:	2300      	movs	r3, #0
- 8002602:	f8a7 3114 	strh.w	r3, [r7, #276]	; 0x114
- 8002606:	e02c      	b.n	8002662 <ModBus_ReadInputRegisters+0x172>
+ 8002602:	2300      	movs	r3, #0
+ 8002604:	f8a7 3114 	strh.w	r3, [r7, #276]	; 0x114
+ 8002608:	e02c      	b.n	8002664 <ModBus_ReadInputRegisters+0x174>
         uint16_t val = modbus.regs[idx + i];
- 8002608:	f8b7 2112 	ldrh.w	r2, [r7, #274]	; 0x112
- 800260c:	f8b7 3114 	ldrh.w	r3, [r7, #276]	; 0x114
- 8002610:	4413      	add	r3, r2
- 8002612:	4a33      	ldr	r2, [pc, #204]	; (80026e0 <ModBus_ReadInputRegisters+0x1f0>)
- 8002614:	f832 3013 	ldrh.w	r3, [r2, r3, lsl #1]
- 8002618:	f8a7 310e 	strh.w	r3, [r7, #270]	; 0x10e
+ 800260a:	f8b7 2112 	ldrh.w	r2, [r7, #274]	; 0x112
+ 800260e:	f8b7 3114 	ldrh.w	r3, [r7, #276]	; 0x114
+ 8002612:	4413      	add	r3, r2
+ 8002614:	4a32      	ldr	r2, [pc, #200]	; (80026e0 <ModBus_ReadInputRegisters+0x1f0>)
+ 8002616:	f832 3013 	ldrh.w	r3, [r2, r3, lsl #1]
+ 800261a:	f8a7 310e 	strh.w	r3, [r7, #270]	; 0x10e
         response[index++] = (val >> 8) & 0xFF;
- 800261c:	f8b7 310e 	ldrh.w	r3, [r7, #270]	; 0x10e
- 8002620:	0a1b      	lsrs	r3, r3, #8
- 8002622:	b299      	uxth	r1, r3
- 8002624:	f8b7 3116 	ldrh.w	r3, [r7, #278]	; 0x116
- 8002628:	1c5a      	adds	r2, r3, #1
- 800262a:	f8a7 2116 	strh.w	r2, [r7, #278]	; 0x116
- 800262e:	461a      	mov	r2, r3
- 8002630:	b2c9      	uxtb	r1, r1
- 8002632:	f507 738c 	add.w	r3, r7, #280	; 0x118
- 8002636:	f5a3 7386 	sub.w	r3, r3, #268	; 0x10c
- 800263a:	5499      	strb	r1, [r3, r2]
+ 800261e:	f8b7 310e 	ldrh.w	r3, [r7, #270]	; 0x10e
+ 8002622:	0a1b      	lsrs	r3, r3, #8
+ 8002624:	b299      	uxth	r1, r3
+ 8002626:	f8b7 3116 	ldrh.w	r3, [r7, #278]	; 0x116
+ 800262a:	1c5a      	adds	r2, r3, #1
+ 800262c:	f8a7 2116 	strh.w	r2, [r7, #278]	; 0x116
+ 8002630:	461a      	mov	r2, r3
+ 8002632:	b2c9      	uxtb	r1, r1
+ 8002634:	f507 738c 	add.w	r3, r7, #280	; 0x118
+ 8002638:	f5a3 7386 	sub.w	r3, r3, #268	; 0x10c
+ 800263c:	5499      	strb	r1, [r3, r2]
         response[index++] = val & 0xFF;
- 800263c:	f8b7 3116 	ldrh.w	r3, [r7, #278]	; 0x116
- 8002640:	1c5a      	adds	r2, r3, #1
- 8002642:	f8a7 2116 	strh.w	r2, [r7, #278]	; 0x116
- 8002646:	461a      	mov	r2, r3
- 8002648:	f8b7 310e 	ldrh.w	r3, [r7, #270]	; 0x10e
- 800264c:	b2d9      	uxtb	r1, r3
- 800264e:	f507 738c 	add.w	r3, r7, #280	; 0x118
- 8002652:	f5a3 7386 	sub.w	r3, r3, #268	; 0x10c
- 8002656:	5499      	strb	r1, [r3, r2]
+ 800263e:	f8b7 3116 	ldrh.w	r3, [r7, #278]	; 0x116
+ 8002642:	1c5a      	adds	r2, r3, #1
+ 8002644:	f8a7 2116 	strh.w	r2, [r7, #278]	; 0x116
+ 8002648:	461a      	mov	r2, r3
+ 800264a:	f8b7 310e 	ldrh.w	r3, [r7, #270]	; 0x10e
+ 800264e:	b2d9      	uxtb	r1, r3
+ 8002650:	f507 738c 	add.w	r3, r7, #280	; 0x118
+ 8002654:	f5a3 7386 	sub.w	r3, r3, #268	; 0x10c
+ 8002658:	5499      	strb	r1, [r3, r2]
     for(uint16_t i = 0; i < reg_count; i++) {
- 8002658:	f8b7 3114 	ldrh.w	r3, [r7, #276]	; 0x114
- 800265c:	3301      	adds	r3, #1
- 800265e:	f8a7 3114 	strh.w	r3, [r7, #276]	; 0x114
- 8002662:	f507 738c 	add.w	r3, r7, #280	; 0x118
- 8002666:	f5a3 738a 	sub.w	r3, r3, #276	; 0x114
- 800266a:	f8b7 2114 	ldrh.w	r2, [r7, #276]	; 0x114
- 800266e:	881b      	ldrh	r3, [r3, #0]
- 8002670:	429a      	cmp	r2, r3
- 8002672:	d3c9      	bcc.n	8002608 <ModBus_ReadInputRegisters+0x118>
+ 800265a:	f8b7 3114 	ldrh.w	r3, [r7, #276]	; 0x114
+ 800265e:	3301      	adds	r3, #1
+ 8002660:	f8a7 3114 	strh.w	r3, [r7, #276]	; 0x114
+ 8002664:	f507 738c 	add.w	r3, r7, #280	; 0x118
+ 8002668:	f5a3 738a 	sub.w	r3, r3, #276	; 0x114
+ 800266c:	f8b7 2114 	ldrh.w	r2, [r7, #276]	; 0x114
+ 8002670:	881b      	ldrh	r3, [r3, #0]
+ 8002672:	429a      	cmp	r2, r3
+ 8002674:	d3c9      	bcc.n	800260a <ModBus_ReadInputRegisters+0x11a>
     }
 
     uint16_t crc = ModBus_CRC16(response, index);
- 8002674:	f8b7 2116 	ldrh.w	r2, [r7, #278]	; 0x116
- 8002678:	f107 030c 	add.w	r3, r7, #12
- 800267c:	4611      	mov	r1, r2
- 800267e:	4618      	mov	r0, r3
- 8002680:	f7ff fcc4 	bl	800200c <ModBus_CRC16>
- 8002684:	4603      	mov	r3, r0
- 8002686:	f8a7 3110 	strh.w	r3, [r7, #272]	; 0x110
+ 8002676:	f8b7 2116 	ldrh.w	r2, [r7, #278]	; 0x116
+ 800267a:	f107 030c 	add.w	r3, r7, #12
+ 800267e:	4611      	mov	r1, r2
+ 8002680:	4618      	mov	r0, r3
+ 8002682:	f7ff fcc3 	bl	800200c <ModBus_CRC16>
+ 8002686:	4603      	mov	r3, r0
+ 8002688:	f8a7 3110 	strh.w	r3, [r7, #272]	; 0x110
     response[index++] = crc & 0xFF;
- 800268a:	f8b7 3116 	ldrh.w	r3, [r7, #278]	; 0x116
- 800268e:	1c5a      	adds	r2, r3, #1
- 8002690:	f8a7 2116 	strh.w	r2, [r7, #278]	; 0x116
- 8002694:	461a      	mov	r2, r3
- 8002696:	f8b7 3110 	ldrh.w	r3, [r7, #272]	; 0x110
- 800269a:	b2d9      	uxtb	r1, r3
- 800269c:	f507 738c 	add.w	r3, r7, #280	; 0x118
- 80026a0:	f5a3 7386 	sub.w	r3, r3, #268	; 0x10c
- 80026a4:	5499      	strb	r1, [r3, r2]
+ 800268c:	f8b7 3116 	ldrh.w	r3, [r7, #278]	; 0x116
+ 8002690:	1c5a      	adds	r2, r3, #1
+ 8002692:	f8a7 2116 	strh.w	r2, [r7, #278]	; 0x116
+ 8002696:	461a      	mov	r2, r3
+ 8002698:	f8b7 3110 	ldrh.w	r3, [r7, #272]	; 0x110
+ 800269c:	b2d9      	uxtb	r1, r3
+ 800269e:	f507 738c 	add.w	r3, r7, #280	; 0x118
+ 80026a2:	f5a3 7386 	sub.w	r3, r3, #268	; 0x10c
+ 80026a6:	5499      	strb	r1, [r3, r2]
     response[index++] = (crc >> 8) & 0xFF;
- 80026a6:	f8b7 3110 	ldrh.w	r3, [r7, #272]	; 0x110
- 80026aa:	0a1b      	lsrs	r3, r3, #8
- 80026ac:	b299      	uxth	r1, r3
- 80026ae:	f8b7 3116 	ldrh.w	r3, [r7, #278]	; 0x116
- 80026b2:	1c5a      	adds	r2, r3, #1
- 80026b4:	f8a7 2116 	strh.w	r2, [r7, #278]	; 0x116
- 80026b8:	461a      	mov	r2, r3
- 80026ba:	b2c9      	uxtb	r1, r1
- 80026bc:	f507 738c 	add.w	r3, r7, #280	; 0x118
- 80026c0:	f5a3 7386 	sub.w	r3, r3, #268	; 0x10c
- 80026c4:	5499      	strb	r1, [r3, r2]
+ 80026a8:	f8b7 3110 	ldrh.w	r3, [r7, #272]	; 0x110
+ 80026ac:	0a1b      	lsrs	r3, r3, #8
+ 80026ae:	b299      	uxth	r1, r3
+ 80026b0:	f8b7 3116 	ldrh.w	r3, [r7, #278]	; 0x116
+ 80026b4:	1c5a      	adds	r2, r3, #1
+ 80026b6:	f8a7 2116 	strh.w	r2, [r7, #278]	; 0x116
+ 80026ba:	461a      	mov	r2, r3
+ 80026bc:	b2c9      	uxtb	r1, r1
+ 80026be:	f507 738c 	add.w	r3, r7, #280	; 0x118
+ 80026c2:	f5a3 7386 	sub.w	r3, r3, #268	; 0x10c
+ 80026c6:	5499      	strb	r1, [r3, r2]
 
     ModBus_TransmitFrame(response, index);
- 80026c6:	f8b7 2116 	ldrh.w	r2, [r7, #278]	; 0x116
- 80026ca:	f107 030c 	add.w	r3, r7, #12
- 80026ce:	4611      	mov	r1, r2
- 80026d0:	4618      	mov	r0, r3
- 80026d2:	f7fe f9e1 	bl	8000a98 <ModBus_TransmitFrame>
+ 80026c8:	f8b7 2116 	ldrh.w	r2, [r7, #278]	; 0x116
+ 80026cc:	f107 030c 	add.w	r3, r7, #12
+ 80026d0:	4611      	mov	r1, r2
+ 80026d2:	4618      	mov	r0, r3
+ 80026d4:	f7fe f9e0 	bl	8000a98 <ModBus_TransmitFrame>
 }
- 80026d6:	f507 778c 	add.w	r7, r7, #280	; 0x118
- 80026da:	46bd      	mov	sp, r7
- 80026dc:	bd80      	pop	{r7, pc}
- 80026de:	bf00      	nop
+ 80026d8:	f507 778c 	add.w	r7, r7, #280	; 0x118
+ 80026dc:	46bd      	mov	sp, r7
+ 80026de:	bd80      	pop	{r7, pc}
  80026e0:	200001e0 	.word	0x200001e0
 
 080026e4 <ModBus_WriteSingleRegister>:
@@ -5819,8 +5819,8 @@ void ModBus_Init(void)
  8002c78:	46bd      	mov	sp, r7
  8002c7a:	bd80      	pop	{r7, pc}
  8002c7c:	200001e0 	.word	0x200001e0
- 8002c80:	08007000 	.word	0x08007000
- 8002c84:	08007048 	.word	0x08007048
+ 8002c80:	08006fe4 	.word	0x08006fe4
+ 8002c84:	0800702c 	.word	0x0800702c
  8002c88:	200004e4 	.word	0x200004e4
  8002c8c:	20000094 	.word	0x20000094
 
@@ -6829,7 +6829,7 @@ LoopFillZerobss:
   ldr r1, =_edata
  8003284:	20000024 	.word	0x20000024
   ldr r2, =_sidata
- 8003288:	08007080 	.word	0x08007080
+ 8003288:	08007064 	.word	0x08007064
   ldr r2, =_sbss
  800328c:	20000024 	.word	0x20000024
   ldr r4, =_ebss
@@ -13784,7 +13784,7 @@ if (((RCC_ClkInitStruct->ClockType) & RCC_CLOCKTYPE_PCLK1) == RCC_CLOCKTYPE_PCLK
  8005956:	bf00      	nop
  8005958:	40022000 	.word	0x40022000
  800595c:	40021000 	.word	0x40021000
- 8005960:	08007060 	.word	0x08007060
+ 8005960:	08007044 	.word	0x08007044
  8005964:	20000018 	.word	0x20000018
  8005968:	2000001c 	.word	0x2000001c
 
@@ -13932,7 +13932,7 @@ uint32_t HAL_RCC_GetSysClockFreq(void)
  8005a12:	bc90      	pop	{r4, r7}
  8005a14:	4770      	bx	lr
  8005a16:	bf00      	nop
- 8005a18:	08006fe0 	.word	0x08006fe0
+ 8005a18:	08006fc4 	.word	0x08006fc4
  8005a1c:	40021000 	.word	0x40021000
  8005a20:	007a1200 	.word	0x007a1200
  8005a24:	003d0900 	.word	0x003d0900
@@ -13980,7 +13980,7 @@ uint32_t HAL_RCC_GetPCLK1Freq(void)
  8005a58:	4618      	mov	r0, r3
  8005a5a:	bd80      	pop	{r7, pc}
  8005a5c:	40021000 	.word	0x40021000
- 8005a60:	08007070 	.word	0x08007070
+ 8005a60:	08007054 	.word	0x08007054
 
 08005a64 <HAL_RCC_GetPCLK2Freq>:
   * @note   Each time PCLK2 changes, this function must be called to update the
@@ -14006,7 +14006,7 @@ uint32_t HAL_RCC_GetPCLK2Freq(void)
  8005a80:	4618      	mov	r0, r3
  8005a82:	bd80      	pop	{r7, pc}
  8005a84:	40021000 	.word	0x40021000
- 8005a88:	08007070 	.word	0x08007070
+ 8005a88:	08007054 	.word	0x08007054
 
 08005a8c <RCC_Delay>:
   * @brief  This function provides delay (in milliseconds) based on CPU cycles method.
@@ -14523,7 +14523,7 @@ uint32_t HAL_RCCEx_GetPeriphCLKFreq(uint32_t PeriphClk)
  8005d9a:	3734      	adds	r7, #52	; 0x34
  8005d9c:	46bd      	mov	sp, r7
  8005d9e:	bd90      	pop	{r4, r7, pc}
- 8005da0:	08006ff0 	.word	0x08006ff0
+ 8005da0:	08006fd4 	.word	0x08006fd4
  8005da4:	40021000 	.word	0x40021000
  8005da8:	007a1200 	.word	0x007a1200
  8005dac:	003d0900 	.word	0x003d0900
@@ -16468,10 +16468,10 @@ static void UART_SetConfig(UART_HandleTypeDef *huart)
  8006856:	4798      	blx	r3
  8006858:	3601      	adds	r6, #1
  800685a:	e7f2      	b.n	8006842 <__libc_init_array+0x1e>
- 800685c:	08007078 	.word	0x08007078
- 8006860:	08007078 	.word	0x08007078
- 8006864:	08007078 	.word	0x08007078
- 8006868:	0800707c 	.word	0x0800707c
+ 800685c:	0800705c 	.word	0x0800705c
+ 8006860:	0800705c 	.word	0x0800705c
+ 8006864:	0800705c 	.word	0x0800705c
+ 8006868:	08007060 	.word	0x08007060
 
 0800686c <memset>:
  800686c:	4603      	mov	r3, r0

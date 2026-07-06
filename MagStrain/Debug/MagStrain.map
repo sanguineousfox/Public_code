@@ -1849,68 +1849,68 @@ LOAD c:/st/stm32cubeide_1.10.1/stm32cubeide/plugins/com.st.stm32cube.ide.mcu.ext
 .iplt           0x0000000008006894        0x0
  .iplt          0x0000000008006894        0x0 c:/st/stm32cubeide_1.10.1/stm32cubeide/plugins/com.st.stm32cube.ide.mcu.externaltools.gnu-tools-for-stm32.10.3-2021.10.win32_1.0.0.202111181127/tools/bin/../lib/gcc/arm-none-eabi/10.3.1/thumb/v7-m/nofp/crtbegin.o
 
-.rodata         0x0000000008006894      0x7e4
+.rodata         0x0000000008006894      0x7c8
                 0x0000000008006894                . = ALIGN (0x4)
  *(.rodata)
- .rodata        0x0000000008006894      0x749 ./Core/Src/main.o
- *fill*         0x0000000008006fdd        0x3 
- .rodata        0x0000000008006fe0       0x10 ./Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_rcc.o
- .rodata        0x0000000008006ff0       0x10 ./Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_rcc_ex.o
+ .rodata        0x0000000008006894      0x72d ./Core/Src/main.o
+ *fill*         0x0000000008006fc1        0x3 
+ .rodata        0x0000000008006fc4       0x10 ./Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_rcc.o
+ .rodata        0x0000000008006fd4       0x10 ./Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_rcc_ex.o
  *(.rodata*)
  .rodata.default_float_params
-                0x0000000008007000       0x48 ./Core/Src/modbus.o
+                0x0000000008006fe4       0x48 ./Core/Src/modbus.o
  .rodata.default_int_params
-                0x0000000008007048       0x18 ./Core/Src/modbus.o
+                0x000000000800702c       0x18 ./Core/Src/modbus.o
  .rodata.AHBPrescTable
-                0x0000000008007060       0x10 ./Core/Src/system_stm32f1xx.o
-                0x0000000008007060                AHBPrescTable
+                0x0000000008007044       0x10 ./Core/Src/system_stm32f1xx.o
+                0x0000000008007044                AHBPrescTable
  .rodata.APBPrescTable
-                0x0000000008007070        0x8 ./Core/Src/system_stm32f1xx.o
-                0x0000000008007070                APBPrescTable
-                0x0000000008007078                . = ALIGN (0x4)
+                0x0000000008007054        0x8 ./Core/Src/system_stm32f1xx.o
+                0x0000000008007054                APBPrescTable
+                0x000000000800705c                . = ALIGN (0x4)
 
-.rel.dyn        0x0000000008007078        0x0
- .rel.iplt      0x0000000008007078        0x0 c:/st/stm32cubeide_1.10.1/stm32cubeide/plugins/com.st.stm32cube.ide.mcu.externaltools.gnu-tools-for-stm32.10.3-2021.10.win32_1.0.0.202111181127/tools/bin/../lib/gcc/arm-none-eabi/10.3.1/thumb/v7-m/nofp/crtbegin.o
+.rel.dyn        0x000000000800705c        0x0
+ .rel.iplt      0x000000000800705c        0x0 c:/st/stm32cubeide_1.10.1/stm32cubeide/plugins/com.st.stm32cube.ide.mcu.externaltools.gnu-tools-for-stm32.10.3-2021.10.win32_1.0.0.202111181127/tools/bin/../lib/gcc/arm-none-eabi/10.3.1/thumb/v7-m/nofp/crtbegin.o
 
-.ARM.extab      0x0000000008007078        0x0
-                0x0000000008007078                . = ALIGN (0x4)
+.ARM.extab      0x000000000800705c        0x0
+                0x000000000800705c                . = ALIGN (0x4)
  *(.ARM.extab* .gnu.linkonce.armextab.*)
-                0x0000000008007078                . = ALIGN (0x4)
+                0x000000000800705c                . = ALIGN (0x4)
 
-.ARM            0x0000000008007078        0x0
-                0x0000000008007078                . = ALIGN (0x4)
-                0x0000000008007078                __exidx_start = .
+.ARM            0x000000000800705c        0x0
+                0x000000000800705c                . = ALIGN (0x4)
+                0x000000000800705c                __exidx_start = .
  *(.ARM.exidx*)
-                0x0000000008007078                __exidx_end = .
-                0x0000000008007078                . = ALIGN (0x4)
+                0x000000000800705c                __exidx_end = .
+                0x000000000800705c                . = ALIGN (0x4)
 
-.preinit_array  0x0000000008007078        0x0
-                0x0000000008007078                . = ALIGN (0x4)
-                0x0000000008007078                PROVIDE (__preinit_array_start = .)
+.preinit_array  0x000000000800705c        0x0
+                0x000000000800705c                . = ALIGN (0x4)
+                0x000000000800705c                PROVIDE (__preinit_array_start = .)
  *(.preinit_array*)
-                0x0000000008007078                PROVIDE (__preinit_array_end = .)
-                0x0000000008007078                . = ALIGN (0x4)
+                0x000000000800705c                PROVIDE (__preinit_array_end = .)
+                0x000000000800705c                . = ALIGN (0x4)
 
-.init_array     0x0000000008007078        0x4
-                0x0000000008007078                . = ALIGN (0x4)
-                0x0000000008007078                PROVIDE (__init_array_start = .)
+.init_array     0x000000000800705c        0x4
+                0x000000000800705c                . = ALIGN (0x4)
+                0x000000000800705c                PROVIDE (__init_array_start = .)
  *(SORT_BY_NAME(.init_array.*))
  *(.init_array*)
- .init_array    0x0000000008007078        0x4 c:/st/stm32cubeide_1.10.1/stm32cubeide/plugins/com.st.stm32cube.ide.mcu.externaltools.gnu-tools-for-stm32.10.3-2021.10.win32_1.0.0.202111181127/tools/bin/../lib/gcc/arm-none-eabi/10.3.1/thumb/v7-m/nofp/crtbegin.o
-                0x000000000800707c                PROVIDE (__init_array_end = .)
-                0x000000000800707c                . = ALIGN (0x4)
+ .init_array    0x000000000800705c        0x4 c:/st/stm32cubeide_1.10.1/stm32cubeide/plugins/com.st.stm32cube.ide.mcu.externaltools.gnu-tools-for-stm32.10.3-2021.10.win32_1.0.0.202111181127/tools/bin/../lib/gcc/arm-none-eabi/10.3.1/thumb/v7-m/nofp/crtbegin.o
+                0x0000000008007060                PROVIDE (__init_array_end = .)
+                0x0000000008007060                . = ALIGN (0x4)
 
-.fini_array     0x000000000800707c        0x4
-                0x000000000800707c                . = ALIGN (0x4)
+.fini_array     0x0000000008007060        0x4
+                0x0000000008007060                . = ALIGN (0x4)
                 [!provide]                        PROVIDE (__fini_array_start = .)
  *(SORT_BY_NAME(.fini_array.*))
  *(.fini_array*)
- .fini_array    0x000000000800707c        0x4 c:/st/stm32cubeide_1.10.1/stm32cubeide/plugins/com.st.stm32cube.ide.mcu.externaltools.gnu-tools-for-stm32.10.3-2021.10.win32_1.0.0.202111181127/tools/bin/../lib/gcc/arm-none-eabi/10.3.1/thumb/v7-m/nofp/crtbegin.o
+ .fini_array    0x0000000008007060        0x4 c:/st/stm32cubeide_1.10.1/stm32cubeide/plugins/com.st.stm32cube.ide.mcu.externaltools.gnu-tools-for-stm32.10.3-2021.10.win32_1.0.0.202111181127/tools/bin/../lib/gcc/arm-none-eabi/10.3.1/thumb/v7-m/nofp/crtbegin.o
                 [!provide]                        PROVIDE (__fini_array_end = .)
-                0x0000000008007080                . = ALIGN (0x4)
-                0x0000000008007080                _sidata = LOADADDR (.data)
+                0x0000000008007064                . = ALIGN (0x4)
+                0x0000000008007064                _sidata = LOADADDR (.data)
 
-.data           0x0000000020000000       0x24 load address 0x0000000008007080
+.data           0x0000000020000000       0x24 load address 0x0000000008007064
                 0x0000000020000000                . = ALIGN (0x4)
                 0x0000000020000000                _sdata = .
  *(.data)
@@ -1944,11 +1944,11 @@ LOAD c:/st/stm32cubeide_1.10.1/stm32cubeide/plugins/com.st.stm32cube.ide.mcu.ext
  *fill*         0x0000000020000021        0x3 
                 0x0000000020000024                _edata = .
 
-.igot.plt       0x0000000020000024        0x0 load address 0x00000000080070a4
+.igot.plt       0x0000000020000024        0x0 load address 0x0000000008007088
  .igot.plt      0x0000000020000024        0x0 c:/st/stm32cubeide_1.10.1/stm32cubeide/plugins/com.st.stm32cube.ide.mcu.externaltools.gnu-tools-for-stm32.10.3-2021.10.win32_1.0.0.202111181127/tools/bin/../lib/gcc/arm-none-eabi/10.3.1/thumb/v7-m/nofp/crtbegin.o
                 0x0000000020000024                . = ALIGN (0x4)
 
-.bss            0x0000000020000024      0x4cc load address 0x00000000080070a4
+.bss            0x0000000020000024      0x4cc load address 0x0000000008007088
                 0x0000000020000024                _sbss = .
                 0x0000000020000024                __bss_start__ = _sbss
  *(.bss)
@@ -2030,7 +2030,7 @@ LOAD c:/st/stm32cubeide_1.10.1/stm32cubeide/plugins/com.st.stm32cube.ide.mcu.ext
                 0x00000000200004f0                __bss_end__ = _ebss
 
 ._user_heap_stack
-                0x00000000200004f0      0x600 load address 0x00000000080070a4
+                0x00000000200004f0      0x600 load address 0x0000000008007088
                 0x00000000200004f0                . = ALIGN (0x8)
                 [!provide]                        PROVIDE (end = .)
                 0x00000000200004f0                PROVIDE (_end = .)
