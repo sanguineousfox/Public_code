@@ -1,7 +1,6 @@
 /* USER CODE BEGIN Header */
 /*
  * @file           : main.h
- * @brief          : Заголовочный файл основного модуля ПМП-201Е
  */
 /* USER CODE END Header */
 

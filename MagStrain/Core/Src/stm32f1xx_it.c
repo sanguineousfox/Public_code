@@ -1,10 +1,9 @@
 /* USER CODE BEGIN Header */
 /*
- * @file           : stm32f1xx_it.c
- * @brief          : Interrupt handlers
- */
+  @file           : stm32f1xx_it.c
+  @brief          : Interrupt handlers
+*/
 /* USER CODE END Header */
-
 #include "main.h"
 #include "stm32f1xx_it.h"
 
@@ -47,12 +46,36 @@ void TIM3_IRQHandler(void)
         /* Если поймали минимально необходимую пару импульсов, завершаем измерение */
         if (capture_count >= 2) {
             tof_measurement_done = 1;
-
             /* Отключаем прерывание захвата до следующего измерения */
             TIM3->DIER &= ~TIM_DIER_CC4IE;
         }
     }
 }
+
+/* ==========================================================================
+ОБРАБОТЧИКИ ПРЕРЫВАНИЙ USART1
+========================================================================== */
+void USART1_IRQHandler(void)
+{
+    HAL_UART_IRQHandler(&huart1);
+}
+
+/* ==========================================================================
+CALLBACK: Обработка ошибок UART
+========================================================================== */
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance == USART1) {
+        /* Сбрасываем флаг ошибки и перезапускаем приём */
+        __HAL_UART_CLEAR_PEFLAG(&huart1);
+        __HAL_UART_CLEAR_FEFLAG(&huart1);
+        __HAL_UART_CLEAR_NEFLAG(&huart1);
+        __HAL_UART_CLEAR_OREFLAG(&huart1);
+
+        ModBus_RestartRx();
+    }
+}
+
 /* ==========================================================================
 ДРУГИЕ ОБРАБОТЧИКИ ПРЕРЫВАНИЙ (оставь как есть)
 ========================================================================== */

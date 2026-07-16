@@ -1,14 +1,13 @@
 /* USER CODE BEGIN Header */
-/*
- * @file           : main.c
- * @brief          : Основной цикл ПМП-201Е
- *                   - Буферизованный вывод в USART2 (оптимизация скорости)
- *                   - Интеграция с AT24C64 EEPROM (адрес 0x51)
- *                   - LM75B отключён (температура = 0°C)
- *                   - Мёртвое время 60 мкс в TIM3_IRQHandler
- */
+/**
+  @file           : main.c
+                  - Буферизованный вывод в USART2 (оптимизация скорости)
+                  - Интеграция с AT24C64 EEPROM (адрес 0x51)
+                  - LM75B отключён (температура = 0°C)
+                  - Мёртвое время 60 мкс в TIM3_IRQHandler
+                  - ★ ИСПРАВЛЕНО: Измерения обновляются КАЖДЫЙ раз
+*/
 /* USER CODE END Header */
-
 #include "main.h"
 #include "stm32f1xx_it.h"
 #include "utils.h"
@@ -27,11 +26,11 @@
 #define VREFINT_CAL_VALUE       ((uint16_t *)VREFINT_CAL_ADDR)
 #define ADC_SAMPLES             16
 #define MEAS_TIMEOUT_MS         50
-#define DIV_24V_FACTOR          13.0f
+#define DIV_24V_FACTOR          9.5f
 #define DIV_12V_FACTOR          4.0f
 #define DIV_5V_FACTOR           2.0f
 #define PULSE_PERIOD_MS_DEFAULT 1000
-#define SOUND_SPEED_MPS         4900.0f
+#define SOUND_SPEED_MPS         6500.0f
 
 /* === СТАТИСТИКА ИЗМЕРЕНИЙ === */
 #define STAT_HISTORY_SIZE       11
@@ -64,7 +63,7 @@
 
 /* ★ ПОРОГИ ШИРИНЫ ИМПУЛЬСА НА CLIK (между 1-м и 2-м импульсами значащей пары) ★ */
 #define MIN_CLICK_WIDTH_US      14.0f
-#define MAX_CLICK_WIDTH_US      30.0f
+#define MAX_CLICK_WIDTH_US      24.0f
 
 //#define TEST_MODE   1
 
@@ -262,7 +261,6 @@ void ModBus_TransmitFrame(uint8_t *frame, uint16_t len)
 
     RS485_SET_TRANSMIT();
     modbus_tx_active = 1;
-
     for (volatile int i = 0; i < 150; i++) __NOP();
 
     HAL_UART_Transmit(&huart1, frame, len, 100);
@@ -273,7 +271,6 @@ void ModBus_TransmitFrame(uint8_t *frame, uint16_t len)
     }
 
     for (volatile int i = 0; i < 800; i++) __NOP();
-
     RS485_SET_RECEIVE();
     modbus_tx_active = 0;
 }
@@ -290,7 +287,6 @@ static void USART2_PrintInt(int32_t val)
         USART2_Print("-");
         val = -val;
     }
-
     if (val == 0) {
         USART2_Print("0");
         return;
@@ -313,7 +309,6 @@ static void USART2_PrintFloat(float val)
     int32_t int_part = (int32_t)val;
     float frac = val - (float)int_part;
     if (frac < 0) frac = -frac;
-
     int32_t frac_part = (int32_t)(frac * 100.0f + 0.5f);
     if (frac_part >= 100) frac_part = 0;
 
@@ -370,6 +365,7 @@ static void Update_Poll_Period_From_Modbus(void)
 
 /* ==========================================================================
 ФУНКЦИЯ: Обработка результатов измерения (БУФЕРИЗОВАННЫЙ ВЫВОД)
+
 ========================================================================== */
 void Process_Measurement_Results(float tof_us, float position_mm, uint8_t signal_captured)
 {
@@ -380,8 +376,8 @@ void Process_Measurement_Results(float tof_us, float position_mm, uint8_t signal
     if (cal_low < 0.1f || cal_low > 100.0f) {
         cal_low = 0.1f;
     }
-    if (cal_high < 1.0f || cal_high > 50000.0f) {
-        cal_high = 3.0f;
+    if (cal_high < 0.3f || cal_high > 50000.0f) {
+        cal_high = 1.0f;
     }
     if (position_mm < 0.0f) {
         position_mm = 0.0f;
@@ -389,10 +385,6 @@ void Process_Measurement_Results(float tof_us, float position_mm, uint8_t signal
     if (position_mm > waveguide_len) {
         position_mm = waveguide_len;
     }
-
-    ModBus_UpdateMeasurements(position_mm, current_temperature, waveguide_len);
-    ModBus_UpdateVoltages(current_vdda, current_24v, current_12v, current_5v);
-    ModBus_UpdateFirmwareVersion(FIRMWARE_VERSION);
 
     /* Буферизованный вывод */
     USART2_BufInit();
@@ -403,6 +395,7 @@ void Process_Measurement_Results(float tof_us, float position_mm, uint8_t signal
         USART2_BufPrint("===========================================================\r\n");
         USART2_BufPrint("                    РЕЗУЛЬТАТЫ ИЗМЕРЕНИЯ                   \r\n");
         USART2_BufPrint("===========================================================\r\n");
+
         USART2_BufPrint("[DBG] Захвачено импульсов: ");
         USART2_BufPrintInt(capture_count);
         USART2_BufPrint("\r\n");
@@ -443,8 +436,9 @@ void Process_Measurement_Results(float tof_us, float position_mm, uint8_t signal
                 float tof_time_us = (float)captured_pulses[0] * TOF_TICK_US;
                 float position = (tof_time_us * 0.001f * SOUND_SPEED_MPS) / 2.0f;
                 float level_percent = 0.0f;
+
                 if (waveguide_len > 0.0f) {
-                    level_percent = (position / waveguide_len) * 100.0f;
+                    level_percent = ((waveguide_len-position) / waveguide_len) * 100.0f;
                 }
                 if (level_percent > 100.0f) {
                     level_percent = 100.0f;
@@ -466,11 +460,13 @@ void Process_Measurement_Results(float tof_us, float position_mm, uint8_t signal
         USART2_BufPrint(" мм | Температура: ");
         USART2_BufPrintFloat(current_temperature);
         USART2_BufPrint(" C\r\n");
+
         USART2_BufPrint("  Калибровка: ");
         USART2_BufPrintFloat(cal_low * 1000.0f);
         USART2_BufPrint(" .. ");
         USART2_BufPrintFloat(cal_high * 1000.0f);
         USART2_BufPrint(" мм\r\n");
+
         USART2_BufPrint("  Период: ");
         USART2_BufPrintInt(current_poll_period_ms / 1000);
         USART2_BufPrint(" сек | Магнитов: ");
@@ -517,6 +513,7 @@ int main(void)
         USART2_Print("[ИНИЦ] Калибровка АЦП1 НЕ УДАЛАСЬ!\r\n");
         v24_error = 1; v12_error = 1; v5_error = 1; vdda_error = 1;
     }
+
     if (HAL_ADCEx_Calibration_Start(&hadc2) == HAL_OK) {
         USART2_Print("[ИНИЦ] АЦП2 откалиброван успешно\r\n");
     } else {
@@ -537,6 +534,7 @@ int main(void)
 
     HAL_NVIC_SetPriority(USART1_IRQn, 0, 0);
     HAL_NVIC_EnableIRQ(USART1_IRQn);
+
     HAL_NVIC_SetPriority(TIM3_IRQn, 0, 0);
     HAL_NVIC_EnableIRQ(TIM3_IRQn);
 
@@ -579,19 +577,23 @@ int main(void)
 
     while (1)
     {
+        /* Мигание синим светодиодом каждую секунду */
         if (HAL_GetTick() - last_debug_time >= 1000) {
             last_debug_time = HAL_GetTick();
             blue_led_state = !blue_led_state;
             HAL_GPIO_WritePin(GPIOB, LED_BLUE_PIN, blue_led_state ? LED_BLUE_ON : LED_BLUE_OFF);
         }
 
+        /* Выключение красного светодиода после LED_RED_ON_TIME_MS */
         if (red_led_state && (HAL_GetTick() - led_red_off_time >= LED_RED_ON_TIME_MS)) {
             HAL_GPIO_WritePin(GPIOB, LED_RED_PIN, LED_RED_OFF);
             red_led_state = 0;
         }
 
+        /* Измерения с заданным периодом */
         if (HAL_GetTick() - last_measure_time >= current_poll_period_ms) {
             last_measure_time = HAL_GetTick();
+
             Update_Poll_Period_From_Modbus();
 
             HAL_GPIO_WritePin(GPIOB, LED_RED_PIN, LED_RED_OFF);
@@ -637,6 +639,9 @@ int main(void)
 
                         signal_captured = 1;
                         Stat_ClearHistory();
+
+                        /* ★ ИСПРАВЛЕНО: Обновляем Modbus КАЖДЫЙ раз когда есть новое значение ★ */
+                        ModBus_UpdateMeasurements(position_mm, current_temperature, ModBus_GetWaveguideLength());
                     }
                 }
             }
@@ -646,8 +651,14 @@ int main(void)
             }
         }
 
+        /* ★ ИСПРАВЛЕНО: Обновляем напряжения КАЖДЫЙ цикл (независимо от измерений) ★ */
+        Read_All_Voltages();
+        ModBus_UpdateVoltages(current_vdda, current_24v, current_12v, current_5v);
+
+        /* Обработка Modbus */
         ModBus_Process();
 
+        /* Сброс флага передачи Modbus если завис */
         if (modbus_tx_active && (HAL_GetTick() - last_measure_time > 100)) {
             RS485_SET_RECEIVE();
             modbus_tx_active = 0;
@@ -666,12 +677,6 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
         ModBus_RxCallback(huart);
     }
 }
-
-/* ==========================================================================
-ОБРАБОТЧИК ПРЕРЫВАНИЯ TIM3 (Input Capture Channel 4)
-★ МЁРТВОЕ ВРЕМЯ 60 мкс для игнорирования паразитного импульса
-========================================================================== */
-
 
 /* ==========================================================================
 ФУНКЦИЯ: Инициализация TIM3 для Input Capture
@@ -733,6 +738,7 @@ void generate_pulse_and_measure(void)
     for (volatile uint32_t i = 0; i < PULSE_DELAY_ITERATIONS*4; i++) __NOP();
 
     GPIOB->BRR = GPIO_PIN_5;
+
     for (volatile uint32_t i = 0; i < DELAY_AFTER_PULSE_ITER; i++) __NOP();
 
     HAL_GPIO_WritePin(SWITCH_PORT, SWITCH_PIN, GPIO_PIN_SET);
@@ -818,6 +824,7 @@ void Read_All_Voltages(void)
 
     ADC1->CR2 |= ADC_CR2_TSVREFE;
     HAL_Delay(10);
+
     adc_raw_vdda = Read_ADC_Average(&hadc1, ADC_CHANNEL_VREFINT, ADC_SAMPLETIME_239CYCLES_5, ADC_SAMPLES);
     ADC1->CR2 &= ~ADC_CR2_TSVREFE;
     HAL_Delay(1);
