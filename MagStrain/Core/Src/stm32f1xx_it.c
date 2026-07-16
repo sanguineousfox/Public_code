@@ -1,100 +1,67 @@
 /* USER CODE BEGIN Header */
-/**
-  @file    stm32f1xx_it.c
-  @brief   Interrupt Service Routines
-  ★ ИСПРАВЛЕНО: убран dead_time который блокировал первый значащий импульс
-  ★ ИСПРАВЛЕНО: остановка захвата после 2 импульсов (эхо не фиксируется)
-*/
+/*
+ * @file           : stm32f1xx_it.c
+ * @brief          : Interrupt handlers
+ */
 /* USER CODE END Header */
+
 #include "main.h"
 #include "stm32f1xx_it.h"
 
-/* USER CODE BEGIN TD */
-extern volatile uint32_t tof_capture_value;
-extern volatile uint8_t tof_measurement_done;
-extern volatile uint32_t captured_pulses[];
+/* ==========================================================================
+ВНЕШНИЕ ПЕРЕМЕННЫЕ ИЗ main.c
+========================================================================== */
+extern volatile uint32_t captured_pulses[MAX_CAPTURED_PULSES];
 extern volatile uint8_t capture_count;
-extern volatile uint8_t expected_pulse_pairs;
-extern volatile uint32_t last_capture_cnt;
-
-/* ★ Флаг игнорирования первого паразитного импульса ★ */
-extern volatile uint8_t first_pulse_ignored;
-/* USER CODE END TD */
-
-extern UART_HandleTypeDef huart1;
-extern UART_HandleTypeDef huart2;
-extern ADC_HandleTypeDef hadc1;
-extern ADC_HandleTypeDef hadc2;
-
-void NMI_Handler(void) { while (1) { } }
-void HardFault_Handler(void) { while (1) { } }
-void MemManage_Handler(void) { while (1) { } }
-void BusFault_Handler(void) { while (1) { } }
-void UsageFault_Handler(void) { while (1) { } }
-void SVC_Handler(void) { }
-void DebugMon_Handler(void) { }
-void PendSV_Handler(void) { }
-
-void SysTick_Handler(void)
-{
-    HAL_IncTick();
-}
+extern volatile uint8_t tof_measurement_done;
+extern volatile uint8_t tof_timeout;
 
 /* ==========================================================================
-ОБРАБОТЧИК ПРЕРЫВАНИЯ TIM3
-★ ИСПРАВЛЕНО: убран dead_time - теперь захватываются все импульсы
-★ ИСПРАВЛЕНО: остановка захвата после получения 2 импульсов
+ОБРАБОТЧИК ПРЕРЫВАНИЯ TIM3 (Input Capture Channel 4)
+★ ИСПРАВЛЕНО: Мёртвое время 60 мкс для игнорирования паразитного импульса
 ========================================================================== */
 void TIM3_IRQHandler(void)
 {
-    if (TIM3->SR & TIM_SR_CC4IF) {
-        uint32_t cnt_now = TIM3->CNT;
+    /* Проверяем, что прерывание именно от захвата канала 4 */
+    if ((TIM3->SR & TIM_SR_CC4IF) != 0)
+    {
+        /* Сбрасываем флаг прерывания */
+        TIM3->SR &= ~TIM_SR_CC4IF;
 
-        /* ★ 1. ИГНОРИРУЕМ ПЕРВЫЙ ПАРАЗИТНЫЙ ИМПУЛЬС (~28 мкс) ★ */
-        if (!first_pulse_ignored) {
-            first_pulse_ignored = 1;
-            TIM3->SR = 0;
+        /* Читаем захваченное значение счётчика */
+        uint32_t current_cnt = TIM3->CCR4;
+
+        /* ★ МЁРТВОЕ ВРЕМЯ (BLANKING WINDOW) ★
+           Если импульс пришёл раньше, чем через 60 мкс после старта таймера,
+           это паразитный выброс (звон) от излучателя. Игнорируем его. */
+        if (current_cnt < BLANKING_WINDOW_TICKS) {
             return;
         }
 
-        /* ★ 2. ЕСЛИ УЖЕ ЗАХВАТИЛИ 2 ИМПУЛЬСА - СТОП (эхо не нужно) ★ */
-        if (capture_count >= 2) {
-            TIM3->DIER &= ~TIM_DIER_CC4IE;
-            TIM3->SR = 0;
-            return;
+        /* Если импульс валидный (после 60 мкс), сохраняем его */
+        if (capture_count < MAX_CAPTURED_PULSES) {
+            captured_pulses[capture_count] = current_cnt;
+            capture_count++;
         }
 
-        /* ★ 3. ЗАХВАТЫВАЕМ ИМПУЛЬС ★ */
-        captured_pulses[capture_count] = cnt_now;
-        capture_count++;
-
-        /* 4. ToF = первый захваченный импульс */
-        if (capture_count == 1) {
-            tof_capture_value = captured_pulses[0];
-        }
-
-        /* 5. Если захватили 2 импульса - готово */
+        /* Если поймали минимально необходимую пару импульсов, завершаем измерение */
         if (capture_count >= 2) {
             tof_measurement_done = 1;
+
+            /* Отключаем прерывание захвата до следующего измерения */
             TIM3->DIER &= ~TIM_DIER_CC4IE;
         }
-
-        TIM3->SR = 0;
     }
 }
-
-void USART1_IRQHandler(void)
-{
-    HAL_UART_IRQHandler(&huart1);
-}
-
-void USART2_IRQHandler(void)
-{
-    HAL_UART_IRQHandler(&huart2);
-}
-
-void ADC1_2_IRQHandler(void)
-{
-    HAL_ADC_IRQHandler(&hadc1);
-    HAL_ADC_IRQHandler(&hadc2);
-}
+/* ==========================================================================
+ДРУГИЕ ОБРАБОТЧИКИ ПРЕРЫВАНИЙ (оставь как есть)
+========================================================================== */
+void NMI_Handler(void) { while (1) {} }
+void HardFault_Handler(void) { while (1) {} }
+void MemManage_Handler(void) { while (1) {} }
+void BusFault_Handler(void) { while (1) {} }
+void UsageFault_Handler(void) { while (1) {} }
+void SVC_Handler(void) {}
+void DebugMon_Handler(void) {}
+void PendSV_Handler(void) {}
+void SysTick_Handler(void) { HAL_IncTick(); }

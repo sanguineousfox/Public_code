@@ -1,0 +1,16 @@
+../Core/Src/AT24C64.c:15:19:AT24C64_Init	56	static
+../Core/Src/AT24C64.c:38:19:AT24C64_ReadByte	32	static
+../Core/Src/AT24C64.c:49:19:AT24C64_ReadBytes	40	static
+../Core/Src/AT24C64.c:62:19:AT24C64_WriteByte	40	static
+../Core/Src/AT24C64.c:79:19:AT24C64_WriteBytes	56	static
+../Core/Src/AT24C64.c:113:19:AT24C64_WaitReady	40	static
+../Core/Src/AT24C64.c:131:17:AT24C64_FloatAddr	16	static
+../Core/Src/AT24C64.c:136:17:AT24C64_IntAddr	16	static
+../Core/Src/AT24C64.c:141:19:AT24C64_SaveFloatParam	24	static
+../Core/Src/AT24C64.c:149:19:AT24C64_LoadFloatParam	24	static
+../Core/Src/AT24C64.c:161:19:AT24C64_SaveIntParam	24	static
+../Core/Src/AT24C64.c:170:19:AT24C64_LoadIntParam	24	static
+../Core/Src/AT24C64.c:182:19:AT24C64_SaveAllRegisters	536	static
+../Core/Src/AT24C64.c:195:19:AT24C64_LoadAllRegisters	536	static
+../Core/Src/AT24C64.c:211:19:AT24C64_Format	16	static
+../Core/Src/AT24C64.c:219:9:AT24C64_IsFormatted	16	static
