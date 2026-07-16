@@ -1,11 +1,7 @@
 /* USER CODE BEGIN Header */
-/*
-@file           : modbus.c
-@brief          : Modbus RTU implementation
-                 ★ Поддержка динамических параметров:
-                   - Ширина импульса (2094)
-                   - Частота таймера ToF (2100)
-                   - Период опроса (2088)
+/**
+  @file           : modbus.c
+  @brief          : Modbus RTU implementation
 */
 /* USER CODE END Header */
 
@@ -14,14 +10,14 @@
 #include <string.h>
 
 /* ==========================================================================
-КОНФИГУРАЦИЯ ПАМЯТИ
-========================================================================== */
+   КОНФИГУРАЦИЯ ПАМЯТИ
+   ========================================================================== */
 #define MODBUS_REG_ARRAY_SIZE   256
 #define INPUT_REGS_COUNT        64
 
 /* ==========================================================================
-СТРУКТУРА ДАННЫХ MODBUS
-========================================================================== */
+   СТРУКТУРА ДАННЫХ MODBUS
+   ========================================================================== */
 typedef struct {
     uint16_t regs[MODBUS_REG_ARRAY_SIZE];
     uint8_t device_address;
@@ -34,15 +30,15 @@ typedef struct {
 static ModBus_Struct modbus;
 
 /* ==========================================================================
-ПАРАМЕТРЫ ПО УМОЛЧАНИЮ
-========================================================================== */
+   ПАРАМЕТРЫ ПО УМОЛЧАНИЮ
+   ========================================================================== */
 typedef struct {
     uint16_t address;
     float    default_value;
 } Param_Float_Default;
 
 static const Param_Float_Default default_float_params[] = {
-    {MB_ADDR_WAVEGUIDE_LEN,   10.0f},
+    {MB_ADDR_WAVEGUIDE_LEN,   1.0f},
     {MB_ADDR_CAL_LOW_LVL,     0.1f},
     {MB_ADDR_CAL_HIGH_LVL,    0.9f},
     {MB_ADDR_PROBE_DEPTH,     0.0f},
@@ -51,8 +47,6 @@ static const Param_Float_Default default_float_params[] = {
     {MB_ADDR_POLL_PERIOD,     1.0f},
     {MB_ADDR_LEVEL_OFFSET,    0.0f},
     {MB_ADDR_THRESH_LVL,      0.9f},
-    {MB_ADDR_PULSE_WIDTH_US,  10.0f},     /* ★ Ширина импульса по умолчанию 10 мкс ★ */
-    {MB_ADDR_TOF_FREQ_MHZ,    9.0f},      /* ★ Частота таймера ToF по умолчанию 9 МГц ★ */
 };
 
 #define DEFAULT_FLOAT_PARAMS_COUNT (sizeof(default_float_params) / sizeof(default_float_params[0]))
@@ -76,8 +70,9 @@ static const Param_Int_Default default_int_params[] = {
 extern UART_HandleTypeDef huart1;
 
 /* ==========================================================================
-ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
-========================================================================== */
+   ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+   ========================================================================== */
+
 uint16_t ModBus_CRC16(const uint8_t *data, uint16_t length)
 {
     uint16_t crc = 0xFFFF;
@@ -116,8 +111,9 @@ static float RegistersToFloat(uint16_t reg_high, uint16_t reg_low)
 }
 
 /* ==========================================================================
-ПРЕОБРАЗОВАНИЕ АДРЕСОВ (РАСШИРЕННЫЕ ДИАПАЗОНЫ)
-========================================================================== */
+   ПРЕОБРАЗОВАНИЕ АДРЕСОВ (РАСШИРЕННЫЕ ДИАПАЗОНЫ)
+   ========================================================================== */
+
 static uint16_t ModBus_AddressToIndex(uint16_t addr)
 {
     /* Holding registers: 2000-2498 */
@@ -138,8 +134,9 @@ static uint16_t ModBus_AddressToIndex(uint16_t addr)
 }
 
 /* ==========================================================================
-ФУНКЦИИ ДЛЯ РАБОТЫ С ПАРАМЕТРАМИ
-========================================================================== */
+   ФУНКЦИИ ДЛЯ РАБОТЫ С ПАРАМЕТРАМИ
+   ========================================================================== */
+
 float ModBus_GetWaveguideLength(void)
 {
     uint16_t idx = ModBus_AddressToIndex(MB_ADDR_WAVEGUIDE_LEN);
@@ -198,40 +195,9 @@ void ModBus_SetParameter_Int(uint16_t addr, uint16_t value)
 }
 
 /* ==========================================================================
-★ ДИНАМИЧЕСКИЕ ПАРАМЕТРЫ ИМПУЛЬСА ★
-========================================================================== */
+   ФУНКЦИИ MODBUS
+   ========================================================================== */
 
-/* ==========================================================================
-ФУНКЦИЯ: Получение ширины импульса из Modbus
-Возвращает значение в микросекундах (1.0 - 1000.0)
-========================================================================== */
-float ModBus_GetPulseWidthUs(void)
-{
-    float width = ModBus_GetParameter_Float(MB_ADDR_PULSE_WIDTH_US);
-    /* Защита от мусорных значений */
-    if (width < 1.0f || width > 1000.0f) {
-        width = 10.0f;  /* Дефолт 10 мкс */
-    }
-    return width;
-}
-
-/* ==========================================================================
-ФУНКЦИЯ: Получение частоты таймера ToF из Modbus
-Возвращает значение в МГц (1.0 - 36.0)
-========================================================================== */
-float ModBus_GetTofFreqMHz(void)
-{
-    float freq = ModBus_GetParameter_Float(MB_ADDR_TOF_FREQ_MHZ);
-    /* Защита от мусорных значений */
-    if (freq < 1.0f || freq > 36.0f) {
-        freq = 9.0f;  /* Дефолт 9 МГц */
-    }
-    return freq;
-}
-
-/* ==========================================================================
-ФУНКЦИИ MODBUS
-========================================================================== */
 static void ModBus_SendException(uint8_t function, uint8_t exception_code)
 {
     uint8_t response[5];
@@ -254,6 +220,7 @@ static void ModBus_ReadHoldingRegisters(uint16_t start_addr, uint16_t reg_count)
         ModBus_SendException(0x03, 0x03);
         return;
     }
+
     uint16_t idx = ModBus_AddressToIndex(start_addr);
     if (idx == 0xFFFF || (idx + reg_count) > MODBUS_REG_ARRAY_SIZE) {
         ModBus_SendException(0x03, 0x02);
@@ -265,20 +232,23 @@ static void ModBus_ReadHoldingRegisters(uint16_t start_addr, uint16_t reg_count)
     response[index++] = modbus.device_address;
     response[index++] = 0x03;
     response[index++] = reg_count * 2;
+
     for(uint16_t i = 0; i < reg_count; i++) {
         uint16_t val = modbus.regs[idx + i];
         response[index++] = (val >> 8) & 0xFF;
         response[index++] = val & 0xFF;
     }
+
     uint16_t crc = ModBus_CRC16(response, index);
     response[index++] = crc & 0xFF;
     response[index++] = (crc >> 8) & 0xFF;
+
     ModBus_TransmitFrame(response, index);
 }
 
 static void ModBus_ReadInputRegisters(uint16_t start_addr, uint16_t reg_count)
 {
-    /* РАСШИРЕННЫЙ ДИАПАЗОН: 1000-1126 */
+    /*  РАСШИРЕННЫЙ ДИАПАЗОН: 1000-1126 */
     if (start_addr < 999 || start_addr > 1126) {
         ModBus_SendException(0x04, 0x02);
         return;
@@ -287,6 +257,7 @@ static void ModBus_ReadInputRegisters(uint16_t start_addr, uint16_t reg_count)
         ModBus_SendException(0x04, 0x03);
         return;
     }
+
     uint16_t idx = ModBus_AddressToIndex(start_addr);
     if (idx == 0xFFFF || (idx + reg_count) > INPUT_REGS_COUNT) {
         ModBus_SendException(0x04, 0x02);
@@ -298,14 +269,17 @@ static void ModBus_ReadInputRegisters(uint16_t start_addr, uint16_t reg_count)
     response[index++] = modbus.device_address;
     response[index++] = 0x04;
     response[index++] = reg_count * 2;
+
     for(uint16_t i = 0; i < reg_count; i++) {
         uint16_t val = modbus.regs[idx + i];
         response[index++] = (val >> 8) & 0xFF;
         response[index++] = val & 0xFF;
     }
+
     uint16_t crc = ModBus_CRC16(response, index);
     response[index++] = crc & 0xFF;
     response[index++] = (crc >> 8) & 0xFF;
+
     ModBus_TransmitFrame(response, index);
 }
 
@@ -320,6 +294,7 @@ static void ModBus_WriteSingleRegister(uint16_t reg_addr, uint16_t value)
         ModBus_SendException(0x06, 0x02);
         return;
     }
+
     modbus.regs[idx] = value;
 
     uint8_t response[8];
@@ -330,9 +305,11 @@ static void ModBus_WriteSingleRegister(uint16_t reg_addr, uint16_t value)
     response[index++] = reg_addr & 0xFF;
     response[index++] = (value >> 8) & 0xFF;
     response[index++] = value & 0xFF;
+
     uint16_t crc = ModBus_CRC16(response, index);
     response[index++] = crc & 0xFF;
     response[index++] = (crc >> 8) & 0xFF;
+
     ModBus_TransmitFrame(response, index);
 }
 
@@ -346,11 +323,13 @@ static void ModBus_WriteMultipleRegisters(uint16_t start_addr, uint16_t reg_coun
         ModBus_SendException(0x10, 0x03);
         return;
     }
+
     uint16_t idx = ModBus_AddressToIndex(start_addr);
     if (idx == 0xFFFF || (idx + reg_count) > MODBUS_REG_ARRAY_SIZE) {
         ModBus_SendException(0x10, 0x02);
         return;
     }
+
     for(uint16_t i = 0; i < reg_count; i++) {
         uint16_t val = ((uint16_t)data[i * 2] << 8) | data[i * 2 + 1];
         modbus.regs[idx + i] = val;
@@ -364,9 +343,11 @@ static void ModBus_WriteMultipleRegisters(uint16_t start_addr, uint16_t reg_coun
     response[index++] = start_addr & 0xFF;
     response[index++] = (reg_count >> 8) & 0xFF;
     response[index++] = reg_count & 0xFF;
+
     uint16_t crc = ModBus_CRC16(response, index);
     response[index++] = crc & 0xFF;
     response[index++] = (crc >> 8) & 0xFF;
+
     ModBus_TransmitFrame(response, index);
 }
 
@@ -378,7 +359,7 @@ static void ModBus_ProcessFrame(void)
     }
 
     uint16_t received_crc = ((uint16_t)modbus.rx_buffer[modbus.rx_index - 1] << 8) |
-                            modbus.rx_buffer[modbus.rx_index - 2];
+                           modbus.rx_buffer[modbus.rx_index - 2];
     uint16_t calculated_crc = ModBus_CRC16(modbus.rx_buffer, modbus.rx_index - 2);
 
     if (received_crc != calculated_crc) {
@@ -400,6 +381,7 @@ static void ModBus_ProcessFrame(void)
                 ModBus_ReadHoldingRegisters(start_addr, reg_count);
             }
             break;
+
         case 0x04:
             if (modbus.rx_index >= 8) {
                 uint16_t start_addr = ((uint16_t)modbus.rx_buffer[2] << 8) | modbus.rx_buffer[3];
@@ -407,6 +389,7 @@ static void ModBus_ProcessFrame(void)
                 ModBus_ReadInputRegisters(start_addr, reg_count);
             }
             break;
+
         case 0x06:
             if (modbus.rx_index >= 8) {
                 uint16_t reg_addr = ((uint16_t)modbus.rx_buffer[2] << 8) | modbus.rx_buffer[3];
@@ -414,17 +397,20 @@ static void ModBus_ProcessFrame(void)
                 ModBus_WriteSingleRegister(reg_addr, reg_value);
             }
             break;
+
         case 0x10:
-            if (modbus.rx_index >= 9) {
+             if (modbus.rx_index >= 9) {
                 uint16_t start_addr = ((uint16_t)modbus.rx_buffer[2] << 8) | modbus.rx_buffer[3];
                 uint16_t reg_count = ((uint16_t)modbus.rx_buffer[4] << 8) | modbus.rx_buffer[5];
                 ModBus_WriteMultipleRegisters(start_addr, reg_count, &modbus.rx_buffer[7]);
             }
             break;
+
         default:
             ModBus_SendException(modbus.rx_buffer[1], 0x01);
             break;
     }
+
     modbus.rx_index = 0;
 }
 
@@ -453,8 +439,6 @@ void ModBus_RxCallback(UART_HandleTypeDef *huart)
 {
     if (huart->Instance == USART1) {
         uint32_t current_time = HAL_GetTick();
-
-        /* Таймаут 3.5 символов для 19200 бод ~2 мс. Ставим 4 мс для надежности */
         if (current_time - modbus.last_byte_time > 4) {
             modbus.rx_index = 0;
         }
@@ -463,6 +447,7 @@ void ModBus_RxCallback(UART_HandleTypeDef *huart)
         if (modbus.rx_index < MODBUS_BUFFER_SIZE) {
             modbus.rx_buffer[modbus.rx_index++] = modbus.rx_byte;
         }
+
         HAL_UART_Receive_IT(&huart1, &modbus.rx_byte, 1);
     }
 }
@@ -471,7 +456,6 @@ void ModBus_Process(void)
 {
     if (modbus.rx_index > 0) {
         uint32_t current_time = HAL_GetTick();
-        /* Если после последнего байта прошло > 5 мс, считаем кадр принятым */
         if (current_time - modbus.last_byte_time > 5) {
             ModBus_ProcessFrame();
         }
@@ -490,6 +474,7 @@ void ModBus_UpdateMeasurements(float level, float temp, float waveguide)
 {
     FloatToRegisters(level, &modbus.regs[0], &modbus.regs[1]);
     FloatToRegisters(temp, &modbus.regs[2], &modbus.regs[3]);
+
     float level_pct = 0.0f;
     if (waveguide > 0.0f) {
         level_pct = (level / waveguide) * 100.0f;
