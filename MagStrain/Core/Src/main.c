@@ -1,12 +1,11 @@
 /* USER CODE BEGIN Header */
-/**
-  @file           : main.c
-                  - Буферизованный вывод в USART2 (оптимизация скорости)
-                  - Интеграция с AT24C64 EEPROM (адрес 0x51)
-                  - LM75B отключён (температура = 0°C)
-                  - Мёртвое время 60 мкс в TIM3_IRQHandler
-                  - ★ ИСПРАВЛЕНО: Измерения обновляются КАЖДЫЙ раз
-*/
+/*
+ * @file           : main.c
+ * @brief          : Основной цикл магнитострикционного уровнемера
+ *                   - Буферизованный вывод в USART2
+ *                   - Интеграция с AT24C64 EEPROM
+ *                   - Калибровка по двум точкам  (команды 01, 02, 03, 04)
+ */
 /* USER CODE END Header */
 #include "main.h"
 #include "stm32f1xx_it.h"
@@ -18,7 +17,7 @@
 #include <string.h>
 
 /* ==========================================================================
-КОНСТАНТЫ И МАКРОСЫ
+   КОНСТАНТЫ И МАКРОСЫ
 ========================================================================== */
 #define TIMER_CLOCK_HZ          72000000.0f
 #define TOF_TICK_US             0.0972f
@@ -26,11 +25,14 @@
 #define VREFINT_CAL_VALUE       ((uint16_t *)VREFINT_CAL_ADDR)
 #define ADC_SAMPLES             16
 #define MEAS_TIMEOUT_MS         50
-#define DIV_24V_FACTOR          9.5f
+#define DIV_24V_FACTOR          9.4f
 #define DIV_12V_FACTOR          4.0f
 #define DIV_5V_FACTOR           2.0f
 #define PULSE_PERIOD_MS_DEFAULT 1000
-#define SOUND_SPEED_MPS         6500.0f
+
+/* Скорость распространения крутильной волны в материале волновода (м/с) */
+/* Используется только если калибровка не проведена */
+#define SOUND_SPEED_MPS         3370.0f
 
 /* === СТАТИСТИКА ИЗМЕРЕНИЙ === */
 #define STAT_HISTORY_SIZE       11
@@ -61,14 +63,12 @@
 #define MIN_POLL_PERIOD_MS      1000
 #define MAX_POLL_PERIOD_MS      60000
 
-/* ★ ПОРОГИ ШИРИНЫ ИМПУЛЬСА НА CLIK (между 1-м и 2-м импульсами значащей пары) ★ */
+/* ★ ПОРОГИ ШИРИНЫ ИМПУЛЬСА НА CLIK ★ */
 #define MIN_CLICK_WIDTH_US      14.0f
 #define MAX_CLICK_WIDTH_US      24.0f
 
-//#define TEST_MODE   1
-
 /* ==========================================================================
-ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
+   ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
 ========================================================================== */
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
@@ -99,7 +99,7 @@ static float current_vdda = 3.3f;
 static float current_24v = 24.0f;
 static float current_12v = 12.0f;
 static float current_5v = 5.0f;
-static float current_temperature = 0.0f;  /* LM75B отключён */
+static float current_temperature = 0.0f;
 static uint32_t current_poll_period_ms = PULSE_PERIOD_MS_DEFAULT;
 static float prev_vdda = 0.0f;
 static float prev_24v = 0.0f;
@@ -110,23 +110,19 @@ static uint8_t v5_error = 0;
 static uint8_t vdda_error = 0;
 
 /* ==========================================================================
-МАКРОСЫ УПРАВЛЕНИЯ RS-485
+   МАКРОСЫ УПРАВЛЕНИЯ RS-485
 ========================================================================== */
 #define RS485_SET_TRANSMIT() HAL_GPIO_WritePin(RS485_CTRL_PORT, RS485_CTRL_PIN, GPIO_PIN_SET)
 #define RS485_SET_RECEIVE()  HAL_GPIO_WritePin(RS485_CTRL_PORT, RS485_CTRL_PIN, GPIO_PIN_RESET)
 
 /* ==========================================================================
-БУФЕРНЫЙ ВЫВОД В USART2 (оптимизация скорости)
-★ ВАЖНО: функции объявлены БЕЗ static, т.к. прототипы в main.h без static
+   БУФЕРНЫЙ ВЫВОД В USART2
 ========================================================================== */
 #define USART2_TX_BUF_SIZE      512
 static char tx_buf[USART2_TX_BUF_SIZE];
 static uint16_t tx_buf_len = 0;
 
-void USART2_BufInit(void)
-{
-    tx_buf_len = 0;
-}
+void USART2_BufInit(void) { tx_buf_len = 0; }
 
 void USART2_BufFlush(void)
 {
@@ -146,9 +142,7 @@ static void buf_putc(char c)
 
 void USART2_BufPrint(const char *str)
 {
-    while (*str) {
-        buf_putc(*str++);
-    }
+    while (*str) { buf_putc(*str++); }
 }
 
 void USART2_BufPrintInt(int32_t val)
@@ -175,7 +169,7 @@ void USART2_BufPrintFloat(float val)
 }
 
 /* ==========================================================================
-ПРОТОТИПЫ ЛОКАЛЬНЫХ ФУНКЦИЙ
+   ПРОТОТИПЫ ЛОКАЛЬНЫХ ФУНКЦИЙ
 ========================================================================== */
 static void USART2_PrintInt(int32_t val);
 static void USART2_PrintFloat(float val);
@@ -186,7 +180,161 @@ static float Stat_CalculateTrimmedAverage(void);
 static void Stat_ClearHistory(void);
 
 /* ==========================================================================
-СТАТИСТИКА: Добавление значения в историю
+   ★ КАЛИБРОВКА: Расчет расстояния с использованием калибровочных параметров
+   Согласно Приложению Ж документации
+
+   ★ ИЗМЕНЕНО: C1 и C2 теперь хранят РАССТОЯНИЯ в мм (а не время в мкс)!
+
+   Формула линейной интерполяции:
+     position = h_low + (C1_mm - measured_distance) × (h_high - h_low) / (C1_mm - C2_mm)
+
+   где:
+     C1_mm - расстояние до НИЖНЕЙ точки (пустой бак, большое расстояние, мм)
+     C2_mm - расстояние до ВЕРХНЕЙ точки (полный бак, малое расстояние, мм)
+     measured_distance - текущее измеренное расстояние (мм)
+
+   При measured_distance = C1_mm → position = h_low  (нижняя точка)
+   При measured_distance = C2_mm → position = h_high (верхняя точка)
+========================================================================== */
+static float Calculate_Position(float tof_us)
+{
+    /* Получаем калибровочные параметры */
+    float h_low   = ModBus_GetParameter_Float(MB_ADDR_CAL_LOW_LVL);   /* h_ (адрес 2000), м */
+    float h_high  = ModBus_GetParameter_Float(MB_ADDR_CAL_HIGH_LVL);  /* h̄ (адрес 2002), м */
+    float C1_mm   = ModBus_GetParameter_Float(MB_ADDR_CAL_C1);        /* адрес 2386, мм - расстояние для нижней точки */
+    float C2_mm   = ModBus_GetParameter_Float(MB_ADDR_CAL_C2);        /* адрес 2388, мм - расстояние для верхней точки */
+
+    /* ★ Сначала рассчитываем текущее расстояние по ToF (в мм) ★ */
+    float measured_distance_mm = tof_us * 0.001f * SOUND_SPEED_MPS;
+
+    /* Проверяем, проведена ли калибровка */
+    /* C1_mm > C2_mm, потому что нижняя точка (пустой бак) имеет БОЛЬШЕЕ расстояние */
+    if (C1_mm > 0.0f && C2_mm > 0.0f && C1_mm > C2_mm && h_high > h_low) {
+        /* ★ Калиброванная формула: линейная интерполяция по расстояниям ★ */
+        /* При measured_distance = C1_mm (пустой бак) → position = h_low */
+        /* При measured_distance = C2_mm (полный бак) → position = h_high */
+        float position_m = h_low + (C1_mm - measured_distance_mm) * (h_high - h_low) / (C1_mm - C2_mm);
+
+        /* Ограничиваем диапазон */
+        if (position_m < 0.0f) position_m = 0.0f;
+        if (position_m > h_high * 1.1f) position_m = h_high * 1.1f;
+
+        /* Переводим в мм */
+        return position_m * 1000.0f;
+    } else {
+        /* ★ Если калибровка не проведена - используем формулу через скорость звука ★ */
+        /* Волна идет в одну сторону (от генератора до магнита) */
+        return measured_distance_mm;
+    }
+}
+
+/* ==========================================================================
+   ★ КАЛИБРОВКА: Обработка команд управления
+   Команды записываются в регистр 3000 (MB_ADDR_COMMAND)
+   01 - подстройка в нижней контрольной точке уровня
+   02 - подстройка в верхней контрольной точке уровня
+   03 - определение длины звукопровода
+   04 - определение разности высот магнитов
+
+   ★ ИЗМЕНЕНО: Теперь сохраняем РАССТОЯНИЕ в мм (а не время в мкс)!
+========================================================================== */
+static void Process_Calibration_Command(uint16_t cmd)
+{
+    switch(cmd) {
+        case 03:
+            /* Команда 03: Определение длины звукопровода */
+            {
+                float waveguide_len = ModBus_GetWaveguideLength();
+                USART2_Print("[CAL] Команда 03: Длина звукопровода = ");
+                USART2_BufInit();
+                USART2_BufPrintFloat(waveguide_len * 1000.0f);
+                USART2_BufPrint(" мм\r\n");
+                USART2_BufFlush();
+            }
+            break;
+
+        case 02:
+            /* Команда 02: Подстройка в ВЕРХНЕЙ контрольной точке (h̄) */
+            /* Бак ПОЛНЫЙ (100%), магнит БЛИЗКО, малое расстояние */
+            /* ★ Используем ту же формулу что и в Calculate_Position ★ */
+            {
+                uint32_t measurement = measure_time_of_flight();
+                if (measurement > 0 && !tof_timeout) {
+                    float tof_us = (float)measurement * TOF_TICK_US;
+
+                    /* ★ ФОРМУЛА ИЗ Calculate_Position: расстояние = ToF × скорость звука ★ */
+                    float distance_mm = tof_us * 0.001f * SOUND_SPEED_MPS;
+
+                    float h_high = ModBus_GetParameter_Float(MB_ADDR_CAL_HIGH_LVL);
+
+                    /* Сохраняем C2 = расстояние для верхней точки (в мм) */
+                    ModBus_SetParameter_Float(MB_ADDR_CAL_C2, distance_mm);
+
+                    USART2_Print("[CAL] Команда 02: ВЕРХНЯЯ точка (полный бак, 100%)\r\n");
+                    USART2_BufInit();
+                    USART2_BufPrint("      C2 = ");
+                    USART2_BufPrintFloat(distance_mm);
+                    USART2_BufPrint(" мм (ToF = ");
+                    USART2_BufPrintFloat(tof_us);
+                    USART2_BufPrint(" мкс, h̄ = ");
+                    USART2_BufPrintFloat(h_high * 1000.0f);
+                    USART2_BufPrint(" мм)\r\n");
+                    USART2_BufFlush();
+                } else {
+                    USART2_Print("[CAL] Команда 02: ОШИБКА измерения!\r\n");
+                }
+            }
+            break;
+
+        case 01:
+            /* Команда 01: Подстройка в НИЖНЕЙ контрольной точке (h_) */
+            /* Бак ПУСТОЙ (0%), магнит ДАЛЕКО, большое расстояние */
+            /* ★ Используем ту же формулу что и в Calculate_Position ★ */
+            {
+                uint32_t measurement = measure_time_of_flight();
+                if (measurement > 0 && !tof_timeout) {
+                    float tof_us = (float)measurement * TOF_TICK_US;
+
+                    /* ★ ФОРМУЛА ИЗ Calculate_Position: расстояние = ToF × скорость звука ★ */
+                    float distance_mm = tof_us * 0.001f * SOUND_SPEED_MPS;
+
+                    float h_low = ModBus_GetParameter_Float(MB_ADDR_CAL_LOW_LVL);
+
+                    /* Сохраняем C1 = расстояние для нижней точки (в мм) */
+                    ModBus_SetParameter_Float(MB_ADDR_CAL_C1, distance_mm);
+
+                    USART2_Print("[CAL] Команда 01: НИЖНЯЯ точка (пустой бак, 0%)\r\n");
+                    USART2_BufInit();
+                    USART2_BufPrint("      C1 = ");
+                    USART2_BufPrintFloat(distance_mm);
+                    USART2_BufPrint(" мм (ToF = ");
+                    USART2_BufPrintFloat(tof_us);
+                    USART2_BufPrint(" мкс, h_ = ");
+                    USART2_BufPrintFloat(h_low * 1000.0f);
+                    USART2_BufPrint(" мм)\r\n");
+                    USART2_BufFlush();
+                } else {
+                    USART2_Print("[CAL] Команда 01: ОШИБКА измерения!\r\n");
+                }
+            }
+            break;
+
+        case 04:
+            /* Команда 04: Определение разности высот магнитов (d8) */
+            /* Для поплавка раздела сред */
+            USART2_Print("[CAL] Команда 04: Разность высот магнитов\r\n");
+            break;
+
+        default:
+            break;
+    }
+
+    /* Сбрасываем команду после выполнения */
+    ModBus_SetParameter_Int(MB_ADDR_COMMAND, 0);
+}
+
+/* ==========================================================================
+   СТАТИСТИКА
 ========================================================================== */
 static void Stat_AddValue(uint32_t value)
 {
@@ -201,9 +349,6 @@ static void Stat_AddValue(uint32_t value)
     }
 }
 
-/* ==========================================================================
-СТАТИСТИКА: Расчёт усреднённого значения (отброс мин/макс)
-========================================================================== */
 static float Stat_CalculateTrimmedAverage(void)
 {
     if (stat_count < 3) return 0.0f;
@@ -234,9 +379,6 @@ static float Stat_CalculateTrimmedAverage(void)
     return (float)sum / (float)valid_count;
 }
 
-/* ==========================================================================
-СТАТИСТИКА: Очистка истории (сброс для нового цикла измерений)
-========================================================================== */
 static void Stat_ClearHistory(void)
 {
     for (uint8_t i = 0; i < STAT_HISTORY_SIZE; i++) {
@@ -248,7 +390,7 @@ static void Stat_ClearHistory(void)
 }
 
 /* ==========================================================================
-ФУНКЦИЯ: Передача кадра Modbus
+   ФУНКЦИЯ: Передача кадра Modbus
 ========================================================================== */
 void ModBus_TransmitFrame(uint8_t *frame, uint16_t len)
 {
@@ -261,6 +403,7 @@ void ModBus_TransmitFrame(uint8_t *frame, uint16_t len)
 
     RS485_SET_TRANSMIT();
     modbus_tx_active = 1;
+
     for (volatile int i = 0; i < 150; i++) __NOP();
 
     HAL_UART_Transmit(&huart1, frame, len, 100);
@@ -271,32 +414,24 @@ void ModBus_TransmitFrame(uint8_t *frame, uint16_t len)
     }
 
     for (volatile int i = 0; i < 800; i++) __NOP();
+
     RS485_SET_RECEIVE();
     modbus_tx_active = 0;
 }
 
 /* ==========================================================================
-ФУНКЦИИ: Вывод через USART2 (по-символьно, для простых сообщений)
-========================================================================== */
+   ФУНКЦИИ: Вывод через USART2
+==========================================================================*/
 static void USART2_PrintInt(int32_t val)
 {
     char buf[12];
     int8_t i = 0, len = 0;
-
-    if (val < 0) {
-        USART2_Print("-");
-        val = -val;
-    }
-    if (val == 0) {
-        USART2_Print("0");
-        return;
-    }
-
+    if (val < 0) { USART2_Print("-"); val = -val; }
+    if (val == 0) { USART2_Print("0"); return; }
     do {
         buf[i++] = (val % 10) + '0';
         val /= 10;
     } while (val > 0);
-
     len = i;
     for (i = len - 1; i >= 0; i--) {
         char c = buf[i];
@@ -311,7 +446,6 @@ static void USART2_PrintFloat(float val)
     if (frac < 0) frac = -frac;
     int32_t frac_part = (int32_t)(frac * 100.0f + 0.5f);
     if (frac_part >= 100) frac_part = 0;
-
     USART2_PrintInt(int_part);
     USART2_Print(".");
     if (frac_part < 10) USART2_Print("0");
@@ -319,7 +453,7 @@ static void USART2_PrintFloat(float val)
 }
 
 /* ==========================================================================
-ФУНКЦИЯ: Отслеживание изменения напряжений
+   ФУНКЦИЯ: Отслеживание изменения напряжений
 ========================================================================== */
 static void Check_Voltage_Change(const char *name, float new_val, float old_val, float *store_val)
 {
@@ -333,18 +467,15 @@ static void Check_Voltage_Change(const char *name, float new_val, float old_val,
         USART2_Print(": ");
         USART2_PrintFloat(new_val);
         USART2_Print(" В (изм: ");
-        if (old_val > 0.0f) {
-            USART2_PrintFloat(diff);
-        } else {
-            USART2_Print("init");
-        }
+        if (old_val > 0.0f) { USART2_PrintFloat(diff); }
+        else { USART2_Print("init"); }
         USART2_Print(")\r\n");
         *store_val = new_val;
     }
 }
 
 /* ==========================================================================
-ФУНКЦИЯ: Чтение периода опроса из Modbus
+   ФУНКЦИЯ: Чтение периода опроса из Modbus
 ========================================================================== */
 static void Update_Poll_Period_From_Modbus(void)
 {
@@ -364,8 +495,7 @@ static void Update_Poll_Period_From_Modbus(void)
 }
 
 /* ==========================================================================
-ФУНКЦИЯ: Обработка результатов измерения (БУФЕРИЗОВАННЫЙ ВЫВОД)
-
+   ФУНКЦИЯ: Обработка результатов измерения
 ========================================================================== */
 void Process_Measurement_Results(float tof_us, float position_mm, uint8_t signal_captured)
 {
@@ -373,28 +503,46 @@ void Process_Measurement_Results(float tof_us, float position_mm, uint8_t signal
     float cal_low = ModBus_GetParameter_Float(MB_ADDR_CAL_LOW_LVL);
     float cal_high = ModBus_GetParameter_Float(MB_ADDR_CAL_HIGH_LVL);
 
-    if (cal_low < 0.1f || cal_low > 100.0f) {
-        cal_low = 0.1f;
+    /* ★ Читаем калибровочные параметры C1 и C2 (теперь в мм!) ★ */
+    float C1_mm = ModBus_GetParameter_Float(MB_ADDR_CAL_C1);        /* мм - расстояние для нижней точки */
+    float C2_mm = ModBus_GetParameter_Float(MB_ADDR_CAL_C2);        /* мм - расстояние для верхней точки */
+
+    /* ★ Переводим всё в мм ★ */
+    float waveguide_len_mm = waveguide_len * 1000.0f;
+    float cal_low_mm = cal_low * 1000.0f;
+    float cal_high_mm = cal_high * 1000.0f;
+
+    /* ★ Проверка на мусор в параметрах ★ */
+    if (cal_low_mm < 0.0f || cal_low_mm > 50000.0f || cal_low_mm != cal_low_mm) {
+        cal_low_mm = 100.0f;  /* По умолчанию 100 мм */
     }
-    if (cal_high < 0.3f || cal_high > 50000.0f) {
-        cal_high = 1.0f;
-    }
-    if (position_mm < 0.0f) {
-        position_mm = 0.0f;
-    }
-    if (position_mm > waveguide_len) {
-        position_mm = waveguide_len;
+    if (cal_high_mm < 0.0f || cal_high_mm > 50000.0f || cal_high_mm != cal_high_mm) {
+        cal_high_mm = 1000.0f;  /* По умолчанию 1000 мм */
     }
 
-    /* Буферизованный вывод */
+    if (position_mm < 0.0f) position_mm = 0.0f;
+    if (position_mm > waveguide_len_mm) position_mm = waveguide_len_mm;
+
     USART2_BufInit();
 
     if (signal_captured)
     {
-        USART2_BufPrint("\r\n");
-        USART2_BufPrint("===========================================================\r\n");
+        USART2_BufPrint("\r\n===========================================================\r\n");
         USART2_BufPrint("                    РЕЗУЛЬТАТЫ ИЗМЕРЕНИЯ                   \r\n");
         USART2_BufPrint("===========================================================\r\n");
+
+        /* ★ Вывод информации о калибровке (C1 и C2 в мм!) ★ */
+        if (C1_mm > 0.0f && C2_mm > 0.0f && C1_mm > C2_mm) {
+            USART2_BufPrint("[CAL] Калибровка АКТИВНА\r\n");
+            USART2_BufPrint("      C1 = ");
+            USART2_BufPrintFloat(C1_mm);
+            USART2_BufPrint(" мм (нижняя точка, пустой бак)\r\n");
+            USART2_BufPrint("      C2 = ");
+            USART2_BufPrintFloat(C2_mm);
+            USART2_BufPrint(" мм (верхняя точка, полный бак)\r\n");
+        } else {
+            USART2_BufPrint("[CAL] Калибровка НЕ проведена (используется скорость звука)\r\n");
+        }
 
         USART2_BufPrint("[DBG] Захвачено импульсов: ");
         USART2_BufPrintInt(capture_count);
@@ -406,7 +554,6 @@ void Process_Measurement_Results(float tof_us, float position_mm, uint8_t signal
             USART2_BufPrint(" тиков (");
             USART2_BufPrintFloat((float)captured_pulses[0] * TOF_TICK_US);
             USART2_BufPrint(" мкс)\r\n");
-
             USART2_BufPrint("  Импульс[1] = ");
             USART2_BufPrintInt(captured_pulses[1]);
             USART2_BufPrint(" тиков (");
@@ -423,55 +570,54 @@ void Process_Measurement_Results(float tof_us, float position_mm, uint8_t signal
             USART2_BufPrint(" мкс\r\n");
 
             if (width_time_us < MIN_CLICK_WIDTH_US || width_time_us > MAX_CLICK_WIDTH_US) {
-                USART2_BufPrint("  X ОТБРОШЕНО: пауза ");
-                USART2_BufPrintFloat(width_time_us);
-                USART2_BufPrint(" мкс вне диапазона ");
-                USART2_BufPrintFloat(MIN_CLICK_WIDTH_US);
-                USART2_BufPrint("-");
-                USART2_BufPrintFloat(MAX_CLICK_WIDTH_US);
-                USART2_BufPrint(" мкс\r\n");
+                USART2_BufPrint("  X ОТБРОШЕНО: пауза вне диапазона\r\n");
             } else {
                 USART2_BufPrint("  V ВАЛИДНАЯ ПАРА\r\n");
-
                 float tof_time_us = (float)captured_pulses[0] * TOF_TICK_US;
-                float position = (tof_time_us * 0.001f * SOUND_SPEED_MPS) / 2.0f;
+
+                /* ★ Рассчитываем текущее расстояние по скорости звука ★ */
+                float measured_distance_mm = tof_time_us * 0.001f * SOUND_SPEED_MPS;
+
+                /* Расчет расстояния с калибровкой */
+                float position = Calculate_Position(tof_time_us);
+
+                /* ★ Расчет процента заполнения ★ */
+                /* position - расстояние от ДАТЧИКА до магнита */
+                /* cal_high_mm (1000 мм) - НИЖНЯЯ точка (бак ПУСТОЙ 0%) */
+                /* cal_low_mm (100 мм) - ВЕРХНЯЯ точка (бак ПОЛНЫЙ 100%) */
                 float level_percent = 0.0f;
 
-                if (waveguide_len > 0.0f) {
-                    level_percent = ((waveguide_len-position) / waveguide_len) * 100.0f;
+                /* ★ ПРАВИЛЬНАЯ ФОРМУЛА ★ */
+                /* Чем МЕНЬШЕ position (магнит ближе к датчику), тем БОЛЬШЕ заполнение */
+                if (cal_low_mm > 0.0f && cal_high_mm > cal_low_mm) {
+                    level_percent = ((cal_high_mm - position) / (cal_high_mm - cal_low_mm)) * 100.0f;
                 }
-                if (level_percent > 100.0f) {
-                    level_percent = 100.0f;
-                }
+
+                if (level_percent > 100.0f) level_percent = 100.0f;
+                if (level_percent < 0.0f) level_percent = 0.0f;
 
                 USART2_BufPrint("  ToF = ");
                 USART2_BufPrintFloat(tof_time_us);
-                USART2_BufPrint(" мкс | Уровень = ");
-                USART2_BufPrintFloat(position);
-                USART2_BufPrint(" мм (");
+                USART2_BufPrint(" мкс | Расстояние = ");
+                USART2_BufPrintFloat(measured_distance_mm);
+                USART2_BufPrint(" мм\r\n");
+                USART2_BufPrint("  Уровень заполнения = ");
                 USART2_BufPrintFloat(level_percent);
-                USART2_BufPrint("%)\r\n");
+                USART2_BufPrint("%\r\n");
             }
         }
 
         USART2_BufPrint("-----------------------------------------------------------\r\n");
         USART2_BufPrint("  Волновод: ");
-        USART2_BufPrintFloat(waveguide_len);
+        USART2_BufPrintFloat(waveguide_len_mm);
         USART2_BufPrint(" мм | Температура: ");
         USART2_BufPrintFloat(current_temperature);
         USART2_BufPrint(" C\r\n");
-
         USART2_BufPrint("  Калибровка: ");
-        USART2_BufPrintFloat(cal_low * 1000.0f);
+        USART2_BufPrintFloat(cal_low_mm);
         USART2_BufPrint(" .. ");
-        USART2_BufPrintFloat(cal_high * 1000.0f);
+        USART2_BufPrintFloat(cal_high_mm);
         USART2_BufPrint(" мм\r\n");
-
-        USART2_BufPrint("  Период: ");
-        USART2_BufPrintInt(current_poll_period_ms / 1000);
-        USART2_BufPrint(" сек | Магнитов: ");
-        USART2_BufPrintInt(MAX_PULSE_PAIRS);
-        USART2_BufPrint("\r\n");
         USART2_BufPrint("===========================================================\r\n");
     }
     else
@@ -483,7 +629,7 @@ void Process_Measurement_Results(float tof_us, float position_mm, uint8_t signal
 }
 
 /* ==========================================================================
-MAIN: Точка входа
+   MAIN: Точка входа
 ========================================================================== */
 int main(void)
 {
@@ -495,10 +641,8 @@ int main(void)
     MX_ADC1_Init();
     MX_ADC2_Init();
 
-    /* Инициализация I2C2 для EEPROM */
     if (MX_I2C2_Init() == HAL_OK) {
         USART2_Print("[I2C2] Инициализирована (PB10=SCL, PB11=SDA)\r\n");
-        /* LM75B не подключён - температура будет 0 */
         current_temperature = 0.0f;
     } else {
         USART2_Print("[I2C2] ОШИБКА инициализации!\r\n");
@@ -507,37 +651,20 @@ int main(void)
     TIM3_InputCapture_Init();
 
     USART2_Print("[ИНИЦ] Калибровка АЦП...\r\n");
-    if (HAL_ADCEx_Calibration_Start(&hadc1) == HAL_OK) {
-        USART2_Print("[ИНИЦ] АЦП1 откалиброван успешно\r\n");
-    } else {
-        USART2_Print("[ИНИЦ] Калибровка АЦП1 НЕ УДАЛАСЬ!\r\n");
-        v24_error = 1; v12_error = 1; v5_error = 1; vdda_error = 1;
-    }
+    if (HAL_ADCEx_Calibration_Start(&hadc1) == HAL_OK) USART2_Print("[ИНИЦ] АЦП1 OK\r\n");
+    else { v24_error = 1; v12_error = 1; v5_error = 1; vdda_error = 1; }
 
-    if (HAL_ADCEx_Calibration_Start(&hadc2) == HAL_OK) {
-        USART2_Print("[ИНИЦ] АЦП2 откалиброван успешно\r\n");
-    } else {
-        USART2_Print("[ИНИЦ] Калибровка АЦП2 НЕ УДАЛАСЬ!\r\n");
-        v12_error = 1; v5_error = 1;
-    }
+    if (HAL_ADCEx_Calibration_Start(&hadc2) == HAL_OK) USART2_Print("[ИНИЦ] АЦП2 OK\r\n");
+    else { v12_error = 1; v5_error = 1; }
 
-    if (HAL_ADC_Init(&hadc1) != HAL_OK || HAL_ADC_Init(&hadc2) != HAL_OK) {
-        USART2_Print("[ИНИЦ] Инициализация АЦП НЕ УДАЛАСЬ!\r\n");
-        v24_error = 1; v12_error = 1; v5_error = 1; vdda_error = 1;
-    }
-
-    /* Инициализация Modbus + загрузка параметров из EEPROM AT24C64 */
     ModBus_Init();
     ModBus_UpdateFirmwareVersion(FIRMWARE_VERSION);
-
     Stat_ClearHistory();
 
     HAL_NVIC_SetPriority(USART1_IRQn, 0, 0);
     HAL_NVIC_EnableIRQ(USART1_IRQn);
-
     HAL_NVIC_SetPriority(TIM3_IRQn, 0, 0);
     HAL_NVIC_EnableIRQ(TIM3_IRQn);
-
     __enable_irq();
 
     Read_All_Voltages();
@@ -545,28 +672,24 @@ int main(void)
     ModBus_UpdateVoltages(current_vdda, current_24v, current_12v, current_5v);
     Update_Poll_Period_From_Modbus();
 
-#ifdef TEST_MODE
-    USART2_Print("=== РЕЖИМ ТЕСТА ЛИНИИ ФИКСАЦИИ АКТИВЕН ===\r\n");
-#endif
-
-    /* Стартовый лог (буферизованный) */
     USART2_BufInit();
-    USART2_BufPrint("Адрес modbus: 1, скорость: 19200 бод.\r\n");
-    USART2_BufPrint("[DBG] Период измерений:  ");
+    USART2_BufPrint("Modbus: Addr=1, Baud=19200\r\n");
+    USART2_BufPrint("[DBG] Период: ");
     USART2_BufPrintInt(current_poll_period_ms / 1000);
-    USART2_BufPrint(" сек, Мёртвое окно:  ");
-    USART2_BufPrintInt((uint32_t)(BLANKING_WINDOW_TICKS * TOF_TICK_US));
-    USART2_BufPrint(" мкс, Магнитов:  ");
-    USART2_BufPrintInt(MAX_PULSE_PAIRS);
-    USART2_BufPrint(", Статистика:  ");
-    USART2_BufPrintInt(STAT_HISTORY_SIZE);
-    USART2_BufPrint(" значений (сброс после вывода)\r\n");
-    USART2_BufPrint("[DBG] Порог ширины на CLIK:  ");
-    USART2_BufPrintFloat(MIN_CLICK_WIDTH_US);
-    USART2_BufPrint(" - ");
-    USART2_BufPrintFloat(MAX_CLICK_WIDTH_US);
-    USART2_BufPrint(" мкс\r\n");
-    USART2_BufPrint("[EEPROM] Параметры загружены из AT24C64 (0x51)\r\n");
+    USART2_BufPrint(" сек\r\n");
+
+    /* ★ Показываем статус калибровки при старте ★ */
+    float C1 = ModBus_GetParameter_Float(MB_ADDR_CAL_C1);
+    float C2 = ModBus_GetParameter_Float(MB_ADDR_CAL_C2);
+    if (C1 > 0.0f && C2 > 0.0f && C1 > C2) {
+        USART2_BufPrint("[CAL] Калибровка найдена: C1=");
+        USART2_BufPrintFloat(C1);
+        USART2_BufPrint(" мм, C2=");
+        USART2_BufPrintFloat(C2);
+        USART2_BufPrint(" мм\r\n");
+    } else {
+        USART2_BufPrint("[CAL] Калибровка НЕ найдена (используется скорость звука)\r\n");
+    }
     USART2_BufFlush();
 
     uint32_t last_measure_time = 0;
@@ -577,37 +700,35 @@ int main(void)
 
     while (1)
     {
-        /* Мигание синим светодиодом каждую секунду */
         if (HAL_GetTick() - last_debug_time >= 1000) {
             last_debug_time = HAL_GetTick();
             blue_led_state = !blue_led_state;
             HAL_GPIO_WritePin(GPIOB, LED_BLUE_PIN, blue_led_state ? LED_BLUE_ON : LED_BLUE_OFF);
         }
 
-        /* Выключение красного светодиода после LED_RED_ON_TIME_MS */
         if (red_led_state && (HAL_GetTick() - led_red_off_time >= LED_RED_ON_TIME_MS)) {
             HAL_GPIO_WritePin(GPIOB, LED_RED_PIN, LED_RED_OFF);
             red_led_state = 0;
         }
 
-        /* Измерения с заданным периодом */
+        /* ★ Проверяем команды калибровки через Modbus ★ */
+        uint16_t cmd = ModBus_GetParameter_Int(MB_ADDR_COMMAND);
+        if (cmd > 0) {
+            USART2_Print("[CAL] Получена команда: ");
+            USART2_PrintInt(cmd);
+            USART2_Print("\r\n");
+            Process_Calibration_Command(cmd);
+        }
+
         if (HAL_GetTick() - last_measure_time >= current_poll_period_ms) {
             last_measure_time = HAL_GetTick();
-
             Update_Poll_Period_From_Modbus();
 
             HAL_GPIO_WritePin(GPIOB, LED_RED_PIN, LED_RED_OFF);
             red_led_state = 0;
-
             signal_captured = 0;
-            uint32_t measurement;
 
-#ifdef TEST_MODE
-            measurement = measure_time_of_flight_test();
-#else
-            measurement = measure_time_of_flight();
-#endif
-
+            uint32_t measurement = measure_time_of_flight();
             float tof_us = 0.0f;
             float position_mm = 0.0f;
 
@@ -618,29 +739,24 @@ int main(void)
                     float avg_ticks = Stat_CalculateTrimmedAverage();
                     if (avg_ticks > 0.0f) {
                         tof_us = avg_ticks * TOF_TICK_US;
-                        position_mm = (tof_us * 0.001f * SOUND_SPEED_MPS) / 2.0f;
-
-                        /* Статистика — буферизованно */
+                        /* ★ Используем калиброванную формулу расчета ★ */
+                        position_mm = Calculate_Position(tof_us);
                         USART2_BufInit();
                         USART2_BufPrint("[STAT] Среднее: ");
                         USART2_BufPrintFloat(avg_ticks);
-                        USART2_BufPrint(" тиков (");
-                        USART2_BufPrintFloat(tof_us);
-                        USART2_BufPrint(" мкс) | Накоплено: ");
-                        USART2_BufPrintInt(stat_count);
-                        USART2_BufPrint("/");
-                        USART2_BufPrintInt(STAT_HISTORY_SIZE);
-                        USART2_BufPrint(" -> СБРОС\r\n");
+                        USART2_BufPrint(" тиков -> ");
+                        USART2_BufPrintFloat(position_mm);
+                        USART2_BufPrint(" мм\r\n");
                         USART2_BufFlush();
 
                         HAL_GPIO_WritePin(GPIOB, LED_RED_PIN, LED_RED_ON);
                         red_led_state = 1;
                         led_red_off_time = HAL_GetTick();
-
                         signal_captured = 1;
+
                         Stat_ClearHistory();
 
-                        /* ★ ИСПРАВЛЕНО: Обновляем Modbus КАЖДЫЙ раз когда есть новое значение ★ */
+                        /* Обновляем Modbus */
                         ModBus_UpdateMeasurements(position_mm, current_temperature, ModBus_GetWaveguideLength());
                     }
                 }
@@ -651,14 +767,10 @@ int main(void)
             }
         }
 
-        /* ★ ИСПРАВЛЕНО: Обновляем напряжения КАЖДЫЙ цикл (независимо от измерений) ★ */
         Read_All_Voltages();
         ModBus_UpdateVoltages(current_vdda, current_24v, current_12v, current_5v);
-
-        /* Обработка Modbus */
         ModBus_Process();
 
-        /* Сброс флага передачи Modbus если завис */
         if (modbus_tx_active && (HAL_GetTick() - last_measure_time > 100)) {
             RS485_SET_RECEIVE();
             modbus_tx_active = 0;
@@ -669,7 +781,7 @@ int main(void)
 }
 
 /* ==========================================================================
-CALLBACK: Приём Modbus через USART1
+   CALLBACK: Приём Modbus через USART1
 ========================================================================== */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
@@ -679,7 +791,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 }
 
 /* ==========================================================================
-ФУНКЦИЯ: Инициализация TIM3 для Input Capture
+   ФУНКЦИЯ: Инициализация TIM3 для Input Capture
 ========================================================================== */
 void TIM3_InputCapture_Init(void)
 {
@@ -701,8 +813,6 @@ void TIM3_InputCapture_Init(void)
     TIM3->ARR = 0xFFFF;
     TIM3->CNT = 0;
     TIM3->EGR = TIM_EGR_UG;
-
-    /* CC4S = 01 (канал 4 как вход), IC4PSC = 00, IC4F = 0001 (фильтр) */
     TIM3->CCMR2 = (0x1 << 12) | (0x1 << 8);
     TIM3->CCER = TIM_CCER_CC4E;
     TIM3->DIER = 0;
@@ -711,7 +821,7 @@ void TIM3_InputCapture_Init(void)
 }
 
 /* ==========================================================================
-ФУНКЦИЯ: Генерация импульса и запуск измерения ToF
+   ФУНКЦИЯ: Генерация импульса и запуск измерения ToF
 ========================================================================== */
 void generate_pulse_and_measure(void)
 {
@@ -733,23 +843,17 @@ void generate_pulse_and_measure(void)
 
     HAL_GPIO_WritePin(SWITCH_PORT, SWITCH_PIN, GPIO_PIN_RESET);
     GPIOB->BSRR = GPIO_PIN_5;
-
-    /* Ширина импульса 10 мкс */
     for (volatile uint32_t i = 0; i < PULSE_DELAY_ITERATIONS*4; i++) __NOP();
-
     GPIOB->BRR = GPIO_PIN_5;
-
     for (volatile uint32_t i = 0; i < DELAY_AFTER_PULSE_ITER; i++) __NOP();
-
     HAL_GPIO_WritePin(SWITCH_PORT, SWITCH_PIN, GPIO_PIN_SET);
 }
 
 /* ==========================================================================
-ФУНКЦИЯ: Измерение времени пролёта (ToF) - ОБЫЧНЫЙ РЕЖИМ
+   ФУНКЦИЯ: Измерение времени пролёта (ToF)
 ========================================================================== */
 uint32_t measure_time_of_flight(void)
 {
-    /* Включаем прерывание ДО генерации импульса */
     TIM3->SR = 0;
     TIM3->DIER |= TIM_DIER_CC4IE;
 
@@ -774,57 +878,17 @@ uint32_t measure_time_of_flight(void)
     return (capture_count >= 2) ? captured_pulses[0] : 0;
 }
 
-/* ==========================================================================
-ФУНКЦИЯ: Измерение времени пролёта (ToF) - ТЕСТОВЫЙ РЕЖИМ
-========================================================================== */
-uint32_t measure_time_of_flight_test(void)
-{
-    generate_pulse_and_measure();
-
-    uint32_t start_wait = HAL_GetTick();
-    TIM3->SR = 0;
-    TIM3->DIER |= TIM_DIER_CC4IE;
-
-    while (!tof_measurement_done && !tof_timeout) {
-        if ((HAL_GetTick() - start_wait) >= MEAS_TIMEOUT_MS) {
-            tof_timeout = 1;
-            TIM3->CR1 &= ~TIM_CR1_CEN;
-            break;
-        }
-        __NOP();
-    }
-
-    TIM3->CR1 &= ~TIM_CR1_CEN;
-    TIM3->SR = 0;
-
-    for (volatile uint32_t i = 0; i < SWITCH_HOLD_ITERATIONS; i++) __NOP();
-    HAL_GPIO_WritePin(SWITCH_PORT, SWITCH_PIN, GPIO_PIN_RESET);
-
-    return (capture_count >= 2) ? captured_pulses[0] : 0;
-}
+void Read_Temperature(void) { current_temperature = 0.0f; }
 
 /* ==========================================================================
-ФУНКЦИЯ: Чтение температуры (LM75B отключён)
-========================================================================== */
-void Read_Temperature(void)
-{
-    /* LM75B не подключён - возвращаем 0 */
-    current_temperature = 0.0f;
-}
-
-/* ==========================================================================
-ФУНКЦИЯ: Чтение всех напряжений через АЦП
+   ФУНКЦИЯ: Чтение всех напряжений через АЦП
 ========================================================================== */
 void Read_All_Voltages(void)
 {
-    uint32_t adc_raw_vdda = 0;
-    uint32_t adc_raw_24v = 0;
-    uint32_t adc_raw_12v = 0;
-    uint32_t adc_raw_5v = 0;
+    uint32_t adc_raw_vdda = 0, adc_raw_24v = 0, adc_raw_12v = 0, adc_raw_5v = 0;
 
     ADC1->CR2 |= ADC_CR2_TSVREFE;
     HAL_Delay(10);
-
     adc_raw_vdda = Read_ADC_Average(&hadc1, ADC_CHANNEL_VREFINT, ADC_SAMPLETIME_239CYCLES_5, ADC_SAMPLES);
     ADC1->CR2 &= ~ADC_CR2_TSVREFE;
     HAL_Delay(1);
@@ -832,40 +896,25 @@ void Read_All_Voltages(void)
     if (adc_raw_vdda > 1000 && adc_raw_vdda < 2000 && *VREFINT_CAL_VALUE > 1000 && *VREFINT_CAL_VALUE < 2000) {
         current_vdda = 3.3f * (float)(*VREFINT_CAL_VALUE) / (float)adc_raw_vdda;
         vdda_error = 0;
-    } else {
-        current_vdda = 3.3f;
-        vdda_error = 1;
-    }
+    } else { current_vdda = 3.3f; vdda_error = 1; }
 
     adc_raw_24v = Read_ADC_Average(&hadc1, ADC_CHANNEL_0, ADC_SAMPLETIME_239CYCLES_5, ADC_SAMPLES);
     if (adc_raw_24v > 100 && adc_raw_24v < 4000) {
-        float adc_voltage = (float)adc_raw_24v * current_vdda / 4095.0f;
-        current_24v = adc_voltage * DIV_24V_FACTOR;
+        current_24v = ((float)adc_raw_24v * current_vdda / 4095.0f) * DIV_24V_FACTOR;
         v24_error = 0;
-    } else {
-        current_24v = 24.0f;
-        v24_error = 1;
-    }
+    } else { current_24v = 24.0f; v24_error = 1; }
 
     adc_raw_12v = Read_ADC_Average(&hadc2, ADC_CHANNEL_1, ADC_SAMPLETIME_239CYCLES_5, ADC_SAMPLES);
     if (adc_raw_12v > 100 && adc_raw_12v < 4000) {
-        float adc_voltage = (float)adc_raw_12v * current_vdda / 4095.0f;
-        current_12v = adc_voltage * DIV_12V_FACTOR;
+        current_12v = ((float)adc_raw_12v * current_vdda / 4095.0f) * DIV_12V_FACTOR;
         v12_error = 0;
-    } else {
-        current_12v = 12.0f;
-        v12_error = 1;
-    }
+    } else { current_12v = 12.0f; v12_error = 1; }
 
     adc_raw_5v = Read_ADC_Average(&hadc2, ADC_CHANNEL_5, ADC_SAMPLETIME_239CYCLES_5, ADC_SAMPLES);
     if (adc_raw_5v > 100 && adc_raw_5v < 4000) {
-        float adc_voltage = (float)adc_raw_5v * current_vdda / 4095.0f;
-        current_5v = adc_voltage * DIV_5V_FACTOR;
+        current_5v = ((float)adc_raw_5v * current_vdda / 4095.0f) * DIV_5V_FACTOR;
         v5_error = 0;
-    } else {
-        current_5v = 5.0f;
-        v5_error = 1;
-    }
+    } else { current_5v = 5.0f; v5_error = 1; }
 
     Check_Voltage_Change("VDDA", current_vdda, prev_vdda, &prev_vdda);
     Check_Voltage_Change("+24V", current_24v, prev_24v, &prev_24v);
@@ -873,7 +922,7 @@ void Read_All_Voltages(void)
 }
 
 /* ==========================================================================
-ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ АЦП
+   ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ АЦП
 ========================================================================== */
 uint32_t Read_ADC_Single(ADC_HandleTypeDef *hadc, uint32_t channel, uint32_t sampling_time)
 {
@@ -898,21 +947,16 @@ uint32_t Read_ADC_Single(ADC_HandleTypeDef *hadc, uint32_t channel, uint32_t sam
 uint32_t Read_ADC_Average(ADC_HandleTypeDef *hadc, uint32_t channel, uint32_t sampling_time, uint8_t samples)
 {
     uint32_t sum = 0, valid = 0;
-
     for (uint8_t i = 0; i < samples; i++) {
         uint32_t v = Read_ADC_Single(hadc, channel, sampling_time);
-        if (v > 100 && v < 4000) {
-            sum += v;
-            valid++;
-        }
+        if (v > 100 && v < 4000) { sum += v; valid++; }
         HAL_Delay(1);
     }
-
     return (valid > 0) ? sum / valid : 0;
 }
 
 /* ==========================================================================
-СИСТЕМНЫЕ ФУНКЦИИ
+   СИСТЕМНЫЕ ФУНКЦИИ
 ========================================================================== */
 void SystemClock_Config(void)
 {
@@ -929,8 +973,7 @@ void SystemClock_Config(void)
     RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL9;
     HAL_RCC_OscConfig(&RCC_OscInitStruct);
 
-    RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
-                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+    RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK|RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
     RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
     RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
     RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
@@ -952,66 +995,31 @@ void MX_GPIO_Init(void)
     __HAL_RCC_GPIOB_CLK_ENABLE();
     __HAL_RCC_AFIO_CLK_ENABLE();
 
-    GPIO_InitStruct.Pin = GPIO_PIN_9;
+    GPIO_InitStruct.Pin = GPIO_PIN_9 | GPIO_PIN_2;
     GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-    GPIO_InitStruct.Pin = GPIO_PIN_10;
+    GPIO_InitStruct.Pin = GPIO_PIN_10 | GPIO_PIN_3;
     GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
     GPIO_InitStruct.Pull = GPIO_PULLUP;
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-    GPIO_InitStruct.Pin = GPIO_PIN_2;
-    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
-    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-    GPIO_InitStruct.Pin = GPIO_PIN_3;
-    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-    GPIO_InitStruct.Pull = GPIO_PULLUP;
-    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-    GPIO_InitStruct.Pin = GPIO_PIN_1;
-    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+    GPIO_InitStruct.Pin = GPIO_PIN_1 | GPIO_PIN_5 | SWITCH_PIN | LED_RED_PIN | LED_BLUE_PIN | RS485_CTRL_PIN;
+    GPIO_InitStruct.Mode = (GPIO_InitStruct.Pin == GPIO_PIN_1) ? GPIO_MODE_INPUT : GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull = (GPIO_InitStruct.Pin == GPIO_PIN_1) ? GPIO_NOPULL : GPIO_NOPULL;
+    GPIO_InitStruct.Speed = (GPIO_InitStruct.Pin == GPIO_PIN_1 || GPIO_InitStruct.Pin == GPIO_PIN_5 || GPIO_InitStruct.Pin == SWITCH_PIN || GPIO_InitStruct.Pin == RS485_CTRL_PIN) ? GPIO_SPEED_FREQ_HIGH : GPIO_SPEED_FREQ_LOW;
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-    GPIO_InitStruct.Pin = GPIO_PIN_5;
-    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
-    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-
-    GPIO_InitStruct.Pin = SWITCH_PIN;
-    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
-    HAL_GPIO_Init(SWITCH_PORT, &GPIO_InitStruct);
     HAL_GPIO_WritePin(SWITCH_PORT, SWITCH_PIN, GPIO_PIN_RESET);
-
-    GPIO_InitStruct.Pin = LED_RED_PIN | LED_BLUE_PIN;
-    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
     HAL_GPIO_WritePin(GPIOB, LED_RED_PIN, LED_RED_OFF);
     HAL_GPIO_WritePin(GPIOB, LED_BLUE_PIN, LED_BLUE_OFF);
-
-    GPIO_InitStruct.Pin = RS485_CTRL_PIN;
-    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
-    HAL_GPIO_Init(RS485_CTRL_PORT, &GPIO_InitStruct);
     HAL_GPIO_WritePin(RS485_CTRL_PORT, RS485_CTRL_PIN, GPIO_PIN_RESET);
 
     GPIO_InitStruct.Pin = GPIO_PIN_10 | GPIO_PIN_11;
     GPIO_InitStruct.Mode = GPIO_MODE_AF_OD;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-
-    /* WP пин для AT24C64 (PB8) - настраивается в AT24C64_Init() */
 }
 
 void MX_USART1_UART_Init(void)
