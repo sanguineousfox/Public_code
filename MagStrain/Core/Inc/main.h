@@ -1,16 +1,14 @@
 /* USER CODE BEGIN Header */
-/*
- * @file           : main.h
- */
+/**
+  @file           : main.h
+  @brief          : Заголовочный файл основного модуля
+*/
 /* USER CODE END Header */
-
 #ifndef __MAIN_H
 #define __MAIN_H
-
 #ifdef __cplusplus
 extern "C" {
 #endif
-
 #include "stm32f1xx_hal.h"
 
 /* ==========================================================================
@@ -18,10 +16,10 @@ extern "C" {
 ========================================================================== */
 void Error_Handler(void);
 void USART2_Print(const char *str);
-void uint32_to_dec_str(uint32_t value, char* buffer);
+void uint32_to_dec_str(uint32_t value, char *buffer);
 void USART2_PrintHexByte(uint8_t byte);
-void USART2_PrintHexBuffer(const uint8_t* buffer, uint16_t length);
-
+void USART2_PrintHexBuffer(const uint8_t *buffer, uint16_t length);
+void USART2_BufPrintHexByte(uint8_t byte);
 /* === ФУНКЦИИ ИЗМЕРЕНИЙ === */
 void TIM3_InputCapture_Init(void);
 void generate_pulse_and_measure(void);
@@ -33,13 +31,14 @@ void Process_Measurement_Results(float tof_us, float position_mm, uint8_t signal
 
 /* === ФУНКЦИИ АЦП === */
 uint32_t Read_ADC_Single(ADC_HandleTypeDef *hadc, uint32_t channel, uint32_t sampling_time);
-uint32_t Read_ADC_Average(ADC_HandleTypeDef* hadc, uint32_t channel, uint32_t sampling_time, uint8_t samples);
+uint32_t Read_ADC_Average(ADC_HandleTypeDef *hadc, uint32_t channel, uint32_t sampling_time, uint8_t samples);
 
 /* === БУФЕРНЫЙ ВЫВОД В USART2 (оптимизация) === */
 void USART2_BufInit(void);
 void USART2_BufPrint(const char *str);
 void USART2_BufPrintInt(int32_t val);
 void USART2_BufPrintFloat(float val);
+void USART2_BufPrintHexByte(uint8_t byte);  /* ★ ДОБАВЛЕНО ★ */
 void USART2_BufFlush(void);
 
 /* ==========================================================================
@@ -100,9 +99,8 @@ void MX_USART2_UART_Init(void);
 void MX_ADC1_Init(void);
 void MX_ADC2_Init(void);
 HAL_StatusTypeDef MX_I2C2_Init(void);
-
+void USART2_BufPrintHexByte(uint8_t byte);
 #ifdef __cplusplus
 }
 #endif
-
 #endif /* __MAIN_H */
