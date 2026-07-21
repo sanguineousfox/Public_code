@@ -2,6 +2,12 @@
  * @file    at24c64.h
  * @brief   Драйвер EEPROM AT24C64 (64Kbit = 8192 bytes) через I2C2
  *          PB10=SCL, PB11=SDA, PB8=WP (Write Protect)
+ *
+ *          Адрес устройства зависит от пинов A0, A1, A2:
+ *          A2 A1 A0 = 000 → 0x50
+ *          A2 A1 A0 = 001 → 0x51  ← НАШ СЛУЧАЙ
+ *          A2 A1 A0 = 010 → 0x52
+ *          и т.д.
  */
 #ifndef AT24C64_H
 #define AT24C64_H
@@ -9,8 +15,8 @@
 #include "stm32f1xx_hal.h"
 #include <stdint.h>
 
-/* Адрес AT24C64 (A0=A1=A2=GND) */
-#define AT24C64_DEFAULT_ADDRESS     (0x51 << 1)  // = 0xA0
+/* Адрес AT24C64 (A0=VCC, A1=GND, A2=GND) = 0x51 */
+#define AT24C64_DEFAULT_ADDRESS     (0x51 << 1)  // 8-bit address
 
 /* Параметры памяти */
 #define AT24C64_SIZE                8192    // 8192 bytes (64Kbit)
