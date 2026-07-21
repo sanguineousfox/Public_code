@@ -1,16 +1,14 @@
 /* USER CODE BEGIN Header */
-/**
-  @file           : modbus.h
-  @brief          : Заголовочный файл Modbus RTU для ПМП-201Е
+/*
+@file           : modbus.h
+@brief          : Заголовочный файл Modbus RTU для ПМП-201Е
 */
 /* USER CODE END Header */
 #ifndef __MODBUS_H
 #define __MODBUS_H
-
 #ifdef __cplusplus
 extern "C" {
 #endif
-
 #include <stdint.h>
 #include <stdbool.h>
 #include "main.h"
@@ -24,7 +22,6 @@ extern "C" {
 /* ==========================================================================
 КАРТА РЕГИСТРОВ (согласно таблице Е.4 документации ПМП-201Е)
 ========================================================================== */
-
 /* === Регистры int16 (адреса 1-37) === */
 #define MB_ADDR_LEVEL_INT           1       /* Уровень жидкости (h) */
 #define MB_ADDR_TEMP_INT            2       /* Температура (tº) */
@@ -95,7 +92,10 @@ extern "C" {
 #define MB_ADDR_PARITY              2066    /* Режим четности (rP) */
 #define MB_ADDR_DEVICE_ADDR         2068    /* Адрес устройства (AA) */
 #define MB_ADDR_DAMPING_TIME        2086    /* Постоянная времени демпфирования уровня (dt) */
-#define MB_ADDR_POLL_PERIOD         2088    /* Период опроса (сек) */
+
+/* ★ ИСПРАВЛЕНО: теперь int16, значение в МИЛЛИСЕКУНДАХ ★ */
+#define MB_ADDR_POLL_PERIOD         2088    /* Период опроса (мс), int16 */
+
 #define MB_ADDR_VOLUME_15C          2090    /* Объем, приведенный к 15°C (UF) */
 #define MB_ADDR_DENSITY_15C         2092    /* Плотность, приведенная к 15°C (rF) */
 #define MB_ADDR_WAVEGUIDE_LEN       2096    /* Длина звукопровода (Lc) */
@@ -126,32 +126,30 @@ extern "C" {
 #define MB_ADDR_ERROR_DELAY         2438    /* Время задержки реакции на ошибку (F) */
 
 /* === Регистры датчиков температуры (адреса 2500-2714) === */
-#define MB_ADDR_TEMP_SENS_1_H       2500    /* Высота установки 1-го датчика */
-#define MB_ADDR_TEMP_SENS_2_H       2502    /* Высота установки 2-го датчика */
-#define MB_ADDR_TEMP_SENS_3_H       2504    /* Высота установки 3-го датчика */
-#define MB_ADDR_TEMP_SENS_4_H       2506    /* Высота установки 4-го датчика */
-#define MB_ADDR_TEMP_SENS_5_H       2508    /* Высота установки 5-го датчика */
-#define MB_ADDR_TEMP_SENS_6_H       2510    /* Высота установки 6-го датчика */
-#define MB_ADDR_TEMP_SENS_7_H       2512    /* Высота установки 7-го датчика */
-#define MB_ADDR_TEMP_SENS_8_H       2514    /* Высота установки 8-го датчика */
-
-#define MB_ADDR_TEMP_SENS_1_V       2600    /* Температура 1-го датчика */
-#define MB_ADDR_TEMP_SENS_2_V       2602    /* Температура 2-го датчика */
-#define MB_ADDR_TEMP_SENS_3_V       2604    /* Температура 3-го датчика */
-#define MB_ADDR_TEMP_SENS_4_V       2606    /* Температура 4-го датчика */
-#define MB_ADDR_TEMP_SENS_5_V       2608    /* Температура 5-го датчика */
-#define MB_ADDR_TEMP_SENS_6_V       2610    /* Температура 6-го датчика */
-#define MB_ADDR_TEMP_SENS_7_V       2612    /* Температура 7-го датчика */
-#define MB_ADDR_TEMP_SENS_8_V       2614    /* Температура 8-го датчика */
-
-#define MB_ADDR_DENS_SENS_1         2700    /* Плотность для 1-го датчика */
-#define MB_ADDR_DENS_SENS_2         2702    /* Плотность для 2-го датчика */
-#define MB_ADDR_DENS_SENS_3         2704    /* Плотность для 3-го датчика */
-#define MB_ADDR_DENS_SENS_4         2706    /* Плотность для 4-го датчика */
-#define MB_ADDR_DENS_SENS_5         2708    /* Плотность для 5-го датчика */
-#define MB_ADDR_DENS_SENS_6         2710    /* Плотность для 6-го датчика */
-#define MB_ADDR_DENS_SENS_7         2712    /* Плотность для 7-го датчика */
-#define MB_ADDR_DENS_SENS_8         2714    /* Плотность для 8-го датчика */
+#define MB_ADDR_TEMP_SENS_1_H       2500
+#define MB_ADDR_TEMP_SENS_2_H       2502
+#define MB_ADDR_TEMP_SENS_3_H       2504
+#define MB_ADDR_TEMP_SENS_4_H       2506
+#define MB_ADDR_TEMP_SENS_5_H       2508
+#define MB_ADDR_TEMP_SENS_6_H       2510
+#define MB_ADDR_TEMP_SENS_7_H       2512
+#define MB_ADDR_TEMP_SENS_8_H       2514
+#define MB_ADDR_TEMP_SENS_1_V       2600
+#define MB_ADDR_TEMP_SENS_2_V       2602
+#define MB_ADDR_TEMP_SENS_3_V       2604
+#define MB_ADDR_TEMP_SENS_4_V       2606
+#define MB_ADDR_TEMP_SENS_5_V       2608
+#define MB_ADDR_TEMP_SENS_6_V       2610
+#define MB_ADDR_TEMP_SENS_7_V       2612
+#define MB_ADDR_TEMP_SENS_8_V       2614
+#define MB_ADDR_DENS_SENS_1         2700
+#define MB_ADDR_DENS_SENS_2         2702
+#define MB_ADDR_DENS_SENS_3         2704
+#define MB_ADDR_DENS_SENS_4         2706
+#define MB_ADDR_DENS_SENS_5         2708
+#define MB_ADDR_DENS_SENS_6         2710
+#define MB_ADDR_DENS_SENS_7         2712
+#define MB_ADDR_DENS_SENS_8         2714
 
 /* === Регистры управления (адреса 3000-3002) === */
 #define MB_ADDR_COMMAND             3000    /* Ввод команд управления */
@@ -177,11 +175,9 @@ void ModBus_SetParameter_Float(uint16_t addr, float value);
 uint16_t ModBus_GetParameter_Int(uint16_t addr);
 void ModBus_SetParameter_Int(uint16_t addr, uint16_t value);
 uint32_t ModBus_GetPulseWidthIterations(void);
-
 extern void ModBus_TransmitFrame(uint8_t *frame, uint16_t len);
 
 #ifdef __cplusplus
 }
 #endif
-
 #endif /* __MODBUS_H */
