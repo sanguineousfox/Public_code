@@ -1,24 +1,26 @@
-/* USER CODE BEGIN Header */
-/*
-@file           : main.c
-@brief          : Основной цикл магнитострикционного уровнемера
-              - Буферизованный вывод в USART2
-              - Интеграция с AT24C64 EEPROM
-              - Калибровка по двум точкам  (команды 01, 02, 03, 04)
-*/
-/* USER CODE END Header */
+/**
+ * @file           : main.c
+ * @brief          : Основной цикл магнитострикционного уровнемера
+ *                   - Буферизованный вывод в USART2
+ *                   - Интеграция с AT24C64 EEPROM
+ *                   - Калибровка по двум точкам (команды 01, 02, 03, 04)
+ *                   - Интеграция с модулями temp_sensors и graduation
+ */
 #include "main.h"
 #include "stm32f1xx_it.h"
 #include "utils.h"
 #include "i2c_config.h"
 #include "modbus.h"
 #include "at24c64.h"
+#include "temp_sensors.h"
+#include "graduation.h"
 #include <stdint.h>
 #include <string.h>
+#include <math.h>
 
 /* ==========================================================================
-КОНСТАНТЫ И МАКРОСЫ
-========================================================================== */
+   КОНСТАНТЫ И МАКРОСЫ
+   ========================================================================== */
 #define TIMER_CLOCK_HZ          72000000.0f
 #define TOF_TICK_US             0.0972f
 #define VREFINT_CAL_ADDR        0x1FFFF7BA
@@ -48,16 +50,15 @@
 #define RS485_CTRL_PORT         GPIOB
 #define FIRMWARE_VERSION        100
 
-/* ★ Ограничения периода опроса в МИЛЛИСЕКУНДАХ ★ */
+/* Ограничения периода опроса в МИЛЛИСЕКУНДАХ */
 #define MIN_POLL_PERIOD_MS      100
 #define MAX_POLL_PERIOD_MS      60000
-
 #define MIN_CLICK_WIDTH_US      14.0f
 #define MAX_CLICK_WIDTH_US      24.0f
 
 /* ==========================================================================
-ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
-========================================================================== */
+   ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
+   ========================================================================== */
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 ADC_HandleTypeDef hadc1;
@@ -71,7 +72,6 @@ volatile uint32_t captured_pulses[MAX_CAPTURED_PULSES];
 volatile uint8_t capture_count = 0;
 volatile uint8_t expected_pulse_pairs = MAX_PULSE_PAIRS;
 volatile uint32_t last_capture_cnt = 0;
-
 volatile uint8_t modbus_tx_active = 0;
 
 static uint32_t measurement_history[STAT_HISTORY_SIZE] = {0};
@@ -85,23 +85,25 @@ static float current_12v = 12.0f;
 static float current_5v = 5.0f;
 static float current_temperature = 0.0f;
 static uint32_t current_poll_period_ms = PULSE_PERIOD_MS_DEFAULT;
+
 static float prev_vdda = 0.0f;
 static float prev_24v = 0.0f;
 static float prev_12v = 0.0f;
+
 static uint8_t v24_error = 0;
 static uint8_t v12_error = 0;
 static uint8_t v5_error = 0;
 static uint8_t vdda_error = 0;
 
 /* ==========================================================================
-МАКРОСЫ УПРАВЛЕНИЯ RS-485
-========================================================================== */
+   МАКРОСЫ УПРАВЛЕНИЯ RS-485
+   ========================================================================== */
 #define RS485_SET_TRANSMIT() HAL_GPIO_WritePin(RS485_CTRL_PORT, RS485_CTRL_PIN, GPIO_PIN_SET)
 #define RS485_SET_RECEIVE()  HAL_GPIO_WritePin(RS485_CTRL_PORT, RS485_CTRL_PIN, GPIO_PIN_RESET)
 
 /* ==========================================================================
-БУФЕРНЫЙ ВЫВОД В USART2
-========================================================================== */
+   БУФЕРНЫЙ ВЫВОД В USART2
+   ========================================================================== */
 #define USART2_TX_BUF_SIZE      512
 static char tx_buf[USART2_TX_BUF_SIZE];
 static uint16_t tx_buf_len = 0;
@@ -152,9 +154,10 @@ void USART2_BufPrintFloat(float val)
     USART2_BufPrintInt(frac_part);
 }
 
+
 /* ==========================================================================
-ПРОТОТИПЫ ЛОКАЛЬНЫХ ФУНКЦИЙ
-========================================================================== */
+   ПРОТОТИПЫ ЛОКАЛЬНЫХ ФУНКЦИЙ
+   ========================================================================== */
 static void USART2_PrintInt(int32_t val);
 static void USART2_PrintFloat(float val);
 static void Check_Voltage_Change(const char *name, float new_val, float old_val, float *store_val);
@@ -164,8 +167,8 @@ static float Stat_CalculateTrimmedAverage(void);
 static void Stat_ClearHistory(void);
 
 /* ==========================================================================
-★ КАЛИБРОВКА: Расчет расстояния
-========================================================================== */
+   КАЛИБРОВКА: Расчет расстояния
+   ========================================================================== */
 static float Calculate_Position(float tof_us)
 {
     float h_low   = ModBus_GetParameter_Float(MB_ADDR_CAL_LOW_LVL);
@@ -186,23 +189,29 @@ static float Calculate_Position(float tof_us)
 }
 
 /* ==========================================================================
-★ КАЛИБРОВКА: Обработка команд управления
-========================================================================== */
+   КАЛИБРОВКА: Обработка команд управления
+   ========================================================================== */
 void Process_Calibration_Command(uint16_t cmd)
 {
-    switch(cmd) {
-        case 03:
-        {
+    /* === Обработка команд градуировочной таблицы === */
+    if (cmd >= 300 && cmd <= 302) {
+        float param = ModBus_GetParameter_Float(MB_ADDR_COMMAND_PARAM);
+        Grad_ProcessCommand(cmd, param);
+        ModBus_SetParameter_Int(MB_ADDR_COMMAND, 0);
+        return;
+    }
+
+    switch (cmd) {
+        case 03: {
             float waveguide_len = ModBus_GetWaveguideLength();
             USART2_Print("[CAL] Команда 03: Длина звукопровода = ");
             USART2_BufInit();
             USART2_BufPrintFloat(waveguide_len * 1000.0f);
             USART2_BufPrint(" мм\r\n");
             USART2_BufFlush();
+            break;
         }
-        break;
-        case 02:
-        {
+        case 02: {
             uint32_t measurement = measure_time_of_flight();
             if (measurement > 0 && !tof_timeout) {
                 float tof_us = (float)measurement * TOF_TICK_US;
@@ -222,10 +231,9 @@ void Process_Calibration_Command(uint16_t cmd)
             } else {
                 USART2_Print("[CAL] Команда 02: ОШИБКА измерения!\r\n");
             }
+            break;
         }
-        break;
-        case 01:
-        {
+        case 01: {
             uint32_t measurement = measure_time_of_flight();
             if (measurement > 0 && !tof_timeout) {
                 float tof_us = (float)measurement * TOF_TICK_US;
@@ -245,20 +253,21 @@ void Process_Calibration_Command(uint16_t cmd)
             } else {
                 USART2_Print("[CAL] Команда 01: ОШИБКА измерения!\r\n");
             }
+            break;
         }
-        break;
         case 04:
             USART2_Print("[CAL] Команда 04: Разность высот магнитов\r\n");
             break;
         default:
             break;
     }
+
     ModBus_SetParameter_Int(MB_ADDR_COMMAND, 0);
 }
 
 /* ==========================================================================
-СТАТИСТИКА
-========================================================================== */
+   СТАТИСТИКА
+   ========================================================================== */
 static void Stat_AddValue(uint32_t value)
 {
     measurement_history[stat_index] = value;
@@ -275,11 +284,13 @@ static void Stat_AddValue(uint32_t value)
 static float Stat_CalculateTrimmedAverage(void)
 {
     if (stat_count < 3) return 0.0f;
+
     uint32_t sum = 0;
     uint32_t min_val = 0xFFFFFFFF;
     uint32_t max_val = 0;
     uint8_t count = stat_count;
     uint8_t valid_count = 0;
+
     for (uint8_t i = 0; i < count; i++) {
         uint32_t val = measurement_history[i];
         if (val > 0) {
@@ -289,11 +300,13 @@ static float Stat_CalculateTrimmedAverage(void)
             valid_count++;
         }
     }
+
     if (valid_count >= 3) {
         sum -= min_val;
         sum -= max_val;
         valid_count -= 2;
     }
+
     if (valid_count == 0) return 0.0f;
     return (float)sum / (float)valid_count;
 }
@@ -309,31 +322,38 @@ static void Stat_ClearHistory(void)
 }
 
 /* ==========================================================================
-ФУНКЦИЯ: Передача кадра Modbus
-========================================================================== */
+   ФУНКЦИЯ: Передача кадра Modbus
+   ========================================================================== */
 void ModBus_TransmitFrame(uint8_t *frame, uint16_t len)
 {
     if (len == 0) return;
+
     uint32_t start_wait = HAL_GetTick();
     while (modbus_tx_active) {
         if (HAL_GetTick() - start_wait > 100) break;
     }
+
     RS485_SET_TRANSMIT();
     modbus_tx_active = 1;
+
     for (volatile int i = 0; i < 150; i++) __NOP();
+
     HAL_UART_Transmit(&huart1, frame, len, 100);
+
     uint32_t timeout_start = HAL_GetTick();
     while ((USART1->SR & USART_SR_TC) == 0) {
         if (HAL_GetTick() - timeout_start > 50) break;
     }
+
     for (volatile int i = 0; i < 800; i++) __NOP();
+
     RS485_SET_RECEIVE();
     modbus_tx_active = 0;
 }
 
 /* ==========================================================================
-ФУНКЦИИ: Вывод через USART2
-========================================================================== */
+   ФУНКЦИИ: Вывод через USART2
+   ========================================================================== */
 static void USART2_PrintInt(int32_t val)
 {
     char buf[12];
@@ -347,7 +367,7 @@ static void USART2_PrintInt(int32_t val)
     len = i;
     for (i = len - 1; i >= 0; i--) {
         char c = buf[i];
-        HAL_UART_Transmit(&huart2, (uint8_t)&c, 1, 10);
+        HAL_UART_Transmit(&huart2, (uint8_t*)&c, 1, 10);
     }
 }
 
@@ -365,12 +385,13 @@ static void USART2_PrintFloat(float val)
 }
 
 /* ==========================================================================
-ФУНКЦИЯ: Отслеживание изменения напряжений
-========================================================================== */
+   ФУНКЦИЯ: Отслеживание изменения напряжений
+   ========================================================================== */
 static void Check_Voltage_Change(const char *name, float new_val, float old_val, float *store_val)
 {
     float diff = new_val - old_val;
     if (diff < 0) diff = -diff;
+
     if (diff > 0.1f || old_val == 0.0f) {
         USART2_Print("[VOLT] ");
         USART2_Print(name);
@@ -385,15 +406,12 @@ static void Check_Voltage_Change(const char *name, float new_val, float old_val,
 }
 
 /* ==========================================================================
-★ ИСПРАВЛЕННАЯ ФУНКЦИЯ: Чтение периода опроса из Modbus
-Теперь читается как int16 в МИЛЛИСЕКУНДАХ (а не float в секундах)
-========================================================================== */
+   ФУНКЦИЯ: Чтение периода опроса из Modbus
+   ========================================================================== */
 static void Update_Poll_Period_From_Modbus(void)
 {
-    /* ★ Читаем int16 напрямую — значение уже в миллисекундах ★ */
     uint16_t period_ms = ModBus_GetParameter_Int(MB_ADDR_POLL_PERIOD);
 
-    /* Защита от мусора и разумные границы */
     if (period_ms < MIN_POLL_PERIOD_MS) {
         period_ms = MIN_POLL_PERIOD_MS;
         ModBus_SetParameter_Int(MB_ADDR_POLL_PERIOD, MIN_POLL_PERIOD_MS);
@@ -402,12 +420,13 @@ static void Update_Poll_Period_From_Modbus(void)
         period_ms = MAX_POLL_PERIOD_MS;
         ModBus_SetParameter_Int(MB_ADDR_POLL_PERIOD, MAX_POLL_PERIOD_MS);
     }
+
     current_poll_period_ms = period_ms;
 }
 
 /* ==========================================================================
-ФУНКЦИЯ: Обработка результатов измерения
-========================================================================== */
+   ФУНКЦИЯ: Обработка результатов измерения
+   ========================================================================== */
 void Process_Measurement_Results(float tof_us, float position_mm, uint8_t signal_captured)
 {
     float waveguide_len = ModBus_GetWaveguideLength();
@@ -431,10 +450,12 @@ void Process_Measurement_Results(float tof_us, float position_mm, uint8_t signal
     if (position_mm > waveguide_len_mm) position_mm = waveguide_len_mm;
 
     USART2_BufInit();
+
     if (signal_captured) {
         USART2_BufPrint("\r\n===========================================================\r\n");
         USART2_BufPrint("                    РЕЗУЛЬТАТЫ ИЗМЕРЕНИЯ                   \r\n");
         USART2_BufPrint("===========================================================\r\n");
+
         if (C1_mm > 0.0f && C2_mm > 0.0f && C1_mm > C2_mm) {
             USART2_BufPrint("[CAL] Калибровка АКТИВНА\r\n");
             USART2_BufPrint("      C1 = ");
@@ -446,9 +467,11 @@ void Process_Measurement_Results(float tof_us, float position_mm, uint8_t signal
         } else {
             USART2_BufPrint("[CAL] Калибровка НЕ проведена (используется скорость звука)\r\n");
         }
+
         USART2_BufPrint("[DBG] Захвачено импульсов: ");
         USART2_BufPrintInt(capture_count);
         USART2_BufPrint("\r\n");
+
         if (capture_count >= 2) {
             USART2_BufPrint("  Импульс[0] = ");
             USART2_BufPrintInt(captured_pulses[0]);
@@ -460,26 +483,32 @@ void Process_Measurement_Results(float tof_us, float position_mm, uint8_t signal
             USART2_BufPrint(" тиков (");
             USART2_BufPrintFloat((float)captured_pulses[1] * TOF_TICK_US);
             USART2_BufPrint(" мкс)\r\n");
+
             float width_ticks = (float)(captured_pulses[1] - captured_pulses[0]);
             float width_time_us = width_ticks * TOF_TICK_US;
+
             USART2_BufPrint("  Разница: ");
             USART2_BufPrintFloat(width_ticks);
             USART2_BufPrint(" тиков = ");
             USART2_BufPrintFloat(width_time_us);
             USART2_BufPrint(" мкс\r\n");
+
             if (width_time_us < MIN_CLICK_WIDTH_US || width_time_us > MAX_CLICK_WIDTH_US) {
                 USART2_BufPrint("  X ОТБРОШЕНО: пауза вне диапазона\r\n");
             } else {
                 USART2_BufPrint("  V ВАЛИДНАЯ ПАРА\r\n");
+
                 float tof_time_us = (float)captured_pulses[0] * TOF_TICK_US;
                 float measured_distance_mm = tof_time_us * 0.001f * SOUND_SPEED_MPS;
                 float position = Calculate_Position(tof_time_us);
+
                 float level_percent = 0.0f;
                 if (cal_low_mm > 0.0f && cal_high_mm > cal_low_mm) {
                     level_percent = ((cal_high_mm - position) / (cal_high_mm - cal_low_mm)) * 100.0f;
                 }
                 if (level_percent > 100.0f) level_percent = 100.0f;
                 if (level_percent < 0.0f) level_percent = 0.0f;
+
                 USART2_BufPrint("  ToF = ");
                 USART2_BufPrintFloat(tof_time_us);
                 USART2_BufPrint(" мкс | Расстояние = ");
@@ -488,8 +517,32 @@ void Process_Measurement_Results(float tof_us, float position_mm, uint8_t signal
                 USART2_BufPrint("  Уровень заполнения = ");
                 USART2_BufPrintFloat(level_percent);
                 USART2_BufPrint("%\r\n");
+
+                /* === РАСЧЕТ ОБЪЕМА ЧЕРЕЗ ГРАДУИРОВОЧНУЮ ТАБЛИЦУ === */
+                float tank_height = ModBus_GetParameter_Float(MB_ADDR_TANK_HEIGHT);
+                float tank_volume = ModBus_GetParameter_Float(MB_ADDR_TANK_VOLUME);
+                GradTankType_t tank_type = (GradTankType_t)(int)ModBus_GetParameter_Float(MB_ADDR_TANK_GEOM);
+
+                float volume_m3 = 0.0f;
+                if (tank_type == GRAD_TYPE_BY_TABLE && Grad_IsValid()) {
+                    volume_m3 = Grad_InterpolateVolume(position / 1000.0f);
+                } else {
+                    volume_m3 = Grad_CalculateVolume(tank_type, position / 1000.0f,
+                                                      tank_height, tank_volume);
+                }
+
+                /* Обновляем регистры Modbus */
+                ModBus_SetParameter_Float(MB_ADDR_VOLUME, volume_m3);
+                ModBus_SetParameter_Int(MB_ADDR_VOLUME_INT, (uint16_t)(volume_m3 * 100.0f));
+
+                USART2_BufPrint("  Объем = ");
+                USART2_BufPrintFloat(volume_m3);
+                USART2_BufPrint(" м³ (тип резервуара: ");
+                USART2_BufPrintInt((int32_t)tank_type);
+                USART2_BufPrint(")\r\n");
             }
         }
+
         USART2_BufPrint("-----------------------------------------------------------\r\n");
         USART2_BufPrint("  Волновод: ");
         USART2_BufPrintFloat(waveguide_len_mm);
@@ -501,7 +554,6 @@ void Process_Measurement_Results(float tof_us, float position_mm, uint8_t signal
         USART2_BufPrint(" .. ");
         USART2_BufPrintFloat(cal_high_mm);
         USART2_BufPrint(" мм\r\n");
-        /* ★ Вывод текущего периода опроса ★ */
         USART2_BufPrint("  Период опроса: ");
         USART2_BufPrintInt(current_poll_period_ms);
         USART2_BufPrint(" мс\r\n");
@@ -509,16 +561,18 @@ void Process_Measurement_Results(float tof_us, float position_mm, uint8_t signal
     } else {
         USART2_BufPrint("[ИЗМ] Сигнал не захвачен (таймаут)\r\n");
     }
+
     USART2_BufFlush();
 }
 
 /* ==========================================================================
-MAIN: Точка входа
-========================================================================== */
+   MAIN: Точка входа
+   ========================================================================== */
 int main(void)
 {
     HAL_Init();
     SystemClock_Config();
+
     MX_GPIO_Init();
     MX_USART1_UART_Init();
     MX_USART2_UART_Init();
@@ -533,14 +587,21 @@ int main(void)
     }
 
     TIM3_InputCapture_Init();
+
     USART2_Print("[ИНИЦ] Калибровка АЦП...\r\n");
     if (HAL_ADCEx_Calibration_Start(&hadc1) == HAL_OK) USART2_Print("[ИНИЦ] АЦП1 OK\r\n");
     else { v24_error = 1; v12_error = 1; v5_error = 1; vdda_error = 1; }
+
     if (HAL_ADCEx_Calibration_Start(&hadc2) == HAL_OK) USART2_Print("[ИНИЦ] АЦП2 OK\r\n");
     else { v12_error = 1; v5_error = 1; }
 
     ModBus_Init();
     ModBus_UpdateFirmwareVersion(FIRMWARE_VERSION);
+
+    /* === ИНИЦИАЛИЗАЦИЯ НОВЫХ МОДУЛЕЙ === */
+    TempSensors_Init();
+    Grad_Init();
+
     Stat_ClearHistory();
 
     HAL_NVIC_SetPriority(USART1_IRQn, 0, 0);
@@ -557,7 +618,7 @@ int main(void)
     USART2_BufInit();
     USART2_BufPrint("Modbus: Addr=1, Baud=19200\r\n");
     USART2_BufPrint("[DBG] Период: ");
-    /* ★ Показываем в мс или сек в зависимости от значения ★ */
+
     if (current_poll_period_ms >= 1000) {
         USART2_BufPrintInt(current_poll_period_ms / 1000);
         USART2_BufPrint(" сек\r\n");
@@ -582,21 +643,31 @@ int main(void)
     uint32_t last_measure_time = 0;
     uint32_t last_debug_time = 0;
     uint32_t led_red_off_time = 0;
+    uint32_t last_temp_read_time = 0;
     uint8_t blue_led_state = 0;
     uint8_t red_led_state = 0;
 
     while (1) {
+        /* Мигание синим светодиодом раз в секунду */
         if (HAL_GetTick() - last_debug_time >= 1000) {
             last_debug_time = HAL_GetTick();
             blue_led_state = !blue_led_state;
             HAL_GPIO_WritePin(GPIOB, LED_BLUE_PIN, blue_led_state ? LED_BLUE_ON : LED_BLUE_OFF);
         }
+
+        /* Гашение красного светодиода */
         if (red_led_state && (HAL_GetTick() - led_red_off_time >= LED_RED_ON_TIME_MS)) {
             HAL_GPIO_WritePin(GPIOB, LED_RED_PIN, LED_RED_OFF);
             red_led_state = 0;
         }
 
-        /* ★ Проверяем команды калибровки через Modbus ★ */
+        /* === Периодический опрос датчиков температуры (каждые 2 секунды) === */
+        if (HAL_GetTick() - last_temp_read_time >= 2000) {
+            last_temp_read_time = HAL_GetTick();
+            Read_Temperature();
+        }
+
+        /* Проверка команд калибровки через Modbus */
         uint16_t cmd = ModBus_GetParameter_Int(MB_ADDR_COMMAND);
         if (cmd > 0) {
             USART2_Print("[CAL] Получена команда: ");
@@ -605,9 +676,11 @@ int main(void)
             Process_Calibration_Command(cmd);
         }
 
+        /* Измерение уровня */
         if (HAL_GetTick() - last_measure_time >= current_poll_period_ms) {
             last_measure_time = HAL_GetTick();
             Update_Poll_Period_From_Modbus();
+
             HAL_GPIO_WritePin(GPIOB, LED_RED_PIN, LED_RED_OFF);
             red_led_state = 0;
             signal_captured = 0;
@@ -623,6 +696,7 @@ int main(void)
                     if (avg_ticks > 0.0f) {
                         tof_us = avg_ticks * TOF_TICK_US;
                         position_mm = Calculate_Position(tof_us);
+
                         USART2_BufInit();
                         USART2_BufPrint("[STAT] Среднее: ");
                         USART2_BufPrintFloat(avg_ticks);
@@ -630,15 +704,18 @@ int main(void)
                         USART2_BufPrintFloat(position_mm);
                         USART2_BufPrint(" мм\r\n");
                         USART2_BufFlush();
+
                         HAL_GPIO_WritePin(GPIOB, LED_RED_PIN, LED_RED_ON);
                         red_led_state = 1;
                         led_red_off_time = HAL_GetTick();
                         signal_captured = 1;
                         Stat_ClearHistory();
+
                         ModBus_UpdateMeasurements(position_mm, current_temperature, ModBus_GetWaveguideLength());
                     }
                 }
             }
+
             if (stat_ready || signal_captured) {
                 Process_Measurement_Results(tof_us, position_mm, signal_captured);
             }
@@ -652,13 +729,14 @@ int main(void)
             RS485_SET_RECEIVE();
             modbus_tx_active = 0;
         }
+
         HAL_Delay(1);
     }
 }
 
 /* ==========================================================================
-CALLBACK: Приём Modbus через USART1
-========================================================================== */
+   CALLBACK: Приём Modbus через USART1
+   ========================================================================== */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
     if (huart->Instance == USART1) {
@@ -667,8 +745,8 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 }
 
 /* ==========================================================================
-ФУНКЦИЯ: Инициализация TIM3 для Input Capture
-========================================================================== */
+   ФУНКЦИЯ: Инициализация TIM3 для Input Capture
+   ========================================================================== */
 void TIM3_InputCapture_Init(void)
 {
     __HAL_RCC_TIM3_CLK_ENABLE();
@@ -697,8 +775,8 @@ void TIM3_InputCapture_Init(void)
 }
 
 /* ==========================================================================
-ФУНКЦИЯ: Генерация импульса и запуск измерения ToF
-========================================================================== */
+   ФУНКЦИЯ: Генерация импульса и запуск измерения ToF
+   ========================================================================== */
 void generate_pulse_and_measure(void)
 {
     tof_measurement_done = 0;
@@ -706,29 +784,37 @@ void generate_pulse_and_measure(void)
     tof_capture_value = 0;
     capture_count = 0;
     last_capture_cnt = 0;
+
     for (uint8_t i = 0; i < MAX_CAPTURED_PULSES; i++) {
         captured_pulses[i] = 0;
     }
+
     TIM3->SR = 0;
     TIM3->CNT = 0;
     __DSB();
     TIM3->CR1 |= TIM_CR1_CEN;
     __NOP();
+
     HAL_GPIO_WritePin(SWITCH_PORT, SWITCH_PIN, GPIO_PIN_RESET);
     GPIOB->BSRR = GPIO_PIN_5;
-    for (volatile uint32_t i = 0; i < PULSE_DELAY_ITERATIONS*4; i++) __NOP();
+
+    for (volatile uint32_t i = 0; i < PULSE_DELAY_ITERATIONS*5; i++) __NOP();
+
     GPIOB->BRR = GPIO_PIN_5;
+
     for (volatile uint32_t i = 0; i < DELAY_AFTER_PULSE_ITER; i++) __NOP();
+
     HAL_GPIO_WritePin(SWITCH_PORT, SWITCH_PIN, GPIO_PIN_SET);
 }
 
 /* ==========================================================================
-ФУНКЦИЯ: Измерение времени пролёта (ToF)
-========================================================================== */
+   ФУНКЦИЯ: Измерение времени пролёта (ToF)
+   ========================================================================== */
 uint32_t measure_time_of_flight(void)
 {
     TIM3->SR = 0;
     TIM3->DIER |= TIM_DIER_CC4IE;
+
     generate_pulse_and_measure();
 
     uint32_t start_wait = HAL_GetTick();
@@ -740,21 +826,45 @@ uint32_t measure_time_of_flight(void)
         }
         __NOP();
     }
+
     TIM3->CR1 &= ~TIM_CR1_CEN;
     TIM3->SR = 0;
+
     for (volatile uint32_t i = 0; i < SWITCH_HOLD_ITERATIONS; i++) __NOP();
     HAL_GPIO_WritePin(SWITCH_PORT, SWITCH_PIN, GPIO_PIN_RESET);
+
     return (capture_count >= 2) ? captured_pulses[0] : 0;
 }
 
-void Read_Temperature(void) { current_temperature = 0.0f; }
+/* ==========================================================================
+   ФУНКЦИЯ: Опрос датчиков температуры (интеграция с temp_sensors)
+   ========================================================================== */
+void Read_Temperature(void)
+{
+    /* Опрос всех датчиков */
+    TempSensors_ReadAll();
+
+    /* Получаем текущий уровень для расчета средних температур */
+    float level_m = ModBus_GetParameter_Float(MB_ADDR_LEVEL) / 1000.0f;
+    float sep_level = ModBus_GetParameter_Float(MB_ADDR_LEVEL_SEP);
+
+    /* Расчет средних температур */
+    TempSensors_CalculateAverages(level_m, sep_level);
+
+    /* Обновляем глобальную переменную (для обратной совместимости) */
+    TempSensorsState_t *state = TempSensors_GetState();
+    if (!isnan(state->avg_liquid_temp)) {
+        current_temperature = state->avg_liquid_temp;
+    }
+}
 
 /* ==========================================================================
-ФУНКЦИЯ: Чтение всех напряжений через АЦП
-========================================================================== */
+   ФУНКЦИЯ: Чтение всех напряжений через АЦП
+   ========================================================================== */
 void Read_All_Voltages(void)
 {
     uint32_t adc_raw_vdda = 0, adc_raw_24v = 0, adc_raw_12v = 0, adc_raw_5v = 0;
+
     ADC1->CR2 |= ADC_CR2_TSVREFE;
     HAL_Delay(10);
     adc_raw_vdda = Read_ADC_Average(&hadc1, ADC_CHANNEL_VREFINT, ADC_SAMPLETIME_239CYCLES_5, ADC_SAMPLES);
@@ -790,22 +900,26 @@ void Read_All_Voltages(void)
 }
 
 /* ==========================================================================
-ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ АЦП
-========================================================================== */
+   ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ АЦП
+   ========================================================================== */
 uint32_t Read_ADC_Single(ADC_HandleTypeDef *hadc, uint32_t channel, uint32_t sampling_time)
 {
     ADC_ChannelConfTypeDef sConfig = {0};
     sConfig.Channel = channel;
     sConfig.Rank = ADC_REGULAR_RANK_1;
     sConfig.SamplingTime = sampling_time;
+
     if (HAL_ADC_ConfigChannel(hadc, &sConfig) != HAL_OK) return 0;
+
     HAL_ADC_Start(hadc);
     if (HAL_ADC_PollForConversion(hadc, 10) != HAL_OK) {
         HAL_ADC_Stop(hadc);
         return 0;
     }
+
     uint32_t val = HAL_ADC_GetValue(hadc);
     HAL_ADC_Stop(hadc);
+
     return val;
 }
 
@@ -821,8 +935,8 @@ uint32_t Read_ADC_Average(ADC_HandleTypeDef *hadc, uint32_t channel, uint32_t sa
 }
 
 /* ==========================================================================
-СИСТЕМНЫЕ ФУНКЦИИ
-========================================================================== */
+   СИСТЕМНЫЕ ФУНКЦИИ
+   ========================================================================== */
 void SystemClock_Config(void)
 {
     RCC_OscInitTypeDef RCC_OscInitStruct = {0};
@@ -838,7 +952,8 @@ void SystemClock_Config(void)
     RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL9;
     HAL_RCC_OscConfig(&RCC_OscInitStruct);
 
-    RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK|RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+    RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK |
+                                   RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
     RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
     RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
     RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
@@ -853,6 +968,7 @@ void SystemClock_Config(void)
 void MX_GPIO_Init(void)
 {
     GPIO_InitTypeDef GPIO_InitStruct = {0};
+
     __HAL_RCC_GPIOC_CLK_ENABLE();
     __HAL_RCC_GPIOD_CLK_ENABLE();
     __HAL_RCC_GPIOA_CLK_ENABLE();

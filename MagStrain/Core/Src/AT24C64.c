@@ -17,6 +17,7 @@ HAL_StatusTypeDef AT24C64_Init(uint8_t dev_address)
     /* Настройка WP пина (PB8) как выход */
     GPIO_InitTypeDef GPIO_InitStruct = {0};
     __HAL_RCC_GPIOB_CLK_ENABLE();
+
     GPIO_InitStruct.Pin = AT24C64_WP_PIN;
     GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
@@ -104,6 +105,7 @@ HAL_StatusTypeDef AT24C64_WriteBytes(uint8_t dev_address, uint16_t mem_address,
         written += chunk_size;
         addr += chunk_size;
     }
+
     return HAL_OK;
 }
 
@@ -125,9 +127,8 @@ HAL_StatusTypeDef AT24C64_WaitReady(uint8_t dev_address)
 }
 
 /* =========================================================================
- ФУНКЦИИ ДЛЯ МОДБУС-ПАРАМЕТРОВ
- ========================================================================= */
-
+   ФУНКЦИИ ДЛЯ МОДБУС-ПАРАМЕТРОВ
+   ========================================================================= */
 static uint16_t AT24C64_FloatAddr(uint16_t mb_addr)
 {
     return EEPROM_FLOAT_BASE + (mb_addr * 4);

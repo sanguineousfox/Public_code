@@ -1,27 +1,28 @@
-/* USER CODE BEGIN Header */
-/*
-@file           : modbus.h
-@brief          : Заголовочный файл Modbus RTU для ПМП-201Е
-*/
-/* USER CODE END Header */
+/**
+ * @file           : modbus.h
+ * @brief          : Заголовочный файл Modbus RTU для
+ */
 #ifndef __MODBUS_H
 #define __MODBUS_H
+
 #ifdef __cplusplus
 extern "C" {
 #endif
+
 #include <stdint.h>
 #include <stdbool.h>
 #include "main.h"
 
 /* ==========================================================================
-НАСТРОЙКИ MODBUS
-========================================================================== */
+   НАСТРОЙКИ MODBUS
+   ========================================================================== */
 #define MODBUS_DEFAULT_ADDRESS      1
 #define MODBUS_BUFFER_SIZE          256
 
 /* ==========================================================================
-КАРТА РЕГИСТРОВ (согласно таблице Е.4 документации ПМП-201Е)
-========================================================================== */
+   КАРТА РЕГИСТРОВ (согласно таблице Е.4 документации  )
+   ========================================================================== */
+
 /* === Регистры int16 (адреса 1-37) === */
 #define MB_ADDR_LEVEL_INT           1       /* Уровень жидкости (h) */
 #define MB_ADDR_TEMP_INT            2       /* Температура (tº) */
@@ -92,10 +93,7 @@ extern "C" {
 #define MB_ADDR_PARITY              2066    /* Режим четности (rP) */
 #define MB_ADDR_DEVICE_ADDR         2068    /* Адрес устройства (AA) */
 #define MB_ADDR_DAMPING_TIME        2086    /* Постоянная времени демпфирования уровня (dt) */
-
-/* ★ ИСПРАВЛЕНО: теперь int16, значение в МИЛЛИСЕКУНДАХ ★ */
 #define MB_ADDR_POLL_PERIOD         2088    /* Период опроса (мс), int16 */
-
 #define MB_ADDR_VOLUME_15C          2090    /* Объем, приведенный к 15°C (UF) */
 #define MB_ADDR_DENSITY_15C         2092    /* Плотность, приведенная к 15°C (rF) */
 #define MB_ADDR_WAVEGUIDE_LEN       2096    /* Длина звукопровода (Lc) */
@@ -156,8 +154,8 @@ extern "C" {
 #define MB_ADDR_COMMAND_PARAM       3002    /* Параметр команды управления */
 
 /* ==========================================================================
-ПРОТОТИПЫ ФУНКЦИЙ
-========================================================================== */
+   ПРОТОТИПЫ ФУНКЦИЙ
+   ========================================================================== */
 void ModBus_Init(void);
 void ModBus_Process(void);
 void ModBus_RxCallback(UART_HandleTypeDef *huart);
@@ -175,9 +173,14 @@ void ModBus_SetParameter_Float(uint16_t addr, float value);
 uint16_t ModBus_GetParameter_Int(uint16_t addr);
 void ModBus_SetParameter_Int(uint16_t addr, uint16_t value);
 uint32_t ModBus_GetPulseWidthIterations(void);
+
+/* === ЭКСПОРТ ДЛЯ ВНЕШНИХ МОДУЛЕЙ (temp_sensors, graduation) === */
+uint16_t ModBus_AddressToIndex_External(uint16_t addr);
+
 extern void ModBus_TransmitFrame(uint8_t *frame, uint16_t len);
 
 #ifdef __cplusplus
 }
 #endif
+
 #endif /* __MODBUS_H */

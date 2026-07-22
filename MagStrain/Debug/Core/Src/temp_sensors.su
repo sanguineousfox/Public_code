@@ -1,0 +1,17 @@
+../Core/Src/temp_sensors.c:27:13:check_device_present	24	static
+../Core/Src/temp_sensors.c:38:13:read_sensor_temperature	16	static
+../Core/Src/temp_sensors.c:54:13:update_temp_register	24	static
+../Core/Src/temp_sensors.c:64:13:update_height_register	24	static
+../Core/Src/temp_sensors.c:74:13:update_density_register	24	static
+../Core/Src/temp_sensors.c:84:13:write_error_value	32	static
+../Core/Src/temp_sensors.c:100:6:TempSensors_Init	24	static
+../Core/Src/temp_sensors.c:155:9:TempSensors_ScanBus	16	static
+../Core/Src/temp_sensors.c:177:6:TempSensors_ReadAll	24	static
+../Core/Src/temp_sensors.c:211:6:TempSensors_CalculateAverages	72	static
+../Core/Src/temp_sensors.c:295:6:TempSensors_LoadHeightsFromEEPROM	40	static
+../Core/Src/temp_sensors.c:320:6:TempSensors_SaveHeightsToEEPROM	16	static
+../Core/Src/temp_sensors.c:329:6:TempSensors_UpdateModbusRegisters	16	static
+../Core/Src/temp_sensors.c:342:21:TempSensors_GetState	4	static
+../Core/Src/temp_sensors.c:347:6:TempSensors_IsPresent	16	static
+../Core/Src/temp_sensors.c:353:7:TempSensors_GetTemperature	16	static
+../Core/Src/temp_sensors.c:360:9:TempSensors_GetDetectedCount	4	static
