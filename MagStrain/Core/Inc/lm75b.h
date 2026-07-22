@@ -1,19 +1,19 @@
 /**
-  ******************************************************************************
-  * @file    lm75b.h
-  * @author  ram223
-  * @brief   Драйвер температурного датчика LM75B (CJMCU75) через I2C2
-  ******************************************************************************
-  */
-
+@file    lm75b.h
+@author  ram223
+@brief   Драйвер температурного датчика LM75B (CJMCU75) через I2C2
+*/
 #ifndef LM75B_H
 #define LM75B_H
 
 #include "stm32f1xx_hal.h"
 #include <stdint.h>
 
-// Адрес LM75B по умолчанию (A0=A1=A2=GND)
-#define LM75B_DEFAULT_ADDRESS       (0x48 << 1)  // 7-bit to 8-bit
+// Адрес LM75B по умолчанию (7-битный = 0x48, 8-битный = 0x90)
+#define LM75B_DEFAULT_ADDRESS       (0x48 << 1)  // 8-битный адрес для HAL
+
+// Алиас для совместимости с кодом, использующим LM75B_ADDRESS_DEFAULT
+#define LM75B_ADDRESS_DEFAULT       LM75B_DEFAULT_ADDRESS
 
 // Регистры LM75B
 #define LM75B_REG_TEMP              0x00  // Temperature register

@@ -1,13 +1,16 @@
 /* USER CODE BEGIN Header */
 /*
 @file           : main.h
+@brief          : Главный заголовочный файл проекта MagStrain
 */
 /* USER CODE END Header */
 #ifndef __MAIN_H
 #define __MAIN_H
+
 #ifdef __cplusplus
 extern "C" {
 #endif
+
 #include "stm32f1xx_hal.h"
 
 /* ==========================================================================
@@ -32,7 +35,7 @@ void Process_Measurement_Results(float tof_us, float position_mm, uint8_t signal
 uint32_t Read_ADC_Single(ADC_HandleTypeDef *hadc, uint32_t channel, uint32_t sampling_time);
 uint32_t Read_ADC_Average(ADC_HandleTypeDef *hadc, uint32_t channel, uint32_t sampling_time, uint8_t samples);
 
-/* === БУФЕРНЫЙ ВЫВОД В USART2 (оптимизация) === */
+/* === БУФЕРНЫЙ ВЫВОД В USART2 === */
 void USART2_BufInit(void);
 void USART2_BufPrint(const char *str);
 void USART2_BufPrintInt(int32_t val);
@@ -89,6 +92,7 @@ extern UART_HandleTypeDef huart2;
 extern ADC_HandleTypeDef hadc1;
 extern ADC_HandleTypeDef hadc2;
 extern TIM_HandleTypeDef htim4;
+extern I2C_HandleTypeDef hi2c2;
 
 /* ==========================================================================
 ПРОТОТИПЫ ФУНКЦИЙ ИНИЦИАЛИЗАЦИИ
@@ -101,7 +105,11 @@ void MX_ADC1_Init(void);
 void MX_ADC2_Init(void);
 HAL_StatusTypeDef MX_I2C2_Init(void);
 
+/* === PROTOTYPES FROM MODBUS === */
+void ModBus_RestartRx(void);
+
 #ifdef __cplusplus
 }
 #endif
+
 #endif /* __MAIN_H */

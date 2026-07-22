@@ -30,4 +30,11 @@ extern I2C_HandleTypeDef hi2c2;
   */
 HAL_StatusTypeDef MX_I2C2_Init(void);
 
+/* Добавьте эти прототипы в i2c_config.h */
+HAL_StatusTypeDef I2C_CheckDevice(uint8_t dev_address);
+HAL_StatusTypeDef I2C_ReadByte(uint8_t dev_address, uint8_t reg_address, uint8_t *data);
+HAL_StatusTypeDef I2C_WriteByte(uint8_t dev_address, uint8_t reg_address, uint8_t data);
+HAL_StatusTypeDef I2C_ReadMultiple(uint8_t dev_address, uint8_t reg_address, uint8_t *data, uint16_t size);
+void I2C_ScanBus(void);
+
 #endif /* I2C_CONFIG_H */

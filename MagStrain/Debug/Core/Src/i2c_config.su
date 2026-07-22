@@ -1,6 +1,7 @@
 ../Core/Src/i2c_config.c:20:19:MX_I2C2_Init	40	static
-../Core/Src/i2c_config.c:64:6:HAL_I2C_ErrorCallback	16	static
-../Core/Src/i2c_config.c:76:19:I2C_CheckDevice	16	static
-../Core/Src/i2c_config.c:84:19:I2C_ReadByte	32	static
-../Core/Src/i2c_config.c:93:19:I2C_WriteByte	32	static
-../Core/Src/i2c_config.c:102:19:I2C_ReadMultiple	32	static
+../Core/Src/i2c_config.c:62:6:HAL_I2C_ErrorCallback	16	static
+../Core/Src/i2c_config.c:74:19:I2C_CheckDevice	16	static
+../Core/Src/i2c_config.c:83:6:I2C_ScanBus	16	static
+../Core/Src/i2c_config.c:127:19:I2C_ReadByte	32	static
+../Core/Src/i2c_config.c:136:19:I2C_WriteByte	32	static
+../Core/Src/i2c_config.c:145:19:I2C_ReadMultiple	32	static
