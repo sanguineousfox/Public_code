@@ -1,18 +1,18 @@
-/**
- * @file           : main.h
- */
+/* USER CODE BEGIN Header */
+/*
+@file           : main.h
+*/
+/* USER CODE END Header */
 #ifndef __MAIN_H
 #define __MAIN_H
-
 #ifdef __cplusplus
 extern "C" {
 #endif
-
 #include "stm32f1xx_hal.h"
 
 /* ==========================================================================
-   ПРОТОТИПЫ ФУНКЦИЙ (пользовательские)
-   ========================================================================== */
+ПРОТОТИПЫ ФУНКЦИЙ (пользовательские)
+========================================================================== */
 void Error_Handler(void);
 void USART2_Print(const char *str);
 void uint32_to_dec_str(uint32_t value, char *buffer);
@@ -43,9 +43,8 @@ void USART2_BufFlush(void);
 void Process_Calibration_Command(uint16_t cmd);
 
 /* ==========================================================================
-   КОНФИГУРАЦИЯ GPIO (Pin Mapping)
-   ========================================================================== */
-
+КОНФИГУРАЦИЯ GPIO (Pin Mapping)
+========================================================================== */
 /* === АЦП: Напряжения питания === */
 #define Read_24V_Pin            GPIO_PIN_0
 #define Read_24V_GPIO_Port      GPIOA
@@ -75,16 +74,16 @@ void Process_Calibration_Command(uint16_t cmd);
 #define ON_VCC_5_GPIO_Port      GPIOB
 
 /* ==========================================================================
-   КОНСТАНТЫ ЗАХВАТА И ИЗМЕРЕНИЙ
-   ========================================================================== */
+КОНСТАНТЫ ЗАХВАТА И ИЗМЕРЕНИЙ
+========================================================================== */
 #define MAX_PULSE_PAIRS             1
 #define MAX_CAPTURED_PULSES         (MAX_PULSE_PAIRS * 2)
 #define BLANKING_WINDOW_TICKS       650
 #define DEAD_TIME_TICKS             670
 
 /* ==========================================================================
-   ВНЕШНИЕ ПЕРЕМЕННЫЕ
-   ========================================================================== */
+ВНЕШНИЕ ПЕРЕМЕННЫЕ
+========================================================================== */
 extern UART_HandleTypeDef huart1;
 extern UART_HandleTypeDef huart2;
 extern ADC_HandleTypeDef hadc1;
@@ -92,8 +91,8 @@ extern ADC_HandleTypeDef hadc2;
 extern TIM_HandleTypeDef htim4;
 
 /* ==========================================================================
-   ПРОТОТИПЫ ФУНКЦИЙ ИНИЦИАЛИЗАЦИИ
-   ========================================================================== */
+ПРОТОТИПЫ ФУНКЦИЙ ИНИЦИАЛИЗАЦИИ
+========================================================================== */
 void SystemClock_Config(void);
 void MX_GPIO_Init(void);
 void MX_USART1_UART_Init(void);
@@ -105,5 +104,4 @@ HAL_StatusTypeDef MX_I2C2_Init(void);
 #ifdef __cplusplus
 }
 #endif
-
 #endif /* __MAIN_H */
