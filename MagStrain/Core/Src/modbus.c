@@ -1,18 +1,20 @@
-/**
+/* USER CODE BEGIN Header */
+/*
 @file           : modbus.c
 @brief          : Modbus RTU implementation с EEPROM и обработкой ошибок
 */
+/* USER CODE END Header */
 #include "modbus.h"
 #include "main.h"
 #include "at24c64.h"
 #include <string.h>
-#include <math.h>
 
 /* ==========================================================================
 КОНФИГУРАЦИЯ
 ========================================================================== */
-#define MODBUS_REG_ARRAY_SIZE   3000
-#define HOLDING_REGS_COUNT      252
+#define MODBUS_REG_ARRAY_SIZE   260
+#define INPUT_REGS_COUNT        128
+#define HOLDING_REGS_COUNT      250
 
 /* ==========================================================================
 СТРУКТУРА MODBUS
@@ -40,23 +42,20 @@ static volatile uint8_t  eeprom_write_in_progress = 0;
 ПАРАМЕТРЫ ПО УМОЛЧАНИЮ
 ========================================================================== */
 typedef struct { uint16_t address; float default_value; } Param_Float_Default;
-
 static const Param_Float_Default default_float_params[] = {
-    {MB_ADDR_WAVEGUIDE_LEN, 1.2f},
-    {MB_ADDR_CAL_LOW_LVL,   0.1f},
-    {MB_ADDR_CAL_HIGH_LVL,  1.0f},
+    {MB_ADDR_WAVEGUIDE_LEN, 1.2f},    /* 1200 мм */
+    {MB_ADDR_CAL_LOW_LVL,   0.1f},    /* 100 мм - ВЕРХНЯЯ точка (полный бак) */
+    {MB_ADDR_CAL_HIGH_LVL,  1.0f},    /* 1000 мм - НИЖНЯЯ точка (пустой бак) */
     {MB_ADDR_PROBE_DEPTH,   0.0f},
     {MB_ADDR_TANK_HEIGHT,   0.95f},
     {MB_ADDR_DAMPING_TIME,  10.0f},
-    {MB_ADDR_POLL_PERIOD,   100.0f},
+    {MB_ADDR_POLL_PERIOD,   1.0f},    /* 1 секунда */
     {MB_ADDR_LEVEL_OFFSET,  0.0f},
     {MB_ADDR_THRESH_LVL,    0.9f},
-    {MB_ADDR_TANK_GEOM,     0.0f},
 };
 #define DEFAULT_FLOAT_PARAMS_COUNT (sizeof(default_float_params) / sizeof(default_float_params[0]))
 
 typedef struct { uint16_t address; uint16_t default_value; } Param_Int_Default;
-
 static const Param_Int_Default default_int_params[] = {
     {MB_ADDR_MB_ADDR_SET,   1},
     {MB_ADDR_MB_BAUD_SET,   19200},
@@ -70,49 +69,15 @@ static const Param_Int_Default default_int_params[] = {
 extern UART_HandleTypeDef huart1;
 
 /* ==========================================================================
-ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
-========================================================================== */
-static void Read_Chip_UID(uint16_t *uid_word0, uint16_t *uid_word1)
-{
-    volatile uint32_t *uid_ptr = (volatile uint32_t *)0x1FFFF7E8;
-    *uid_word0 = (uint16_t)(uid_ptr[0] & 0xFFFF);
-    *uid_word1 = (uint16_t)((uid_ptr[0] >> 16) & 0xFFFF);
-}
-
-static void AutoWrite_SerialNumber(void)
-{
-    uint16_t s1 = ModBus_GetParameter_Int(MB_ADDR_SERIAL_HI);
-    uint16_t s2 = ModBus_GetParameter_Int(MB_ADDR_SERIAL_LO);
-
-    if (s1 == 0 && s2 == 0) {
-        uint16_t uid0, uid1;
-        Read_Chip_UID(&uid0, &uid1);
-        ModBus_SetParameter_Int(MB_ADDR_SERIAL_HI, uid0);
-        ModBus_SetParameter_Int(MB_ADDR_SERIAL_LO, uid1);
-
-        USART2_Print("[SERIAL] Автозапись UID чипа: S1=");
-        USART2_BufInit();
-        USART2_BufPrintInt(uid0);
-        USART2_BufPrint(", S2=");
-        USART2_BufPrintInt(uid1);
-        USART2_BufPrint("\r\n");
-        USART2_BufFlush();
-        eeprom_dirty = 1;
-    } else {
-        USART2_Print("[SERIAL] Текущий номер S1/S2 загружен\r\n");
-    }
-}
-
-/* ==========================================================================
 CRC16
 ========================================================================== */
 uint16_t ModBus_CRC16(const uint8_t *data, uint16_t length)
 {
     uint16_t crc = 0xFFFF;
-    while (length--) {
+    while(length--) {
         crc ^= *data++;
-        for (uint8_t bit = 0; bit < 8; bit++) {
-            if (crc & 0x0001) crc = (crc >> 1) ^ 0xA001;
+        for(uint8_t bit = 0; bit < 8; bit++) {
+            if(crc & 0x0001) crc = (crc >> 1) ^ 0xA001;
             else crc >>= 1;
         }
     }
@@ -120,50 +85,39 @@ uint16_t ModBus_CRC16(const uint8_t *data, uint16_t length)
 }
 
 /* ==========================================================================
-КОНВЕРТАЦИЯ FLOAT (ИСПРАВЛЕНО: Используется memcpy для безопасности)
+Конвертация float
 ========================================================================== */
 static void FloatToRegisters(float value, uint16_t *reg_high, uint16_t *reg_low)
 {
-    uint32_t temp_u32;
-    /* Копируем биты float в uint32_t безопасно через memcpy */
-    memcpy(&temp_u32, &value, sizeof(float));
-
-    /* Modbus Big-Endian: Старшие 16 бит идут в первый регистр */
-    *reg_high = (uint16_t)((temp_u32 >> 16) & 0xFFFF);
-    *reg_low  = (uint16_t)(temp_u32 & 0xFFFF);
+    union { float f; uint32_t u32; uint8_t bytes[4]; } converter;
+    converter.f = value;
+    *reg_high = (converter.u32 >> 16) & 0xFFFF;
+    *reg_low  = converter.u32 & 0xFFFF;
 }
 
 static float RegistersToFloat(uint16_t reg_high, uint16_t reg_low)
 {
-    uint32_t temp_u32;
-    /* Собираем 32 бита из двух регистров (Big-Endian) */
-    temp_u32 = ((uint32_t)reg_high << 16) | reg_low;
-
-    float result;
-    memcpy(&result, &temp_u32, sizeof(float));
-    return result;
+    union { float f; uint32_t u32; } converter;
+    converter.u32 = ((uint32_t)reg_high << 16) | reg_low;
+    return converter.f;
 }
 
 /* ==========================================================================
-АДРЕСАЦИЯ РЕГИСТРОВ
+Адресация регистров
 ========================================================================== */
 static uint16_t ModBus_AddressToIndex(uint16_t addr)
 {
-    /* Для адресов 1-99: прямой маппинг (int16 регистры) */
-    if (addr < 100) {
-        if (addr < MODBUS_REG_ARRAY_SIZE) return addr;
+    if (addr >= 2000 && addr <= 2498) {
+        uint16_t idx = (addr - 2000) / 2;
+        if (idx < HOLDING_REGS_COUNT) return idx;
     }
-    /* Для адресов >= 1000: маппинг адрес/2 (float32 регистры) */
-    if (addr >= 1000) {
-        uint16_t idx = addr / 2;
-        if (idx < MODBUS_REG_ARRAY_SIZE) return idx;
+    if (addr >= 999 && addr <= 1125) {
+        uint16_t idx = (addr - 999) / 2;
+        if (idx < INPUT_REGS_COUNT) return idx;
     }
+    if (addr == 3000) return 250;
+    if (addr == 3002) return 251;
     return 0xFFFF;
-}
-
-uint16_t ModBus_AddressToIndex_External(uint16_t addr)
-{
-    return ModBus_AddressToIndex(addr);
 }
 
 static uint8_t IsPersistentAddress(uint16_t addr)
@@ -177,16 +131,12 @@ EEPROM ФУНКЦИИ
 static void EEPROM_FlushIfNeeded(void)
 {
     if (!eeprom_dirty || eeprom_write_in_progress) return;
-
     uint32_t now = HAL_GetTick();
     if ((now - eeprom_last_write_time) < EEPROM_WRITE_INTERVAL_MS) return;
-
     eeprom_write_in_progress = 1;
     eeprom_dirty = 0;
     eeprom_last_write_time = now;
-
     AT24C64_SaveAllRegisters(modbus.regs, HOLDING_REGS_COUNT);
-
     eeprom_write_in_progress = 0;
 }
 
@@ -196,18 +146,14 @@ static void EEPROM_Initialize(void)
         USART2_Print("[EEPROM] AT24C64 НЕ НАЙДЕН! Работаем без сохранения.\r\n");
         return;
     }
-
     USART2_Print("[EEPROM] AT24C64 найдена (0x51)\r\n");
-
     if (!AT24C64_IsFormatted()) {
         USART2_Print("[EEPROM] Форматирование...\r\n");
         AT24C64_Format();
-
         for (int i = 0; i < DEFAULT_FLOAT_PARAMS_COUNT; i++)
             AT24C64_SaveFloatParam(default_float_params[i].address, default_float_params[i].default_value);
         for (int i = 0; i < DEFAULT_INT_PARAMS_COUNT; i++)
             AT24C64_SaveIntParam(default_int_params[i].address, default_int_params[i].default_value);
-
         AT24C64_SaveAllRegisters(modbus.regs, HOLDING_REGS_COUNT);
         USART2_Print("[EEPROM] Записаны дефолтные значения\r\n");
     } else {
@@ -215,29 +161,24 @@ static void EEPROM_Initialize(void)
         AT24C64_LoadAllRegisters(modbus.regs, HOLDING_REGS_COUNT);
     }
 
-    AutoWrite_SerialNumber();
-
     USART2_Print("[EEPROM] Параметры:\r\n");
     USART2_Print("  Waveguide: ");
     USART2_BufInit();
     USART2_BufPrintFloat(ModBus_GetWaveguideLength());
     USART2_BufPrint(" м\r\n");
-
     float h_low = ModBus_GetParameter_Float(MB_ADDR_CAL_LOW_LVL);
-    USART2_Print("  h_low: ");
+    USART2_Print("  h_low (верхняя точка): ");
     USART2_BufInit();
     USART2_BufPrintFloat(h_low);
-    USART2_BufPrint(" м\r\n");
-
+    USART2_BufPrint(" м (");
+    USART2_BufPrintFloat(h_low * 1000.0f);
+    USART2_BufPrint(" мм)\r\n");
     float h_high = ModBus_GetParameter_Float(MB_ADDR_CAL_HIGH_LVL);
-    USART2_Print("  h_high: ");
+    USART2_Print("  h_high (нижняя точка): ");
     USART2_BufPrintFloat(h_high);
-    USART2_BufPrint(" м\r\n");
-
-    float tank_geom = ModBus_GetParameter_Float(MB_ADDR_TANK_GEOM);
-    USART2_Print("  Tank type (Gr): ");
-    USART2_BufPrintFloat(tank_geom);
-    USART2_BufPrint("\r\n");
+    USART2_BufPrint(" м (");
+    USART2_BufPrintFloat(h_high * 1000.0f);
+    USART2_BufPrint(" мм)\r\n");
     USART2_BufFlush();
 }
 
@@ -249,7 +190,7 @@ float ModBus_GetWaveguideLength(void)
     uint16_t idx = ModBus_AddressToIndex(MB_ADDR_WAVEGUIDE_LEN);
     if (idx != 0xFFFF) {
         float value = RegistersToFloat(modbus.regs[idx], modbus.regs[idx + 1]);
-        if (isnan(value) || value < 0.1f || value > 50.0f) return 1.2f;
+        if (value < 0.1f || value > 50.0f) return 1.2f;
         return value;
     }
     return 1.2f;
@@ -269,9 +210,8 @@ void ModBus_SetWaveguideLength(float length_m)
 float ModBus_GetParameter_Float(uint16_t addr)
 {
     uint16_t idx = ModBus_AddressToIndex(addr);
-    if (idx != 0xFFFF && (idx + 1) < MODBUS_REG_ARRAY_SIZE) {
+    if (idx != 0xFFFF && (idx + 1) < MODBUS_REG_ARRAY_SIZE)
         return RegistersToFloat(modbus.regs[idx], modbus.regs[idx + 1]);
-    }
     return 0.0f;
 }
 
@@ -317,47 +257,35 @@ static void ModBus_SendException(uint8_t function, uint8_t exception_code)
     ModBus_TransmitFrame(response, 5);
 }
 
-static uint8_t IsAddressValid(uint16_t addr)
-{
-    if (addr >= 1 && addr <= 37) return 1;
-    if (addr >= 1000 && addr <= 1040) return 1;
-    if (addr >= 2000 && addr <= 2168) return 1;
-    if (addr >= 2298 && addr <= 2438) return 1;
-    if (addr >= 2500 && addr <= 2714) return 1;
-    if (addr >= 3000 && addr <= 3002) return 1;
-    if (addr >= 4000 && addr <= 4124) return 1;
-    if (addr >= 5000 && addr <= 5124) return 1;
-    return 0;
-}
-
 static void ModBus_ReadHoldingRegisters(uint16_t start_addr, uint16_t reg_count)
 {
-    if (!IsAddressValid(start_addr)) {
-        ModBus_SendException(0x03, 0x02);
-        return;
+    if (!((start_addr >= 2000 && start_addr <= 2498) ||
+          start_addr == 3000 || start_addr == 3002)) {
+        ModBus_SendException(0x03, 0x02); return;
     }
     if (reg_count == 0 || reg_count > 125) {
-        ModBus_SendException(0x03, 0x03);
-        return;
+        ModBus_SendException(0x03, 0x03); return;
     }
     uint16_t idx = ModBus_AddressToIndex(start_addr);
-    if (idx == 0xFFFF || (idx + reg_count) > MODBUS_REG_ARRAY_SIZE) {
-        ModBus_SendException(0x03, 0x02);
-        return;
+    if (start_addr == 3000 || start_addr == 3002) {
+        if (idx == 0xFFFF || (idx + reg_count) > MODBUS_REG_ARRAY_SIZE) {
+            ModBus_SendException(0x03, 0x02); return;
+        }
+    } else {
+        if (idx == 0xFFFF || (idx + reg_count) > HOLDING_REGS_COUNT) {
+            ModBus_SendException(0x03, 0x02); return;
+        }
     }
-
     uint8_t response[256];
     uint16_t index = 0;
     response[index++] = modbus.device_address;
     response[index++] = 0x03;
     response[index++] = reg_count * 2;
-
-    for (uint16_t i = 0; i < reg_count; i++) {
+    for(uint16_t i = 0; i < reg_count; i++) {
         uint16_t val = modbus.regs[idx + i];
         response[index++] = (val >> 8) & 0xFF;
         response[index++] = val & 0xFF;
     }
-
     uint16_t crc = ModBus_CRC16(response, index);
     response[index++] = crc & 0xFF;
     response[index++] = (crc >> 8) & 0xFF;
@@ -366,32 +294,20 @@ static void ModBus_ReadHoldingRegisters(uint16_t start_addr, uint16_t reg_count)
 
 static void ModBus_ReadInputRegisters(uint16_t start_addr, uint16_t reg_count)
 {
-    if (start_addr < 1000 || start_addr > 1040) {
-        ModBus_SendException(0x04, 0x02);
-        return;
-    }
-    if (reg_count == 0 || reg_count > 125) {
-        ModBus_SendException(0x04, 0x03);
-        return;
-    }
+    if (start_addr < 999 || start_addr > 1125) { ModBus_SendException(0x04, 0x02); return; }
+    if (reg_count == 0 || reg_count > 125) { ModBus_SendException(0x04, 0x03); return; }
     uint16_t idx = ModBus_AddressToIndex(start_addr);
-    if (idx == 0xFFFF || (idx + reg_count) > MODBUS_REG_ARRAY_SIZE) {
-        ModBus_SendException(0x04, 0x02);
-        return;
-    }
-
+    if (idx == 0xFFFF || (idx + reg_count) > INPUT_REGS_COUNT) { ModBus_SendException(0x04, 0x02); return; }
     uint8_t response[256];
     uint16_t index = 0;
     response[index++] = modbus.device_address;
     response[index++] = 0x04;
     response[index++] = reg_count * 2;
-
-    for (uint16_t i = 0; i < reg_count; i++) {
+    for(uint16_t i = 0; i < reg_count; i++) {
         uint16_t val = modbus.regs[idx + i];
         response[index++] = (val >> 8) & 0xFF;
         response[index++] = val & 0xFF;
     }
-
     uint16_t crc = ModBus_CRC16(response, index);
     response[index++] = crc & 0xFF;
     response[index++] = (crc >> 8) & 0xFF;
@@ -400,25 +316,14 @@ static void ModBus_ReadInputRegisters(uint16_t start_addr, uint16_t reg_count)
 
 static void ModBus_WriteSingleRegister(uint16_t reg_addr, uint16_t value)
 {
-    if (!IsAddressValid(reg_addr)) {
-        ModBus_SendException(0x06, 0x02);
-        return;
+    if (!((reg_addr >= 2000 && reg_addr <= 2498) ||
+          reg_addr == 3000 || reg_addr == 3002)) {
+        ModBus_SendException(0x06, 0x02); return;
     }
     uint16_t idx = ModBus_AddressToIndex(reg_addr);
     if (idx == 0xFFFF || idx >= MODBUS_REG_ARRAY_SIZE) {
-        ModBus_SendException(0x06, 0x02);
-        return;
+        ModBus_SendException(0x06, 0x02); return;
     }
-
-    USART2_BufInit();
-    USART2_BufPrint("[MODBUS] Write Single: Addr=");
-    USART2_BufPrintInt(reg_addr);
-    USART2_BufPrint(", Value=0x");
-    USART2_PrintHexByte((value >> 8) & 0xFF);
-    USART2_PrintHexByte(value & 0xFF);
-    USART2_BufPrint("\r\n");
-    USART2_BufFlush();
-
     modbus.regs[idx] = value;
     if (IsPersistentAddress(reg_addr)) eeprom_dirty = 1;
 
@@ -438,34 +343,18 @@ static void ModBus_WriteSingleRegister(uint16_t reg_addr, uint16_t value)
 
 static void ModBus_WriteMultipleRegisters(uint16_t start_addr, uint16_t reg_count, uint8_t *data)
 {
-    if (!IsAddressValid(start_addr)) {
-        ModBus_SendException(0x10, 0x02);
-        return;
+    /* ★ ИСПРАВЛЕНО: добавлена проверка на 3000 и 3002 ★ */
+    if (!((start_addr >= 2000 && start_addr <= 2498) ||
+          start_addr == 3000 || start_addr == 3002)) {
+        ModBus_SendException(0x10, 0x02); return;
     }
-    if (reg_count == 0 || reg_count > 123) {
-        ModBus_SendException(0x10, 0x03);
-        return;
-    }
-
-    USART2_BufInit();
-    USART2_BufPrint("[MODBUS] Write Multiple: Addr=");
-    USART2_BufPrintInt(start_addr);
-    USART2_BufPrint(", Count=");
-    USART2_BufPrintInt(reg_count);
-    USART2_BufPrint("\r\n");
-    USART2_BufFlush();
-
+    if (reg_count == 0 || reg_count > 123) { ModBus_SendException(0x10, 0x03); return; }
     uint16_t idx = ModBus_AddressToIndex(start_addr);
-    if (idx == 0xFFFF || (idx + reg_count) > MODBUS_REG_ARRAY_SIZE) {
-        ModBus_SendException(0x10, 0x02);
-        return;
-    }
-
-    for (uint16_t i = 0; i < reg_count; i++) {
+    if (idx == 0xFFFF || (idx + reg_count) > HOLDING_REGS_COUNT) { ModBus_SendException(0x10, 0x02); return; }
+    for(uint16_t i = 0; i < reg_count; i++) {
         uint16_t val = ((uint16_t)data[i * 2] << 8) | data[i * 2 + 1];
         modbus.regs[idx + i] = val;
     }
-
     if (IsPersistentAddress(start_addr)) eeprom_dirty = 1;
 
     uint8_t response[8];
@@ -484,27 +373,16 @@ static void ModBus_WriteMultipleRegisters(uint16_t start_addr, uint16_t reg_coun
 
 static void ModBus_ProcessFrame(void)
 {
-    if (modbus.rx_index < 4) {
-        modbus.rx_index = 0;
-        return;
-    }
-
+    if (modbus.rx_index < 4) { modbus.rx_index = 0; return; }
     uint16_t received_crc = ((uint16_t)modbus.rx_buffer[modbus.rx_index - 1] << 8) |
-                            modbus.rx_buffer[modbus.rx_index - 2];
+                             modbus.rx_buffer[modbus.rx_index - 2];
     uint16_t calculated_crc = ModBus_CRC16(modbus.rx_buffer, modbus.rx_index - 2);
-
-    if (received_crc != calculated_crc) {
-        modbus.rx_index = 0;
-        return;
-    }
-
+    if (received_crc != calculated_crc) { modbus.rx_index = 0; return; }
     uint8_t device_addr = modbus.rx_buffer[0];
     if (device_addr != modbus.device_address && device_addr != 0) {
-        modbus.rx_index = 0;
-        return;
+        modbus.rx_index = 0; return;
     }
-
-    switch (modbus.rx_buffer[1]) {
+    switch(modbus.rx_buffer[1]) {
         case 0x03:
             if (modbus.rx_index >= 8) {
                 uint16_t start_addr = ((uint16_t)modbus.rx_buffer[2] << 8) | modbus.rx_buffer[3];
@@ -548,25 +426,22 @@ void ModBus_Init(void)
     memset(&modbus, 0, sizeof(modbus));
     modbus.device_address = MODBUS_DEFAULT_ADDRESS;
     modbus.last_byte_time = HAL_GetTick();
-
     EEPROM_Initialize();
 
     for (int i = 0; i < DEFAULT_FLOAT_PARAMS_COUNT; i++) {
         uint16_t idx = ModBus_AddressToIndex(default_float_params[i].address);
         if (idx != 0xFFFF) {
             float cur = RegistersToFloat(modbus.regs[idx], modbus.regs[idx + 1]);
-            if (isnan(cur) || cur < -1e9f || cur > 1e9f) {
+            if (cur != cur || cur < -1e9f || cur > 1e9f) {
                 ModBus_SetParameter_Float(default_float_params[i].address, default_float_params[i].default_value);
             }
         }
     }
-
     for (int i = 0; i < DEFAULT_INT_PARAMS_COUNT; i++) {
         uint16_t idx = ModBus_AddressToIndex(default_int_params[i].address);
         if (idx != 0xFFFF && modbus.regs[idx] == 0)
             ModBus_SetParameter_Int(default_int_params[i].address, default_int_params[i].default_value);
     }
-
     eeprom_dirty = 0;
     HAL_UART_Receive_IT(&huart1, &modbus.rx_byte, 1);
 }
@@ -578,23 +453,18 @@ void ModBus_RxCallback(UART_HandleTypeDef *huart)
 {
     if (huart->Instance == USART1) {
         uint32_t current_time = HAL_GetTick();
-
         if (current_time - modbus.last_byte_time > 2) {
             modbus.rx_index = 0;
         }
         modbus.last_byte_time = current_time;
-
         if (modbus.rx_index < MODBUS_BUFFER_SIZE) {
             modbus.rx_buffer[modbus.rx_index++] = modbus.rx_byte;
         }
-
         HAL_UART_Receive_IT(&huart1, &modbus.rx_byte, 1);
     }
 }
 
-void ModBus_RestartRx(void) {
-    HAL_UART_Receive_IT(&huart1, &modbus.rx_byte, 1);
-}
+void ModBus_RestartRx(void) { HAL_UART_Receive_IT(&huart1, &modbus.rx_byte, 1); }
 
 /* ==========================================================================
 ОБРАБОТКА MODBUS
@@ -623,11 +493,10 @@ void ModBus_UpdateVoltages(float vdda, float v24, float v12, float v5)
 
 void ModBus_UpdateMeasurements(float level, float temp, float waveguide)
 {
-    ModBus_SetParameter_Float(MB_ADDR_LEVEL, level);
-    ModBus_SetParameter_Float(MB_ADDR_TEMP, temp);
-
+    FloatToRegisters(level, &modbus.regs[0], &modbus.regs[1]);
+    FloatToRegisters(temp,  &modbus.regs[2], &modbus.regs[3]);
     float level_pct = (waveguide > 0.0f) ? (level / waveguide) * 100.0f : 0.0f;
-    ModBus_SetParameter_Float(MB_ADDR_PERCENT, level_pct);
+    FloatToRegisters(level_pct, &modbus.regs[4], &modbus.regs[5]);
 }
 
 void ModBus_UpdateFirmwareVersion(uint16_t version)
