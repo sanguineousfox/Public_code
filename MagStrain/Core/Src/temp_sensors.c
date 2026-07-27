@@ -87,7 +87,7 @@ uint8_t TempSensors_ScanBus(void)
     state.detected_count = found;
     state.scan_done = true;
     state.last_scan_time_ms = HAL_GetTick();
-    ModBus_SetParameter_Int(MB_ADDR_TEMP_SENS_COUNT, found);
+    ModBus_SetParameter_Float(MB_ADDR_TEMP_SENS_COUNT, (float)found);
     return found;
 }
 
@@ -163,7 +163,7 @@ void TempSensors_ReadAll(void)
 
     state.detected_count = present_count;
     state.last_read_time_ms = HAL_GetTick();
-    ModBus_SetParameter_Int(MB_ADDR_TEMP_SENS_COUNT, present_count);
+    ModBus_SetParameter_Float(MB_ADDR_TEMP_SENS_COUNT, (float)present_count);
 }
 
 void TempSensors_CalculateAverages(float level_m, float density_level_m)

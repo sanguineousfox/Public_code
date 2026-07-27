@@ -41,7 +41,7 @@
 #define SWITCH_HOLD_ITERATIONS  12000
 #define SWITCH_PIN              GPIO_PIN_7
 #define SWITCH_PORT             GPIOB
-#define FIRMWARE_VERSION        100
+#define FIRMWARE_VERSION        104
 #define MIN_POLL_PERIOD_MS      EXCITATION_PERIOD_MS
 #define MAX_POLL_PERIOD_MS      60000
 #define EEPROM_MEASUREMENT_GUARD_MS 5U
@@ -144,9 +144,11 @@ static float Calculate_Position(float tof_us)
 
 void Process_Calibration_Command(uint16_t cmd)
 {
+    uint8_t command_succeeded = 1U;
+
     if (cmd >= 300U && cmd <= 302U) {
         float param = ModBus_GetParameter_Float(MB_ADDR_COMMAND_PARAM);
-        /* Grad_ProcessCommand() сам записывает код результата в MB_ADDR_COMMAND. */
+        /* Grad_ProcessCommand() сам записывает итог 90 или 0 в адрес 3000. */
         Grad_ProcessCommand(cmd, param);
         return;
     }
@@ -163,10 +165,12 @@ void Process_Calibration_Command(uint16_t cmd)
         }
         case 2: {
             uint32_t measurement = measure_time_of_flight();
-            if (measurement > 0 && !tof_timeout) {
+            if (measurement > 0U && !tof_timeout) {
                 float tof_us = (float)measurement * TOF_TICK_US;
-                float distance_mm = tof_us * 0.001f * ModBus_GetMaterialWaveSpeed();
-                float h_high = ModBus_GetParameter_Float(MB_ADDR_CAL_HIGH_LVL);
+                float distance_mm = tof_us * 0.001f *
+                    ModBus_GetMaterialWaveSpeed();
+                float h_high =
+                    ModBus_GetParameter_Float(MB_ADDR_CAL_HIGH_LVL);
                 ModBus_SetParameter_Float(MB_ADDR_CAL_C2, distance_mm);
                 USART2_Print("[CAL] Команда 02: ВЕРХНЯЯ точка (полный бак, 100%)\r\n");
                 USART2_BufInit();
@@ -179,16 +183,19 @@ void Process_Calibration_Command(uint16_t cmd)
                 USART2_BufPrint(" мм)\r\n");
                 USART2_BufFlush();
             } else {
+                command_succeeded = 0U;
                 USART2_Print("[CAL] Команда 02: ОШИБКА измерения!\r\n");
             }
             break;
         }
         case 1: {
             uint32_t measurement = measure_time_of_flight();
-            if (measurement > 0 && !tof_timeout) {
+            if (measurement > 0U && !tof_timeout) {
                 float tof_us = (float)measurement * TOF_TICK_US;
-                float distance_mm = tof_us * 0.001f * ModBus_GetMaterialWaveSpeed();
-                float h_low = ModBus_GetParameter_Float(MB_ADDR_CAL_LOW_LVL);
+                float distance_mm = tof_us * 0.001f *
+                    ModBus_GetMaterialWaveSpeed();
+                float h_low =
+                    ModBus_GetParameter_Float(MB_ADDR_CAL_LOW_LVL);
                 ModBus_SetParameter_Float(MB_ADDR_CAL_C1, distance_mm);
                 USART2_Print("[CAL] Команда 01: НИЖНЯЯ точка (пустой бак, 0%)\r\n");
                 USART2_BufInit();
@@ -201,6 +208,7 @@ void Process_Calibration_Command(uint16_t cmd)
                 USART2_BufPrint(" мм)\r\n");
                 USART2_BufFlush();
             } else {
+                command_succeeded = 0U;
                 USART2_Print("[CAL] Команда 01: ОШИБКА измерения!\r\n");
             }
             break;
@@ -209,9 +217,13 @@ void Process_Calibration_Command(uint16_t cmd)
             USART2_Print("[CAL] Команда 04: Разность высот магнитов\r\n");
             break;
         default:
+            command_succeeded = 0U;
             break;
     }
-    ModBus_SetParameter_Int(MB_ADDR_COMMAND, 0);
+
+    /* Таблица Е.4: 90 = команда выполнена, 0 = отказ в выполнении. */
+    ModBus_SetParameter_Int(MB_ADDR_COMMAND,
+                            command_succeeded ? 90U : 0U);
 }
 
 /* ==========================================================================
@@ -516,10 +528,12 @@ int main(void)
 
         {
             uint16_t cmd = ModBus_GetParameter_Int(MB_ADDR_COMMAND);
-            if (cmd > 0U) {
+            /* 0/85/90/99 являются кодами результата, а не номерами команд. */
+            if (cmd != 0U && cmd != 85U && cmd != 90U && cmd != 99U) {
                 USART2_Print("[CAL] Получена команда: ");
                 USART2_PrintInt(cmd);
                 USART2_Print("\r\n");
+                ModBus_SetParameter_Int(MB_ADDR_COMMAND, 85U);
                 Process_Calibration_Command(cmd);
             }
         }

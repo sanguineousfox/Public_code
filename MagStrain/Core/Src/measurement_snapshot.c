@@ -13,13 +13,18 @@ typedef struct {
 
 static MeasurementSnapshotState_t snapshot;
 
-static void FloatToWords(float value, uint16_t *high_word, uint16_t *low_word)
+static void FloatToDocumentWords(float value,
+                                 uint16_t *base_low_word,
+                                 uint16_t *next_high_word)
 {
     uint32_t raw;
 
     memcpy(&raw, &value, sizeof(raw));
-    *high_word = (uint16_t)(raw >> 16);
-    *low_word = (uint16_t)raw;
+
+    /* Таблица Е.3: младшее 16-битное слово лежит по базовому адресу,
+     * старшее слово - по следующему адресу. */
+    *base_low_word = (uint16_t)raw;
+    *next_high_word = (uint16_t)(raw >> 16);
 }
 
 void MeasurementSnapshot_Init(void)
@@ -37,10 +42,10 @@ void MeasurementSnapshot_Publish(float level_mm,
     uint16_t prepared[MEASUREMENT_SNAPSHOT_WORD_COUNT];
     uint8_t i;
 
-    FloatToWords(level_mm,      &prepared[0], &prepared[1]);
-    FloatToWords(temperature_c, &prepared[2], &prepared[3]);
-    FloatToWords(percent,       &prepared[4], &prepared[5]);
-    FloatToWords(volume_m3,     &prepared[6], &prepared[7]);
+    FloatToDocumentWords(level_mm,      &prepared[0], &prepared[1]);
+    FloatToDocumentWords(temperature_c, &prepared[2], &prepared[3]);
+    FloatToDocumentWords(percent,       &prepared[4], &prepared[5]);
+    FloatToDocumentWords(volume_m3,     &prepared[6], &prepared[7]);
 
     /* Нечётное sequence означает обновление. Чётное — готовый снимок. */
     snapshot.sequence++;

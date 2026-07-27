@@ -4,6 +4,7 @@
  */
 #include "modbus.h"
 #include "measurement_snapshot.h"
+#include "graduation.h"
 #include "params_storage.h"
 #include "rs485.h"
 #include "utils.h"
@@ -17,6 +18,8 @@
 #define MODBUS_INTERBYTE_RESET_MS       4U
 #define MODBUS_TX_TIMEOUT_MS            100U
 #define MODBUS_EEPROM_WRITE_DELAY_MS    5000U
+#define MODBUS_SERVER_ID_TEXT            "PMP-201E"
+#define MODBUS_SERVER_RUN_STATUS          0xFFU
 
 #define PARAM_FLAG_PERSISTENT           0x01U
 
@@ -105,8 +108,8 @@ static const ModBus_Descriptor_t descriptors[] = {
     DESC_F32(MB_ADDR_DEVICE_ADDR, PERSISTENT),
     DESC_F32(MB_ADDR_DAMPING_TIME, PERSISTENT),
     DESC_F32(MB_ADDR_POLL_PERIOD, PERSISTENT),
-    DESC_F32(MB_ADDR_VOLUME_15C, PERSISTENT),
-    DESC_F32(MB_ADDR_DENSITY_15C, PERSISTENT),
+    DESC_F32(MB_ADDR_VOLUME_15C, VOLATILE),
+    DESC_F32(MB_ADDR_DENSITY_15C, VOLATILE),
     DESC_F32(MB_ADDR_MATERIAL_WAVE_SPEED, PERSISTENT),
     DESC_F32(MB_ADDR_WAVEGUIDE_LEN, PERSISTENT),
     DESC_F32(MB_ADDR_WAVEGUIDE_DEV, PERSISTENT),
@@ -114,11 +117,11 @@ static const ModBus_Descriptor_t descriptors[] = {
     DESC_F32(MB_ADDR_DENSITY_CORR, PERSISTENT),
     DESC_F32(MB_ADDR_MEDIUM_TYPE, PERSISTENT),
     DESC_F32(MB_ADDR_TANK_EXPANSION, PERSISTENT),
-    DESC_F32(MB_ADDR_UNIT_LEVEL, PERSISTENT),
-    DESC_F32(MB_ADDR_UNIT_TEMP, PERSISTENT),
-    DESC_F32(MB_ADDR_UNIT_VOLUME, PERSISTENT),
-    DESC_F32(MB_ADDR_UNIT_MASS, PERSISTENT),
-    DESC_F32(MB_ADDR_UNIT_DENSITY, PERSISTENT),
+    DESC_U16(MB_ADDR_UNIT_LEVEL, PERSISTENT),
+    DESC_U16(MB_ADDR_UNIT_TEMP, PERSISTENT),
+    DESC_U16(MB_ADDR_UNIT_VOLUME, PERSISTENT),
+    DESC_U16(MB_ADDR_UNIT_MASS, PERSISTENT),
+    DESC_U16(MB_ADDR_UNIT_DENSITY, PERSISTENT),
 
     DESC_U16(MB_ADDR_SERIAL_HI, PERSISTENT),
     DESC_U16(MB_ADDR_SERIAL_LO, PERSISTENT),
@@ -127,11 +130,11 @@ static const ModBus_Descriptor_t descriptors[] = {
     DESC_F32(MB_ADDR_CAL_C2, PERSISTENT),
     DESC_F32(MB_ADDR_CAL_D4, PERSISTENT),
     DESC_F32(MB_ADDR_CAL_D5, PERSISTENT),
-    DESC_U16(MB_ADDR_TEMP_SENS_COUNT, VOLATILE),
+    DESC_F32(MB_ADDR_TEMP_SENS_COUNT, VOLATILE),
     DESC_U16(MB_ADDR_ERROR_CODE, VOLATILE),
     DESC_U16(MB_ADDR_SENS_ADDR, PERSISTENT),
     DESC_U16(MB_ADDR_FW_VERSION, VOLATILE),
-    DESC_U16(MB_ADDR_ADMIN_PASS, PERSISTENT),
+    DESC_F32(MB_ADDR_ADMIN_PASS, PERSISTENT),
     DESC_F32(MB_ADDR_ERROR_DELAY, PERSISTENT),
 
     DESC_F32(MB_ADDR_TEMP_SENS_1_H, PERSISTENT),
@@ -205,6 +208,16 @@ static uint32_t storage_dirty_since = 0U;
 static uint32_t storage_revision = 0U;
 static uint32_t storage_save_revision = 0U;
 
+/*
+ * Таблица адресов регистров отображения 5000..5124.
+ * Значение display_address_map[n] определяет, какой 16-битный регистр
+ * возвращается через адрес 4000+n. Нулевое значение означает пустой канал.
+ */
+static uint16_t display_address_map[MB_DISPLAY_REGISTER_COUNT];
+
+/* Изменение rS/rP применяется только после передачи ответа на старой скорости. */
+static bool uart_reconfigure_pending = false;
+
 static float diagnostic_vdda;
 static float diagnostic_v24;
 static float diagnostic_v12;
@@ -213,6 +226,13 @@ static float diagnostic_v5;
 extern UART_HandleTypeDef huart1;
 
 static void SynchronizeCommunicationSettings(uint16_t touched_address);
+static void ApplyPendingCommunicationSettings(void);
+static bool ReadAddressIsAccessible(uint16_t address);
+static bool WriteAddressIsAccessible(uint16_t address);
+static void FloatToWords(float value, uint16_t *high_word, uint16_t *low_word);
+static void WriteFloatDirect(uint16_t address, float value);
+static void WriteU16Direct(uint16_t address, uint16_t value);
+static float WordsToFloat(uint16_t high_word, uint16_t low_word);
 
 static const FloatDefault_t float_defaults[] = {
     {MB_ADDR_CAL_LOW_LVL, 0.1f},
@@ -228,18 +248,23 @@ static const FloatDefault_t float_defaults[] = {
     {MB_ADDR_WAVEGUIDE_LEN, 1.2f},
     {MB_ADDR_THRESH_LVL, 0.9f},
     {MB_ADDR_MEDIUM_TYPE, 1.0f},
-    {MB_ADDR_UNIT_LEVEL, 0.0f},
-    {MB_ADDR_UNIT_TEMP, 0.0f},
-    {MB_ADDR_BAUD_RATE, (float)MODBUS_DEFAULT_BAUDRATE},
-    {MB_ADDR_PARITY, 0.0f},
-    {MB_ADDR_DEVICE_ADDR, (float)MODBUS_DEFAULT_ADDRESS}
+    {MB_ADDR_BAUD_RATE, (float)MODBUS_DEFAULT_BAUD_CODE},
+    {MB_ADDR_PARITY, (float)MODBUS_DEFAULT_PARITY_CODE},
+    {MB_ADDR_DEVICE_ADDR, (float)MODBUS_DEFAULT_ADDRESS},
+    {MB_ADDR_ADMIN_PASS, 1234.0f},
+    {MB_ADDR_ERROR_DELAY, 0.0f},
+    {MB_ADDR_TEMP_SENS_COUNT, 0.0f}
 };
 
 static const U16Default_t u16_defaults[] = {
     {MB_ADDR_MB_ADDR_SET, MODBUS_DEFAULT_ADDRESS},
-    {MB_ADDR_MB_BAUD_SET, MODBUS_DEFAULT_BAUDRATE},
-    {MB_ADDR_MB_PARITY_SET, 0U},
-    {MB_ADDR_ADMIN_PASS, 0U}
+    {MB_ADDR_MB_BAUD_SET, MODBUS_DEFAULT_BAUD_CODE},
+    {MB_ADDR_MB_PARITY_SET, MODBUS_DEFAULT_PARITY_CODE},
+    {MB_ADDR_UNIT_LEVEL, 8U},
+    {MB_ADDR_UNIT_TEMP, 24U},
+    {MB_ADDR_UNIT_VOLUME, 41U},
+    {MB_ADDR_UNIT_MASS, 56U},
+    {MB_ADDR_UNIT_DENSITY, 73U}
 };
 
 static const ModBus_Descriptor_t *FindDescriptorByStart(uint16_t address,
@@ -307,7 +332,98 @@ uint16_t ModBus_AddressToIndex_External(uint16_t address)
         return MODBUS_INVALID_INDEX;
     }
 
-    return StorageIndex(descriptor_index, word_offset);
+    /*
+     * Внутри прошивки float хранится как [старшее, младшее], чтобы не менять
+     * формат EEPROM прошлых версий. На линии Modbus по таблице Е.3 порядок
+     * обратный: базовый адрес = младшее слово, следующий = старшее.
+     */
+    if (descriptors[descriptor_index].type == MODBUS_REGISTER_FLOAT32) {
+        return StorageIndex(descriptor_index, (word_offset == 0U) ? 1U : 0U);
+    }
+
+    return StorageIndex(descriptor_index, 0U);
+}
+
+static bool AddressInRange(uint16_t address, uint16_t first, uint16_t last)
+{
+    return address >= first && address <= last;
+}
+
+static bool IsDisplayDataAddress(uint16_t address)
+{
+    return AddressInRange(address, MB_ADDR_DISPLAY_FIRST, MB_ADDR_DISPLAY_LAST);
+}
+
+static bool IsDisplayMapAddress(uint16_t address)
+{
+    return AddressInRange(address, MB_ADDR_DISPLAY_MAP_FIRST,
+                          MB_ADDR_DISPLAY_MAP_LAST);
+}
+
+static bool IsGraduationAddress(uint16_t address)
+{
+    return AddressInRange(address, MB_ADDR_GRAD_FIRST_WORD,
+                          MB_ADDR_GRAD_LAST_WORD);
+}
+
+static bool IsDocumentReservedReadAddress(uint16_t address)
+{
+    return AddressInRange(address, MB_DOC_WINDOW_INT_FIRST,
+                          MB_DOC_WINDOW_INT_LAST) ||
+           AddressInRange(address, MB_DOC_WINDOW_MEAS_FIRST,
+                          MB_DOC_WINDOW_MEAS_LAST) ||
+           AddressInRange(address, MB_DOC_WINDOW_CFG_FIRST,
+                          MB_DOC_WINDOW_CFG_LAST) ||
+           AddressInRange(address, MB_DOC_WINDOW_INFO_FIRST,
+                          MB_DOC_WINDOW_INFO_LAST) ||
+           AddressInRange(address, MB_DOC_WINDOW_TEMP_FIRST,
+                          MB_DOC_WINDOW_TEMP_LAST) ||
+           AddressInRange(address, MB_DOC_WINDOW_CMD_FIRST,
+                          MB_DOC_WINDOW_CMD_LAST);
+}
+
+/**
+ * @brief Проверяет, можно ли прочитать один 16-битный адрес.
+ *
+ * Помимо явно описанных параметров разрешены:
+ * - регистры отображения 4000..4124;
+ * - таблица адресов отображения 5000..5124;
+ * - полная область градуировочной таблицы 32768..38779;
+ * - зарезервированные пробелы внутри таблицы Е.4. Они возвращают 0, что
+ *   позволяет фирменной утилите читать большие непрерывные блоки карты.
+ */
+static bool ReadAddressIsAccessible(uint16_t address)
+{
+    return FindDescriptorByWord(address, NULL, NULL) != NULL ||
+           IsDisplayDataAddress(address) ||
+           IsDisplayMapAddress(address) ||
+           IsGraduationAddress(address) ||
+           IsDocumentReservedReadAddress(address);
+}
+
+/**
+ * @brief Проверяет, можно ли записывать один 16-битный адрес.
+ *
+ * Зарезервированные пробелы таблицы Е.4 доступны только для чтения. Запись
+ * разрешена только в реально реализованные параметры, регистры отображения и
+ * градуировочную таблицу. Полнота пары float32 проверяется отдельно.
+ */
+static bool WriteAddressIsAccessible(uint16_t address)
+{
+    return FindDescriptorByWord(address, NULL, NULL) != NULL ||
+           IsDisplayDataAddress(address) ||
+           IsDisplayMapAddress(address) ||
+           IsGraduationAddress(address);
+}
+
+static ModBus_RegisterType_t GraduationRegisterType(uint16_t address)
+{
+    if (!IsGraduationAddress(address)) {
+        return MODBUS_REGISTER_UNDEFINED;
+    }
+
+    /* Вся область 32768..38779 состоит из последовательных float32. */
+    return MODBUS_REGISTER_FLOAT32;
 }
 
 ModBus_RegisterType_t ModBus_GetRegisterType(uint16_t address)
@@ -315,10 +431,131 @@ ModBus_RegisterType_t ModBus_GetRegisterType(uint16_t address)
     const ModBus_Descriptor_t *descriptor =
         FindDescriptorByWord(address, NULL, NULL);
 
-    return (descriptor == NULL) ? MODBUS_REGISTER_UNDEFINED : descriptor->type;
+    if (descriptor != NULL) {
+        return descriptor->type;
+    }
+    if (IsDisplayDataAddress(address) || IsDisplayMapAddress(address)) {
+        return MODBUS_REGISTER_UINT16;
+    }
+    return GraduationRegisterType(address);
 }
 
-bool ModBus_ReadRawRegister(uint16_t address, uint16_t *value)
+static bool ReadGraduationFloat(uint16_t base_address, float *value)
+{
+    GradState_t *grad = Grad_GetState();
+
+    if (value == NULL || grad == NULL) {
+        return false;
+    }
+
+    switch (base_address) {
+        case MB_ADDR_GRAD_POINT_COUNT:
+            *value = (float)grad->actual_points;
+            return true;
+        case MB_ADDR_GRAD_START_HEIGHT:
+            *value = grad->header.start_height_m;
+            return true;
+        case MB_ADDR_GRAD_LEVEL_STEP:
+            *value = grad->header.step_height_m;
+            return true;
+        case MB_ADDR_GRAD_TANK_HEIGHT:
+            *value = grad->header.tank_height_m;
+            return true;
+        case MB_ADDR_GRAD_TANK_VOLUME:
+            *value = grad->header.tank_volume_m3;
+            return true;
+        default:
+            break;
+    }
+
+    if (base_address >= MB_ADDR_GRAD_VOLUME_FIRST &&
+        base_address <= MB_ADDR_GRAD_VOLUME_LAST &&
+        ((base_address - MB_ADDR_GRAD_VOLUME_FIRST) & 1U) == 0U) {
+        uint16_t point = (uint16_t)((base_address -
+                                    MB_ADDR_GRAD_VOLUME_FIRST) / 2U);
+
+        /* Руководство резервирует 3001 точку. Установленная AT24C64 и текущая
+         * аппаратная конфигурация вмещают GRAD_MAX_POINTS. Неустановленные
+         * точки остаются доступными, но возвращают документированное
+         * ошибочное значение float32 0xFFFFFFFF. */
+        if (point < GRAD_MAX_POINTS && point < grad->actual_points) {
+            *value = grad->volumes[point];
+        } else {
+            uint32_t invalid = 0xFFFFFFFFUL;
+            memcpy(value, &invalid, sizeof(invalid));
+        }
+        return true;
+    }
+
+    return false;
+}
+
+static bool WriteGraduationFloat(uint16_t base_address, float value)
+{
+    GradState_t *grad = Grad_GetState();
+
+    if (grad == NULL || !isfinite(value)) {
+        return false;
+    }
+
+    switch (base_address) {
+        case MB_ADDR_GRAD_POINT_COUNT: {
+            uint32_t points = (uint32_t)(value + 0.5f);
+            if (points > GRAD_MAX_POINTS) {
+                return false;
+            }
+            grad->actual_points = (uint16_t)points;
+            grad->header.points_count = (uint16_t)points;
+            grad->loaded = true;
+            grad->valid = false;
+            Grad_UpdateModbusRegisters();
+            return true;
+        }
+        case MB_ADDR_GRAD_START_HEIGHT:
+            grad->header.start_height_m = value;
+            break;
+        case MB_ADDR_GRAD_LEVEL_STEP:
+            if (value <= 0.0f) return false;
+            grad->header.step_height_m = value;
+            break;
+        case MB_ADDR_GRAD_TANK_HEIGHT:
+            if (value < 0.0f) return false;
+            grad->header.tank_height_m = value;
+            break;
+        case MB_ADDR_GRAD_TANK_VOLUME:
+            if (value < 0.0f) return false;
+            grad->header.tank_volume_m3 = value;
+            break;
+        default:
+            if (base_address >= MB_ADDR_GRAD_VOLUME_FIRST &&
+                base_address <= MB_ADDR_GRAD_VOLUME_LAST &&
+                ((base_address - MB_ADDR_GRAD_VOLUME_FIRST) & 1U) == 0U) {
+                uint16_t point = (uint16_t)((base_address -
+                                            MB_ADDR_GRAD_VOLUME_FIRST) / 2U);
+                if (point >= GRAD_MAX_POINTS || value < 0.0f) {
+                    return false;
+                }
+                grad->volumes[point] = value;
+                if ((uint16_t)(point + 1U) > grad->actual_points) {
+                    grad->actual_points = (uint16_t)(point + 1U);
+                    grad->header.points_count = grad->actual_points;
+                }
+                grad->loaded = true;
+                grad->valid = false;
+                Grad_UpdateModbusRegisters();
+                return true;
+            }
+            return false;
+    }
+
+    grad->loaded = true;
+    grad->valid = false;
+    return true;
+}
+
+static bool ReadRawRegisterInternal(uint16_t address,
+                                    uint16_t *value,
+                                    bool allow_display_proxy)
 {
     uint16_t index;
 
@@ -326,24 +563,88 @@ bool ModBus_ReadRawRegister(uint16_t address, uint16_t *value)
         return false;
     }
 
-    /* 1000..1007 читаются из уже подготовленного снимка RAM. */
+    /* 1000..1007 читаются из атомарного снимка RAM в документированном
+     * порядке слов: младшее слово по базовому адресу. */
     if (MeasurementSnapshot_ReadWord(address, value)) {
         return true;
     }
 
-    index = ModBus_AddressToIndex_External(address);
-    if (index == MODBUS_INVALID_INDEX || index >= REGISTER_STORAGE_WORDS) {
-        return false;
+    if (IsDisplayMapAddress(address)) {
+        *value = display_address_map[address - MB_ADDR_DISPLAY_MAP_FIRST];
+        return true;
     }
 
-    *value = modbus.regs[index];
-    return true;
+    if (IsDisplayDataAddress(address)) {
+        uint16_t target = display_address_map[address - MB_ADDR_DISPLAY_FIRST];
+        if (target == 0U) {
+            *value = 0U;
+            return true;
+        }
+        if (!allow_display_proxy || IsDisplayDataAddress(target) ||
+            IsDisplayMapAddress(target)) {
+            *value = 0U;
+            return true;
+        }
+        if (!ReadRawRegisterInternal(target, value, false)) {
+            *value = 0U;
+        }
+        return true;
+    }
+
+    if (IsGraduationAddress(address)) {
+        uint16_t base = (uint16_t)(address & 0xFFFEU);
+        float float_value;
+        uint16_t high_word;
+        uint16_t low_word;
+
+        if (!ReadGraduationFloat(base, &float_value)) {
+            return false;
+        }
+        FloatToWords(float_value, &high_word, &low_word);
+        *value = ((address & 1U) == 0U) ? low_word : high_word;
+        return true;
+    }
+
+    index = ModBus_AddressToIndex_External(address);
+    if (index != MODBUS_INVALID_INDEX && index < REGISTER_STORAGE_WORDS) {
+        *value = modbus.regs[index];
+        return true;
+    }
+
+    /* Зарезервированные пробелы внутри документированных окон читаются как 0,
+     * чтобы утилита могла читать карту крупными непрерывными блоками. */
+    if (IsDocumentReservedReadAddress(address)) {
+        *value = 0U;
+        return true;
+    }
+
+    return false;
+}
+
+bool ModBus_ReadRawRegister(uint16_t address, uint16_t *value)
+{
+    return ReadRawRegisterInternal(address, value, true);
 }
 
 static bool WriteRawRegister(uint16_t address, uint16_t value)
 {
-    uint16_t index = ModBus_AddressToIndex_External(address);
+    uint16_t index;
 
+    if (IsDisplayMapAddress(address)) {
+        display_address_map[address - MB_ADDR_DISPLAY_MAP_FIRST] = value;
+        return true;
+    }
+
+    if (IsDisplayDataAddress(address)) {
+        uint16_t target = display_address_map[address - MB_ADDR_DISPLAY_FIRST];
+        if (target == 0U || IsDisplayDataAddress(target) ||
+            IsDisplayMapAddress(target)) {
+            return false;
+        }
+        return WriteRawRegister(target, value);
+    }
+
+    index = ModBus_AddressToIndex_External(address);
     if (index == MODBUS_INVALID_INDEX || index >= REGISTER_STORAGE_WORDS) {
         return false;
     }
@@ -356,7 +657,14 @@ static void FloatToWords(float value, uint16_t *high_word, uint16_t *low_word)
 {
     uint32_t raw;
 
-    memcpy(&raw, &value, sizeof(raw));
+    /* Таблица Е.2 задает для ошибочного float32 ровно 0xFFFFFFFF.
+     * Все внутренние NAN/INF измерительных модулей переводятся в этот код. */
+    if (!isfinite(value)) {
+        raw = 0xFFFFFFFFUL;
+    } else {
+        memcpy(&raw, &value, sizeof(raw));
+    }
+
     *high_word = (uint16_t)(raw >> 16);
     *low_word = (uint16_t)raw;
 }
@@ -386,9 +694,9 @@ static bool FloatValueIsValid(uint16_t address, float value)
         case MB_ADDR_DEVICE_ADDR:
             return value >= 1.0f && value <= 247.0f;
         case MB_ADDR_BAUD_RATE:
-            return value >= 1200.0f && value <= 65535.0f;
+            return value >= 0.0f && value <= 9.0f;
         case MB_ADDR_PARITY:
-            return value >= 0.0f && value <= 2.0f;
+            return value >= 0.0f && value <= 3.0f;
         case MB_ADDR_TANK_GEOM:
             return value >= 0.0f && value <= 3.0f;
         case MB_ADDR_DAMPING_TIME:
@@ -404,9 +712,9 @@ static bool U16ValueIsValid(uint16_t address, uint16_t value)
         case MB_ADDR_MB_ADDR_SET:
             return value >= 1U && value <= 247U;
         case MB_ADDR_MB_BAUD_SET:
-            return value >= 1200U;
+            return value <= 9U;
         case MB_ADDR_MB_PARITY_SET:
-            return value <= 2U;
+            return value <= 3U;
         default:
             return true;
     }
@@ -437,7 +745,7 @@ float ModBus_GetParameter_Float(uint16_t address)
         address < MEASUREMENT_SNAPSHOT_LAST_ADDRESS &&
         ((address - MEASUREMENT_SNAPSHOT_FIRST_ADDRESS) & 1U) == 0U &&
         MeasurementSnapshot_ReadRange(address, 2U, live_words)) {
-        return WordsToFloat(live_words[0], live_words[1]);
+        return WordsToFloat(live_words[1], live_words[0]);
     }
 
     descriptor = FindDescriptorByStart(address, &descriptor_index);
@@ -690,6 +998,54 @@ static void ApplyDefaults(void)
     }
 }
 
+/**
+ * @brief Инициализирует еще не измеренные каналы документированными кодами
+ * ошибки из таблицы Е.2: int16=-32768, float32=0xFFFFFFFF.
+ */
+static void InitializeVolatileMeasurements(void)
+{
+    static const uint16_t int_addresses[] = {
+        MB_ADDR_LEVEL_INT, MB_ADDR_TEMP_INT, MB_ADDR_PERCENT_INT,
+        MB_ADDR_VOLUME_INT, MB_ADDR_MASS_INT, MB_ADDR_DENSITY_INT,
+        MB_ADDR_VOLUME_MAIN_INT, MB_ADDR_LEVEL_INT_SEP,
+        MB_ADDR_TEMP_VAPOR_INT, MB_ADDR_MASS_VAPOR_INT,
+        MB_ADDR_MASS_LIQ_INT, MB_ADDR_VOLUME_STD_INT,
+        MB_ADDR_DENSITY_STD_INT, MB_ADDR_DENSITY_MEAS_INT,
+        MB_ADDR_TEMP_DENS_INT, MB_ADDR_VOLUME_SEP_INT,
+        MB_ADDR_MASS_ERROR_INT
+    };
+    static const uint16_t float_addresses[] = {
+        MB_ADDR_LEVEL, MB_ADDR_TEMP, MB_ADDR_PERCENT, MB_ADDR_VOLUME,
+        MB_ADDR_MASS, MB_ADDR_DENSITY, MB_ADDR_VOLUME_MAIN,
+        MB_ADDR_LEVEL_SEP, MB_ADDR_TEMP_VAPOR, MB_ADDR_MASS_VAPOR,
+        MB_ADDR_MASS_LIQ, MB_ADDR_VOLUME_STD, MB_ADDR_DENSITY_STD,
+        MB_ADDR_DENSITY_MEAS, MB_ADDR_TEMP_DENS, MB_ADDR_VOLUME_SEP,
+        MB_ADDR_VOLUME_15C, MB_ADDR_DENSITY_15C,
+        MB_ADDR_TEMP_SENS_1_V, MB_ADDR_TEMP_SENS_2_V,
+        MB_ADDR_TEMP_SENS_3_V, MB_ADDR_TEMP_SENS_4_V,
+        MB_ADDR_TEMP_SENS_5_V, MB_ADDR_TEMP_SENS_6_V,
+        MB_ADDR_TEMP_SENS_7_V, MB_ADDR_TEMP_SENS_8_V,
+        MB_ADDR_DENS_SENS_1, MB_ADDR_DENS_SENS_2,
+        MB_ADDR_DENS_SENS_3, MB_ADDR_DENS_SENS_4,
+        MB_ADDR_DENS_SENS_5, MB_ADDR_DENS_SENS_6,
+        MB_ADDR_DENS_SENS_7, MB_ADDR_DENS_SENS_8
+    };
+    uint16_t i;
+
+    for (i = 0U; i < (uint16_t)(sizeof(int_addresses) /
+                                sizeof(int_addresses[0])); ++i) {
+        WriteU16Direct(int_addresses[i], 0x8000U);
+    }
+
+    for (i = 0U; i < (uint16_t)(sizeof(float_addresses) /
+                                sizeof(float_addresses[0])); ++i) {
+        WriteFloatDirect(float_addresses[i], NAN);
+    }
+
+    WriteU16Direct(MB_ADDR_ERROR_CODE, 0U);
+    WriteFloatDirect(MB_ADDR_TEMP_SENS_COUNT, 0.0f);
+}
+
 static void WriteFloatDirect(uint16_t address, float value)
 {
     uint16_t descriptor_index;
@@ -734,6 +1090,24 @@ static uint8_t ClampDeviceAddress(float value)
     return (uint8_t)address;
 }
 
+static uint32_t BaudCodeToRate(uint16_t code)
+{
+    static const uint32_t baud_rates[10] = {
+        1200U, 2400U, 4800U, 9600U, 14400U,
+        19200U, 38400U, 56000U, 57600U, 115200U
+    };
+
+    return (code < 10U) ? baud_rates[code] : MODBUS_DEFAULT_BAUDRATE;
+}
+
+/**
+ * @brief Синхронизирует дублирующиеся параметры связи из таблицы Е.4.
+ *
+ * В документе адрес, скорость и формат кадра присутствуют в двух формах:
+ * int16 по адресам 35..37 и float32 по адресам 2064..2068. Изменение любой
+ * формы немедленно отражается во второй. Скорость и формат UART фактически
+ * применяются только после передачи ответа на старых настройках.
+ */
 static void SynchronizeCommunicationSettings(uint16_t touched_address)
 {
     if (touched_address == MB_ADDR_MB_ADDR_SET) {
@@ -744,30 +1118,116 @@ static void SynchronizeCommunicationSettings(uint16_t touched_address)
         }
         WriteFloatDirect(MB_ADDR_DEVICE_ADDR, (float)value);
         modbus.device_address = (uint8_t)value;
-    } else if (touched_address == MB_ADDR_DEVICE_ADDR) {
+        return;
+    }
+
+    if (touched_address == MB_ADDR_DEVICE_ADDR) {
         uint8_t value = ClampDeviceAddress(
             ModBus_GetParameter_Float(MB_ADDR_DEVICE_ADDR));
         WriteU16Direct(MB_ADDR_MB_ADDR_SET, value);
         WriteFloatDirect(MB_ADDR_DEVICE_ADDR, (float)value);
         modbus.device_address = value;
-    } else if (touched_address == MB_ADDR_MB_BAUD_SET) {
-        WriteFloatDirect(MB_ADDR_BAUD_RATE,
-                         (float)ModBus_GetParameter_Int(MB_ADDR_MB_BAUD_SET));
-    } else if (touched_address == MB_ADDR_BAUD_RATE) {
-        float baud = ModBus_GetParameter_Float(MB_ADDR_BAUD_RATE);
-        if (isfinite(baud) && baud >= 1200.0f && baud <= 65535.0f) {
-            WriteU16Direct(MB_ADDR_MB_BAUD_SET, (uint16_t)(baud + 0.5f));
-        }
-    } else if (touched_address == MB_ADDR_MB_PARITY_SET) {
-        WriteFloatDirect(MB_ADDR_PARITY,
-                         (float)ModBus_GetParameter_Int(MB_ADDR_MB_PARITY_SET));
-    } else if (touched_address == MB_ADDR_PARITY) {
-        float parity = ModBus_GetParameter_Float(MB_ADDR_PARITY);
-        if (isfinite(parity) && parity >= 0.0f && parity <= 2.0f) {
-            WriteU16Direct(MB_ADDR_MB_PARITY_SET,
-                           (uint16_t)(parity + 0.5f));
-        }
+        return;
     }
+
+    if (touched_address == MB_ADDR_MB_BAUD_SET ||
+        touched_address == MB_ADDR_BAUD_RATE) {
+        uint16_t code;
+
+        if (touched_address == MB_ADDR_MB_BAUD_SET) {
+            code = ModBus_GetParameter_Int(MB_ADDR_MB_BAUD_SET);
+        } else {
+            float value = ModBus_GetParameter_Float(MB_ADDR_BAUD_RATE);
+            code = (isfinite(value) && value >= 0.0f && value <= 9.0f) ?
+                (uint16_t)(value + 0.5f) : MODBUS_DEFAULT_BAUD_CODE;
+        }
+
+        if (code > 9U) code = MODBUS_DEFAULT_BAUD_CODE;
+        WriteU16Direct(MB_ADDR_MB_BAUD_SET, code);
+        WriteFloatDirect(MB_ADDR_BAUD_RATE, (float)code);
+        uart_reconfigure_pending = true;
+        return;
+    }
+
+    if (touched_address == MB_ADDR_MB_PARITY_SET ||
+        touched_address == MB_ADDR_PARITY) {
+        uint16_t code;
+
+        if (touched_address == MB_ADDR_MB_PARITY_SET) {
+            code = ModBus_GetParameter_Int(MB_ADDR_MB_PARITY_SET);
+        } else {
+            float value = ModBus_GetParameter_Float(MB_ADDR_PARITY);
+            code = (isfinite(value) && value >= 0.0f && value <= 3.0f) ?
+                (uint16_t)(value + 0.5f) : MODBUS_DEFAULT_PARITY_CODE;
+        }
+
+        if (code > 3U) code = MODBUS_DEFAULT_PARITY_CODE;
+        WriteU16Direct(MB_ADDR_MB_PARITY_SET, code);
+        WriteFloatDirect(MB_ADDR_PARITY, (float)code);
+        uart_reconfigure_pending = true;
+    }
+}
+
+/**
+ * @brief Применяет rS/rP к USART1 и заново запускает прием одного байта.
+ *
+ * Функция вызывается только после завершения Modbus-ответа. Для режимов с
+ * контролем четности STM32F1 использует длину слова 9 бит: восемь бит данных
+ * плюс аппаратно формируемый бит четности.
+ */
+static void ApplyPendingCommunicationSettings(void)
+{
+    uint16_t baud_code;
+    uint16_t parity_code;
+
+    if (!uart_reconfigure_pending) {
+        return;
+    }
+
+    baud_code = ModBus_GetParameter_Int(MB_ADDR_MB_BAUD_SET);
+    parity_code = ModBus_GetParameter_Int(MB_ADDR_MB_PARITY_SET);
+    if (baud_code > 9U) baud_code = MODBUS_DEFAULT_BAUD_CODE;
+    if (parity_code > 3U) parity_code = MODBUS_DEFAULT_PARITY_CODE;
+
+    (void)HAL_UART_DeInit(&huart1);
+    huart1.Init.BaudRate = BaudCodeToRate(baud_code);
+    huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+    huart1.Init.Mode = UART_MODE_TX_RX;
+
+    switch (parity_code) {
+        case MB_PARITY_CODE_8N2:
+            huart1.Init.WordLength = UART_WORDLENGTH_8B;
+            huart1.Init.StopBits = UART_STOPBITS_2;
+            huart1.Init.Parity = UART_PARITY_NONE;
+            break;
+        case MB_PARITY_CODE_8O1:
+            huart1.Init.WordLength = UART_WORDLENGTH_9B;
+            huart1.Init.StopBits = UART_STOPBITS_1;
+            huart1.Init.Parity = UART_PARITY_ODD;
+            break;
+        case MB_PARITY_CODE_8E1:
+            huart1.Init.WordLength = UART_WORDLENGTH_9B;
+            huart1.Init.StopBits = UART_STOPBITS_1;
+            huart1.Init.Parity = UART_PARITY_EVEN;
+            break;
+        case MB_PARITY_CODE_8N1:
+        default:
+            huart1.Init.WordLength = UART_WORDLENGTH_8B;
+            huart1.Init.StopBits = UART_STOPBITS_1;
+            huart1.Init.Parity = UART_PARITY_NONE;
+            break;
+    }
+
+    huart1.Init.OverSampling = UART_OVERSAMPLING_16;
+    if (HAL_UART_Init(&huart1) == HAL_OK) {
+        modbus.rx_length = 0U;
+        modbus.last_byte_tick = HAL_GetTick();
+        (void)HAL_UART_Receive_IT(&huart1,
+                                  (uint8_t *)&modbus.rx_byte,
+                                  1U);
+    }
+
+    uart_reconfigure_pending = false;
 }
 
 static void AutoWriteSerialNumber(void)
@@ -853,14 +1313,13 @@ static bool ReadRangeIsValid(uint16_t start_address, uint16_t count)
 {
     uint16_t i;
 
-    if (count == 0U) {
+    if (count == 0U ||
+        (uint32_t)start_address + count - 1U > 0xFFFFUL) {
         return false;
     }
 
     for (i = 0U; i < count; ++i) {
-        uint32_t address = (uint32_t)start_address + i;
-        if (address > 0xFFFFUL ||
-            FindDescriptorByWord((uint16_t)address, NULL, NULL) == NULL) {
+        if (!ReadAddressIsAccessible((uint16_t)(start_address + i))) {
             return false;
         }
     }
@@ -868,13 +1327,39 @@ static bool ReadRangeIsValid(uint16_t start_address, uint16_t count)
     return true;
 }
 
+/**
+ * @brief Проверяет атомарность записи диапазона.
+ *
+ * Обычный float32 можно записывать только полной парой слов. Область
+ * градуировочной таблицы также состоит только из пар float32, поэтому запрос
+ * должен начинаться с четного базового адреса и содержать четное число слов.
+ * Регистры отображения являются сырыми 16-битными ячейками и могут записываться
+ * по одному слову, как предписывает раздел Е.15.
+ */
 static bool WriteRangeIsAtomic(uint16_t start_address, uint16_t count)
 {
-    uint32_t end_address = (uint32_t)start_address + count - 1U;
+    uint32_t end_address;
     uint16_t i;
 
-    if (!ReadRangeIsValid(start_address, count)) {
+    if (count == 0U ||
+        (uint32_t)start_address + count - 1U > 0xFFFFUL) {
         return false;
+    }
+
+    end_address = (uint32_t)start_address + count - 1U;
+
+    for (i = 0U; i < count; ++i) {
+        if (!WriteAddressIsAccessible((uint16_t)(start_address + i))) {
+            return false;
+        }
+    }
+
+    if (IsGraduationAddress(start_address) ||
+        IsGraduationAddress((uint16_t)end_address)) {
+        return IsGraduationAddress(start_address) &&
+               IsGraduationAddress((uint16_t)end_address) &&
+               ((start_address & 1U) == 0U) &&
+               ((count & 1U) == 0U);
     }
 
     for (i = 0U; i < DESCRIPTOR_COUNT; ++i) {
@@ -896,6 +1381,31 @@ static bool WriteRangeIsAtomic(uint16_t start_address, uint16_t count)
     return true;
 }
 
+static bool GraduationValueIsValid(uint16_t base_address, float value)
+{
+    if (!isfinite(value)) {
+        return false;
+    }
+
+    switch (base_address) {
+        case MB_ADDR_GRAD_POINT_COUNT:
+            return value >= 0.0f && value <= (float)GRAD_MAX_POINTS;
+        case MB_ADDR_GRAD_LEVEL_STEP:
+            return value > 0.0f;
+        case MB_ADDR_GRAD_TANK_HEIGHT:
+        case MB_ADDR_GRAD_TANK_VOLUME:
+            return value >= 0.0f;
+        default:
+            if (base_address >= MB_ADDR_GRAD_VOLUME_FIRST &&
+                base_address <= MB_ADDR_GRAD_VOLUME_LAST) {
+                uint16_t point = (uint16_t)((base_address -
+                    MB_ADDR_GRAD_VOLUME_FIRST) / 2U);
+                return point < GRAD_MAX_POINTS && value >= 0.0f;
+            }
+            return true;
+    }
+}
+
 static bool ValidateWriteValues(uint16_t start_address,
                                 uint16_t count,
                                 const uint8_t *data)
@@ -904,6 +1414,22 @@ static bool ValidateWriteValues(uint16_t start_address,
     uint16_t i;
 
     if (data == NULL) return false;
+
+    if (IsGraduationAddress(start_address)) {
+        for (i = 0U; i < count; i = (uint16_t)(i + 2U)) {
+            uint16_t low_word = (uint16_t)(((uint16_t)data[i * 2U] << 8) |
+                                           data[i * 2U + 1U]);
+            uint16_t high_word =
+                (uint16_t)(((uint16_t)data[(i + 1U) * 2U] << 8) |
+                           data[(i + 1U) * 2U + 1U]);
+            uint16_t base = (uint16_t)(start_address + i);
+            if (!GraduationValueIsValid(base,
+                                         WordsToFloat(high_word, low_word))) {
+                return false;
+            }
+        }
+        return true;
+    }
 
     for (i = 0U; i < DESCRIPTOR_COUNT; ++i) {
         const ModBus_Descriptor_t *descriptor = &descriptors[i];
@@ -921,10 +1447,10 @@ static bool ValidateWriteValues(uint16_t start_address,
             if (!U16ValueIsValid(descriptor->address, value)) return false;
         } else {
             uint16_t offset = (uint16_t)(descriptor->address - start_address);
-            uint16_t high_word =
+            uint16_t low_word =
                 (uint16_t)(((uint16_t)data[offset * 2U] << 8) |
                            data[offset * 2U + 1U]);
-            uint16_t low_word =
+            uint16_t high_word =
                 (uint16_t)(((uint16_t)data[(offset + 1U) * 2U] << 8) |
                            data[(offset + 1U) * 2U + 1U]);
             if (!FloatValueIsValid(descriptor->address,
@@ -991,6 +1517,27 @@ static void MarkDescriptorDirtyByWord(uint16_t address)
     MarkPersistentDirty(descriptor);
 }
 
+/**
+ * @brief Выполняет побочные действия записи, в том числе при записи через
+ * регистр отображения 4000..4124.
+ */
+static void MarkWrittenAddressEffects(uint16_t address)
+{
+    uint16_t effective_address = address;
+    const ModBus_Descriptor_t *descriptor;
+
+    if (IsDisplayDataAddress(address)) {
+        effective_address =
+            display_address_map[address - MB_ADDR_DISPLAY_FIRST];
+    }
+
+    descriptor = FindDescriptorByWord(effective_address, NULL, NULL);
+    if (descriptor != NULL) {
+        MarkDescriptorDirtyByWord(effective_address);
+        SynchronizeCommunicationSettings(descriptor->address);
+    }
+}
+
 static void ProcessWriteSingle(uint16_t address, uint16_t value)
 {
     const ModBus_Descriptor_t *descriptor =
@@ -998,18 +1545,20 @@ static void ProcessWriteSingle(uint16_t address, uint16_t value)
     uint8_t response[8];
     uint8_t old_address = modbus.device_address;
 
-    if (descriptor == NULL) {
+    if (!WriteAddressIsAccessible(address)) {
         SendException(0x06U, 0x02U);
         return;
     }
 
-    /* Float32 нельзя менять половиной через функцию 0x06. */
-    if (descriptor->type == MODBUS_REGISTER_FLOAT32) {
+    /* По 0x06 нельзя изменять половину обычного или градуировочного float32. */
+    if (IsGraduationAddress(address) ||
+        (descriptor != NULL && descriptor->type == MODBUS_REGISTER_FLOAT32)) {
         SendException(0x06U, 0x03U);
         return;
     }
 
-    if (!U16ValueIsValid(descriptor->address, value)) {
+    if (descriptor != NULL &&
+        !U16ValueIsValid(descriptor->address, value)) {
         SendException(0x06U, 0x03U);
         return;
     }
@@ -1019,8 +1568,7 @@ static void ProcessWriteSingle(uint16_t address, uint16_t value)
         return;
     }
 
-    MarkDescriptorDirtyByWord(address);
-    SynchronizeCommunicationSettings(descriptor->address);
+    MarkWrittenAddressEffects(address);
 
     response[0] = old_address;
     response[1] = 0x06U;
@@ -1029,6 +1577,29 @@ static void ProcessWriteSingle(uint16_t address, uint16_t value)
     response[4] = (uint8_t)(value >> 8);
     response[5] = (uint8_t)value;
     SendFrame(response, 6U);
+}
+
+/** Записывает одну или несколько полных пар float32 в область градуировки. */
+static bool ProcessGraduationWrite(uint16_t start_address,
+                                   uint16_t register_count,
+                                   const uint8_t *data)
+{
+    uint16_t i;
+
+    for (i = 0U; i < register_count; i = (uint16_t)(i + 2U)) {
+        uint16_t low_word = (uint16_t)(((uint16_t)data[i * 2U] << 8) |
+                                       data[i * 2U + 1U]);
+        uint16_t high_word =
+            (uint16_t)(((uint16_t)data[(i + 1U) * 2U] << 8) |
+                       data[(i + 1U) * 2U + 1U]);
+        float value = WordsToFloat(high_word, low_word);
+
+        if (!WriteGraduationFloat((uint16_t)(start_address + i), value)) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 static void ProcessWriteMultiple(uint16_t start_address,
@@ -1050,35 +1621,31 @@ static void ProcessWriteMultiple(uint16_t start_address,
         return;
     }
 
-    if (!ReadRangeIsValid(start_address, register_count)) {
+    if (!WriteRangeIsAtomic(start_address, register_count)) {
         SendException(0x10U, 0x02U);
         return;
     }
 
-    if (!WriteRangeIsAtomic(start_address, register_count) ||
-        !ValidateWriteValues(start_address, register_count, data)) {
+    if (!ValidateWriteValues(start_address, register_count, data)) {
         SendException(0x10U, 0x03U);
         return;
     }
 
-    for (i = 0U; i < register_count; ++i) {
-        uint16_t address = (uint16_t)(start_address + i);
-        uint16_t value = (uint16_t)(((uint16_t)data[i * 2U] << 8) |
-                                    data[i * 2U + 1U]);
-        if (!WriteRawRegister(address, value)) {
+    if (IsGraduationAddress(start_address)) {
+        if (!ProcessGraduationWrite(start_address, register_count, data)) {
             SendException(0x10U, 0x04U);
             return;
         }
-    }
-
-    for (i = 0U; i < DESCRIPTOR_COUNT; ++i) {
-        uint32_t descriptor_end = descriptors[i].address +
-            ((descriptors[i].type == MODBUS_REGISTER_FLOAT32) ? 1U : 0U);
-        uint32_t request_end = (uint32_t)start_address + register_count - 1U;
-        if (descriptors[i].address <= request_end &&
-            descriptor_end >= start_address) {
-            MarkPersistentDirty(&descriptors[i]);
-            SynchronizeCommunicationSettings(descriptors[i].address);
+    } else {
+        for (i = 0U; i < register_count; ++i) {
+            uint16_t address = (uint16_t)(start_address + i);
+            uint16_t value = (uint16_t)(((uint16_t)data[i * 2U] << 8) |
+                                        data[i * 2U + 1U]);
+            if (!WriteRawRegister(address, value)) {
+                SendException(0x10U, 0x04U);
+                return;
+            }
+            MarkWrittenAddressEffects(address);
         }
     }
 
@@ -1089,6 +1656,46 @@ static void ProcessWriteMultiple(uint16_t start_address,
     response[4] = (uint8_t)(register_count >> 8);
     response[5] = (uint8_t)register_count;
     SendFrame(response, 6U);
+}
+
+/** Функция 0x08, подфункция 0x0000: Return Query Data. */
+static void ProcessDiagnostics(const uint8_t *frame, uint16_t length)
+{
+    uint8_t response[8];
+    uint16_t subfunction;
+
+    if (frame == NULL || length != 8U) {
+        SendException(0x08U, 0x03U);
+        return;
+    }
+
+    subfunction = (uint16_t)(((uint16_t)frame[2] << 8) | frame[3]);
+    if (subfunction != 0U) {
+        SendException(0x08U, 0x03U);
+        return;
+    }
+
+    memcpy(response, frame, 6U);
+    response[0] = modbus.device_address;
+    SendFrame(response, 6U);
+}
+
+/** Функция 0x11: идентификатор сервера для подключения фирменной утилиты. */
+static void ProcessReportServerId(void)
+{
+    static const char server_text[] = MODBUS_SERVER_ID_TEXT;
+    uint8_t response[MODBUS_BUFFER_SIZE];
+    uint16_t text_length = (uint16_t)(sizeof(server_text) - 1U);
+    uint16_t index = 0U;
+
+    response[index++] = modbus.device_address;
+    response[index++] = 0x11U;
+    response[index++] = (uint8_t)(2U + text_length);
+    response[index++] = 0x01U; /* Идентификатор типа устройства ПМП. */
+    response[index++] = MODBUS_SERVER_RUN_STATUS;
+    memcpy(&response[index], server_text, text_length);
+    index = (uint16_t)(index + text_length);
+    SendFrame(response, index);
 }
 
 static void ProcessFrame(const uint8_t *frame, uint16_t length)
@@ -1128,8 +1735,10 @@ static void ProcessFrame(const uint8_t *frame, uint16_t length)
             if (length != 8U) {
                 SendException(function, 0x03U);
             } else {
-                uint16_t start = (uint16_t)(((uint16_t)frame[2] << 8) | frame[3]);
-                uint16_t count = (uint16_t)(((uint16_t)frame[4] << 8) | frame[5]);
+                uint16_t start =
+                    (uint16_t)(((uint16_t)frame[2] << 8) | frame[3]);
+                uint16_t count =
+                    (uint16_t)(((uint16_t)frame[4] << 8) | frame[5]);
                 ProcessRead(function, start, count);
             }
             break;
@@ -1138,18 +1747,26 @@ static void ProcessFrame(const uint8_t *frame, uint16_t length)
             if (length != 8U) {
                 SendException(function, 0x03U);
             } else {
-                uint16_t address = (uint16_t)(((uint16_t)frame[2] << 8) | frame[3]);
-                uint16_t value = (uint16_t)(((uint16_t)frame[4] << 8) | frame[5]);
+                uint16_t address =
+                    (uint16_t)(((uint16_t)frame[2] << 8) | frame[3]);
+                uint16_t value =
+                    (uint16_t)(((uint16_t)frame[4] << 8) | frame[5]);
                 ProcessWriteSingle(address, value);
             }
+            break;
+
+        case 0x08U:
+            ProcessDiagnostics(frame, length);
             break;
 
         case 0x10U:
             if (length < 9U) {
                 SendException(function, 0x03U);
             } else {
-                uint16_t start = (uint16_t)(((uint16_t)frame[2] << 8) | frame[3]);
-                uint16_t count = (uint16_t)(((uint16_t)frame[4] << 8) | frame[5]);
+                uint16_t start =
+                    (uint16_t)(((uint16_t)frame[2] << 8) | frame[3]);
+                uint16_t count =
+                    (uint16_t)(((uint16_t)frame[4] << 8) | frame[5]);
                 uint8_t byte_count = frame[6];
                 if (byte_count != (uint8_t)(count * 2U) ||
                     length != (uint16_t)(9U + byte_count)) {
@@ -1157,6 +1774,14 @@ static void ProcessFrame(const uint8_t *frame, uint16_t length)
                 } else {
                     ProcessWriteMultiple(start, count, &frame[7]);
                 }
+            }
+            break;
+
+        case 0x11U:
+            if (length != 4U) {
+                SendException(function, 0x03U);
+            } else {
+                ProcessReportServerId();
             }
             break;
 
@@ -1175,9 +1800,21 @@ void ModBus_Init(void)
     bool loaded = false;
 
     memset(&modbus, 0, sizeof(modbus));
+    memset(display_address_map, 0, sizeof(display_address_map));
     MeasurementSnapshot_Init();
     modbus.device_address = MODBUS_DEFAULT_ADDRESS;
     modbus.last_byte_tick = HAL_GetTick();
+
+    /* Полезная начальная раскладка области отображения. Пользователь может
+     * полностью заменить ее записью адресов в 5000..5124. */
+    display_address_map[0] = MB_ADDR_LEVEL;
+    display_address_map[1] = (uint16_t)(MB_ADDR_LEVEL + 1U);
+    display_address_map[2] = MB_ADDR_TEMP;
+    display_address_map[3] = (uint16_t)(MB_ADDR_TEMP + 1U);
+    display_address_map[4] = MB_ADDR_PERCENT;
+    display_address_map[5] = (uint16_t)(MB_ADDR_PERCENT + 1U);
+    display_address_map[6] = MB_ADDR_ERROR_CODE;
+    display_address_map[7] = MB_ADDR_FW_VERSION;
 
     RS485_Init();
     storage_state = ParamsStorage_Init();
@@ -1185,6 +1822,7 @@ void ModBus_Init(void)
 
     /* Сначала безопасные значения: отсутствующие записи старой схемы не дадут NaN. */
     ApplyDefaults();
+    InitializeVolatileMeasurements();
     storage_dirty = false;
     storage_force_requested = false;
     storage_revision = 0U;
@@ -1204,13 +1842,14 @@ void ModBus_Init(void)
     }
 
     AutoWriteSerialNumber();
+    WriteU16Direct(MB_ADDR_COMMAND, 99U);
     SynchronizeCommunicationSettings(MB_ADDR_MB_ADDR_SET);
     SynchronizeCommunicationSettings(MB_ADDR_MB_BAUD_SET);
     SynchronizeCommunicationSettings(MB_ADDR_MB_PARITY_SET);
 
-    (void)HAL_UART_Receive_IT(&huart1,
-                              (uint8_t *)&modbus.rx_byte,
-                              1U);
+    /* При загрузке EEPROM USART1 мог получить другие rS/rP. Применяем их
+     * до первого запроса; функция сама запускает прерываемый прием. */
+    ApplyPendingCommunicationSettings();
 }
 
 uint8_t ModBus_GetDeviceAddress(void)
@@ -1282,6 +1921,7 @@ static uint16_t ExpectedRequestLength(const uint8_t *buffer,
         case 0x03U:
         case 0x04U:
         case 0x06U:
+        case 0x08U:
             return 8U;
 
         case 0x10U:
@@ -1290,10 +1930,13 @@ static uint16_t ExpectedRequestLength(const uint8_t *buffer,
             }
             return 0U;
 
+        case 0x11U:
+            return 4U;
+
         default:
-            /* Для неподдерживаемой стандартной команды достаточно 8 байт,
-             * чтобы сразу вернуть Illegal Function. */
-            return 8U;
+            /* Для неизвестной команды длина заранее неизвестна. Ждем паузу
+             * конца кадра и затем возвращаем Illegal Function. */
+            return 0U;
     }
 }
 
@@ -1340,6 +1983,10 @@ void ModBus_Process(void)
     if (frame_length > 0U) {
         ProcessFrame(modbus.process_buffer, frame_length);
         modbus.processing = 0U;
+
+        /* Изменение скорости/четности выполняется только после отправки
+         * подтверждения на прежних параметрах линии. */
+        ApplyPendingCommunicationSettings();
     }
 }
 
@@ -1405,6 +2052,16 @@ void ModBus_PublishLiveMeasurements(float level_mm,
     WriteFloatDirect(MB_ADDR_TEMP, temperature_c);
     WriteFloatDirect(MB_ADDR_PERCENT, percent);
     WriteFloatDirect(MB_ADDR_VOLUME, volume_m3);
+
+    /* Дублирующие int16-параметры 1..4 из той же таблицы Е.4. */
+    WriteU16Direct(MB_ADDR_LEVEL_INT,
+                   (uint16_t)(int16_t)lroundf(level_mm));
+    WriteU16Direct(MB_ADDR_TEMP_INT,
+                   (uint16_t)(int16_t)lroundf(temperature_c * 100.0f));
+    WriteU16Direct(MB_ADDR_PERCENT_INT,
+                   (uint16_t)(int16_t)lroundf(percent * 100.0f));
+    WriteU16Direct(MB_ADDR_VOLUME_INT,
+                   (uint16_t)(int16_t)lroundf(volume_m3 * 100.0f));
 }
 
 void ModBus_UpdateMeasurements(float level,

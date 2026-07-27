@@ -33,7 +33,7 @@ void Config_LoadFromFlash(void)
 void Config_FactoryReset(void)
 {
     Config_SetAddress(DEFAULT_DEVICE_ADDRESS);
-    ModBus_SetParameter_Int(MB_ADDR_MB_BAUD_SET, MODBUS_BAUDRATE);
-    ModBus_SetParameter_Float(MB_ADDR_BAUD_RATE, (float)MODBUS_BAUDRATE);
+    ModBus_SetParameter_Int(MB_ADDR_MB_BAUD_SET, MODBUS_DEFAULT_BAUD_CODE);
+    ModBus_SetParameter_Float(MB_ADDR_BAUD_RATE, (float)MODBUS_DEFAULT_BAUD_CODE);
     ModBus_ForceSaveToEEPROM();
 }
