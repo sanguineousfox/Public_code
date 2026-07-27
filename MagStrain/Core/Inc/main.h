@@ -1,98 +1,148 @@
-/* USER CODE BEGIN Header */
-/*
-@file           : main.h
-*/
-/* USER CODE END Header */
-#ifndef __MAIN_H
-#define __MAIN_H
+/**
+ * @file    main.h
+ * @brief   Общие определения аппаратной платформы и измерительного тракта.
+ *
+ * ВАЖНО ДЛЯ НАСТРОЙКИ ФИКСАЦИИ:
+ * Все физические временные границы захвата собраны в одном месте ниже.
+ * Если материал волновода изменится, в первую очередь корректируются
+ * CAPTURE_PAIR_INTERVAL_MIN_US и CAPTURE_PAIR_INTERVAL_MAX_US.
+ */
+#ifndef MAIN_H
+#define MAIN_H
+
 #ifdef __cplusplus
 extern "C" {
 #endif
+
 #include "stm32f1xx_hal.h"
+#include <stdint.h>
+
+/* ADC */
+#define Read_24V_Pin                GPIO_PIN_0
+#define Read_24V_GPIO_Port          GPIOA
+#define Read_12V_Pin                GPIO_PIN_1
+#define Read_12V_GPIO_Port          GPIOA
+#define Read_5V_Pin                 GPIO_PIN_5
+#define Read_5V_GPIO_Port           GPIOA
+
+/* Измерительный тракт */
+#define CLIK_Pin                    GPIO_PIN_1
+#define CLIK_GPIO_Port              GPIOB
+#define Gen_Impuls_Pin              GPIO_PIN_5
+#define Gen_Impuls_GPIO_Port        GPIOB
+#define Switch_In_impuls_Pin        GPIO_PIN_7
+#define Switch_In_impuls_GPIO_Port  GPIOB
+
+/* Индикация */
+#define LED_BLUE_Pin                GPIO_PIN_12
+#define LED_BLUE_GPIO_Port          GPIOB
+#define LED_RED_Pin                 GPIO_PIN_13
+#define LED_RED_GPIO_Port           GPIOB
+
+/* RS-485 */
+#define RS485_CTRL_Pin              GPIO_PIN_0
+#define RS485_CTRL_GPIO_Port        GPIOB
+
+/* Дополнительные цепи */
+#define Check_OPA552_Pin            GPIO_PIN_8
+#define Check_OPA552_GPIO_Port      GPIOA
+#define ON_VCC_5_Pin                GPIO_PIN_6
+#define ON_VCC_5_GPIO_Port          GPIOB
 
 /* ==========================================================================
-ПРОТОТИПЫ ФУНКЦИЙ (пользовательские)
-========================================================================== */
-void Error_Handler(void);
-void USART2_Print(const char *str);
-void uint32_to_dec_str(uint32_t value, char *buffer);
-void USART2_PrintHexByte(uint8_t byte);
-void USART2_PrintHexBuffer(const uint8_t *buffer, uint16_t length);
+ * ПАРАМЕТРЫ АППАРАТНОЙ ФИКСАЦИИ TIM3 CH4
+ * ========================================================================== */
 
-/* === ФУНКЦИИ ИЗМЕРЕНИЙ === */
-void TIM3_InputCapture_Init(void);
-void generate_pulse_and_measure(void);
-uint32_t measure_time_of_flight(void);
-uint32_t measure_time_of_flight_test(void);
-void Read_All_Voltages(void);
-void Read_Temperature(void);
-void Process_Measurement_Results(float tof_us, float position_mm, uint8_t signal_captured);
+/* TIM3 тактируется от 72 МГц и имеет PSC=6, поэтому частота счетчика:
+ * 72 000 000 / (6 + 1) = 10 285 714 Гц, один тик примерно 0,09722 мкс. */
+#define TIM3_CAPTURE_FREQUENCY_HZ   10285714UL
+#define TIM3_CAPTURE_TICK_US        0.097222222f
 
-/* === ФУНКЦИИ АЦП === */
-uint32_t Read_ADC_Single(ADC_HandleTypeDef *hadc, uint32_t channel, uint32_t sampling_time);
-uint32_t Read_ADC_Average(ADC_HandleTypeDef *hadc, uint32_t channel, uint32_t sampling_time, uint8_t samples);
+/* Перевод целого количества микросекунд в тики таймера.
+ * Для нижних границ применяем округление вверх, для верхних — вниз. */
+#define CAPTURE_US_TO_TICKS_CEIL(us) \
+    ((((uint32_t)(us) * TIM3_CAPTURE_FREQUENCY_HZ) + 999999UL) / 1000000UL)
+#define CAPTURE_US_TO_TICKS_FLOOR(us) \
+    (((uint32_t)(us) * TIM3_CAPTURE_FREQUENCY_HZ) / 1000000UL)
 
-/* === БУФЕРНЫЙ ВЫВОД В USART2 (оптимизация) === */
-void USART2_BufInit(void);
-void USART2_BufPrint(const char *str);
-void USART2_BufPrintInt(int32_t val);
-void USART2_BufPrintFloat(float val);
-void USART2_BufFlush(void);
+/* Первые 100 мкс после задающего импульса полностью закрыты для фиксации.
+ * В этом интервале находится сильная электромагнитная наводка с волновода. */
+#define CAPTURE_BLANKING_TIME_US       100U
+#define BLANKING_WINDOW_TICKS          CAPTURE_US_TO_TICKS_CEIL(CAPTURE_BLANKING_TIME_US)
 
-/* === ФУНКЦИИ КАЛИБРОВКИ === */
-void Process_Calibration_Command(uint16_t cmd);
+/*
+ * Внешняя аппаратная схема уже преобразует значащий аналоговый отклик
+ * в ДВА отдельных цифровых импульса. TIM3 фиксирует только нарастающий
+ * фронт каждого сформированного импульса. Полярность захвата не меняется.
+ *
+ * Первый захват — время первого сформированного импульса t1.
+ * Второй захват — время второго сформированного импульса t2.
+ * Валидность пары определяется интервалом t2 - t1.
+ */
+#define CAPTURE_PAIR_INTERVAL_MIN_US   14U
+#define CAPTURE_PAIR_INTERVAL_MAX_US   26U
+#define MIN_CLICK_WIDTH_TICKS          CAPTURE_US_TO_TICKS_CEIL(CAPTURE_PAIR_INTERVAL_MIN_US)
+#define MAX_CLICK_WIDTH_TICKS          CAPTURE_US_TO_TICKS_FLOOR(CAPTURE_PAIR_INTERVAL_MAX_US)
 
-/* ==========================================================================
-КОНФИГУРАЦИЯ GPIO (Pin Mapping)
-========================================================================== */
-/* === АЦП: Напряжения питания === */
-#define Read_24V_Pin            GPIO_PIN_0
-#define Read_24V_GPIO_Port      GPIOA
-#define Read_12V_Pin            GPIO_PIN_1
-#define Read_12V_GPIO_Port      GPIOA
-#define Read_5V_Pin             GPIO_PIN_5
-#define Read_5V_GPIO_Port       GPIOA
+/* К расчетному времени прохождения по всей длине волновода добавляется запас.
+ * Он допускает задержку аналогового тракта, но отсекает ложные пары на 850–970 мкс
+ * при длине волновода 1,2 м, которые наблюдались в предыдущей версии. */
+#define CAPTURE_MAX_TOF_MARGIN_US      60U
 
-/* === Ультразвуковой датчик === */
-#define CLIK_Pin                GPIO_PIN_1
-#define CLIK_GPIO_Port          GPIOB
-#define Gen_Impuls_Pin          GPIO_PIN_5
-#define Gen_Impuls_GPIO_Port    GPIOB
-#define Switch_In_impuls_Pin    GPIO_PIN_7
-#define Switch_In_impuls_GPIO_Port GPIOB
+/* Частота возбуждения волновода строго ограничена 10 Гц.
+ * Период между двумя фронтами PB5 не может быть меньше 100 мс даже при
+ * повторном вызове измерительной функции из команды калибровки. */
+#define EXCITATION_FREQUENCY_HZ         10U
+#define EXCITATION_PERIOD_MS            (1000U / EXCITATION_FREQUENCY_HZ)
 
-/* === Индикация === */
-#define LED_BLUE_Pin            GPIO_PIN_12
-#define LED_BLUE_GPIO_Port      GPIOB
-#define LED_RED_Pin             GPIO_PIN_13
-#define LED_RED_GPIO_Port       GPIOB
+/* После первого импульса пары второй должен появиться не позднее верхней
+ * границы 26 мкс. Добавочный запас 5 мкс учитывает задержку выполнения
+ * фонового кода, но не допускает ожидания поздних отражений. */
+#define CAPTURE_SECOND_PULSE_GRACE_US   5U
+#define CAPTURE_SECOND_PULSE_TIMEOUT_TICKS \
+    CAPTURE_US_TO_TICKS_CEIL(CAPTURE_PAIR_INTERVAL_MAX_US + \
+                             CAPTURE_SECOND_PULSE_GRACE_US)
 
-/* === Доп. функции === */
-#define Check_OPA552_Pin        GPIO_PIN_8
-#define Check_OPA552_GPIO_Port  GPIOA
-#define ON_VCC_5_Pin            GPIO_PIN_6
-#define ON_VCC_5_GPIO_Port      GPIOB
+/* Фильтр уровня использует скользящее окно из 11 последовательных запусков.
+ * После заполнения окна новый результат формируется при каждом следующем
+ * запуске, то есть с частотой до 10 Гц, а не один раз за отдельную пачку. */
+#define MEASUREMENT_REQUIRED_SAMPLES    11U
 
-/* ==========================================================================
-КОНСТАНТЫ ЗАХВАТА И ИЗМЕРЕНИЙ
-========================================================================== */
-#define MAX_PULSE_PAIRS             1
-#define MAX_CAPTURED_PULSES         (MAX_PULSE_PAIRS * 2)
-#define BLANKING_WINDOW_TICKS       650
-#define DEAD_TIME_TICKS             670
+/* Статус быстрого снимка измерений. */
+#define MEASUREMENT_STATUS_VALID         0x0001U
+#define MEASUREMENT_STATUS_SINGLE_PULSE  0x0002U
+#define MEASUREMENT_STATUS_COIL_FAULT    0x0004U
 
-/* ==========================================================================
-ВНЕШНИЕ ПЕРЕМЕННЫЕ
-========================================================================== */
+/* Код аварии в Modbus-регистре MB_ADDR_ERROR_CODE (2416).
+ * Измерение при этом продолжается по первому входному импульсу. */
+#define MEASUREMENT_ERROR_NONE           0x0000U
+#define MEASUREMENT_ERROR_CAPTURE_COIL   0x0101U
+
+/* После сортировки удаляются ровно один минимум и один максимум. Разброс
+ * оставшихся девяти значений обязан быть небольшим. При превышении порога
+ * серия отвергается полностью, а последнее корректное значение остается в RAM.
+ * 4 мкс при c=3370 м/с соответствуют примерно 13,5 мм полного диапазона. */
+#define MEASUREMENT_MAX_SPREAD_US      4U
+#define MEASUREMENT_MAX_SPREAD_TICKS   CAPTURE_US_TO_TICKS_CEIL(MEASUREMENT_MAX_SPREAD_US)
+
+#define MAX_PULSE_PAIRS                1U
+#define MAX_CAPTURED_PULSES            (MAX_PULSE_PAIRS * 2U)
+
 extern UART_HandleTypeDef huart1;
 extern UART_HandleTypeDef huart2;
 extern ADC_HandleTypeDef hadc1;
 extern ADC_HandleTypeDef hadc2;
-extern TIM_HandleTypeDef htim4;
 
-/* ==========================================================================
-ПРОТОТИПЫ ФУНКЦИЙ ИНИЦИАЛИЗАЦИИ
-========================================================================== */
+extern volatile uint32_t captured_pulses[MAX_CAPTURED_PULSES];
+extern volatile uint8_t capture_count;
+extern volatile uint8_t tof_measurement_done;
+extern volatile uint8_t tof_timeout;
+
+/* Верхняя допустимая граница времени первого сформированного импульса в тиках TIM3.
+ * Она рассчитывается перед серией по длине волновода и скорости волны. */
+extern volatile uint32_t capture_max_tof_ticks;
+
+void Error_Handler(void);
 void SystemClock_Config(void);
 void MX_GPIO_Init(void);
 void MX_USART1_UART_Init(void);
@@ -101,7 +151,27 @@ void MX_ADC1_Init(void);
 void MX_ADC2_Init(void);
 HAL_StatusTypeDef MX_I2C2_Init(void);
 
+void TIM3_InputCapture_Init(void);
+void generate_pulse_and_measure(void);
+uint32_t measure_time_of_flight(void);
+uint32_t measure_time_of_flight_test(void);
+void Read_All_Voltages(void);
+void Read_Temperature(void);
+void Process_Measurement_Results(float tof_us,
+                                 float position_mm,
+                                 uint8_t signal_was_captured);
+void Process_Calibration_Command(uint16_t command);
+
+uint32_t Read_ADC_Single(ADC_HandleTypeDef *hadc,
+                         uint32_t channel,
+                         uint32_t sampling_time);
+uint32_t Read_ADC_Average(ADC_HandleTypeDef *hadc,
+                          uint32_t channel,
+                          uint32_t sampling_time,
+                          uint8_t samples);
+
 #ifdef __cplusplus
 }
 #endif
-#endif /* __MAIN_H */
+
+#endif /* MAIN_H */

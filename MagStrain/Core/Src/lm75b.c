@@ -1,81 +1,93 @@
 /**
-  ******************************************************************************
-  * @file    lm75b.c
-  * @author  ram223
-  * @brief   Драйвер температурного датчика LM75B (CJMCU75) через I2C2
-  ******************************************************************************
-  */
-
+ * @file    lm75b.c
+ * @brief   Драйвер температурного датчика LM75B через I2C2.
+ */
 #include "lm75b.h"
-#include "i2c_config.h"  // Для доступа к hi2c2
-#include "main.h"        // Для USART2_Print
+#include "i2c_config.h"
 
-/**
-  * @brief Инициализация LM75B (проверка доступности устройства)
-  */
-HAL_StatusTypeDef LM75B_Init(uint8_t dev_address)
+#define LM75B_I2C_TIMEOUT_MS  10U
+
+HAL_StatusTypeDef LM75B_Init(uint8_t device_address)
 {
-    // Проверяем доступность устройства путём чтения регистра температуры
-    uint8_t dummy[2] = {0};
-    return HAL_I2C_Mem_Read(&hi2c2, dev_address, LM75B_REG_TEMP,
-                            I2C_MEMADD_SIZE_8BIT, dummy, 2, 100);
+    uint8_t data[2] = {0U, 0U};
+
+    return HAL_I2C_Mem_Read(&hi2c2,
+                            device_address,
+                            LM75B_REG_TEMP,
+                            I2C_MEMADD_SIZE_8BIT,
+                            data,
+                            sizeof(data),
+                            LM75B_I2C_TIMEOUT_MS);
 }
 
-/**
-  * @brief Чтение "сырого" 16-битного значения температуры
-  */
-HAL_StatusTypeDef LM75B_ReadRawTemperature(uint8_t dev_address, uint16_t *raw_temp)
+HAL_StatusTypeDef LM75B_ReadRawTemperature(uint8_t device_address,
+                                           uint16_t *raw_temperature)
 {
-    if (raw_temp == NULL) return HAL_ERROR;
-    
-    uint8_t data[2] = {0};
-    HAL_StatusTypeDef status = HAL_I2C_Mem_Read(&hi2c2, dev_address, LM75B_REG_TEMP,
-                                                I2C_MEMADD_SIZE_8BIT, data, 2, 100);
-    if (status == HAL_OK)
-    {
-        *raw_temp = ((uint16_t)data[0] << 8) | data[1];
+    uint8_t data[2] = {0U, 0U};
+    HAL_StatusTypeDef status;
+
+    if (raw_temperature == NULL) {
+        return HAL_ERROR;
     }
+
+    status = HAL_I2C_Mem_Read(&hi2c2,
+                              device_address,
+                              LM75B_REG_TEMP,
+                              I2C_MEMADD_SIZE_8BIT,
+                              data,
+                              sizeof(data),
+                              LM75B_I2C_TIMEOUT_MS);
+    if (status == HAL_OK) {
+        *raw_temperature = ((uint16_t)data[0] << 8) | data[1];
+    }
+
     return status;
 }
 
-/**
-  * @brief Чтение температуры в градусах Цельсия с точностью 0.125°C
-  */
-HAL_StatusTypeDef LM75B_ReadTemperature(uint8_t dev_address, float *temp)
+HAL_StatusTypeDef LM75B_ReadTemperature(uint8_t device_address,
+                                        float *temperature_c)
 {
-    if (temp == NULL) return HAL_ERROR;
-    
-    uint16_t raw_temp = 0;
-    HAL_StatusTypeDef status = LM75B_ReadRawTemperature(dev_address, &raw_temp);
-    if (status == HAL_OK)
-    {
-        // LM75B: 11 бит точности, шаг 0.125°C
-        // Биты 15-5 содержат значение температуры в дополнительном коде
-        int16_t temp_raw = (int16_t)(raw_temp & 0xFFE0);  // Оставляем только 11 бит
-        *temp = (float)temp_raw / 256.0f;  // 256 = 2^8
+    uint16_t raw = 0U;
+    HAL_StatusTypeDef status;
+
+    if (temperature_c == NULL) {
+        return HAL_ERROR;
     }
+
+    status = LM75B_ReadRawTemperature(device_address, &raw);
+    if (status == HAL_OK) {
+        /* LM75B: 11-разрядное значение, шаг 0,125 °C, знак в старшем бите. */
+        int16_t signed_raw = (int16_t)(raw & 0xFFE0U);
+        *temperature_c = (float)signed_raw / 256.0f;
+    }
+
     return status;
 }
 
-/**
-  * @brief Чтение регистра конфигурации
-  */
-HAL_StatusTypeDef LM75B_ReadConfig(uint8_t dev_address, uint8_t *config)
+HAL_StatusTypeDef LM75B_ReadConfig(uint8_t device_address, uint8_t *config)
 {
-    if (config == NULL) return HAL_ERROR;
-    
-    return HAL_I2C_Mem_Read(&hi2c2, dev_address, LM75B_REG_CONF,
-                            I2C_MEMADD_SIZE_8BIT, config, 1, 100);
+    if (config == NULL) {
+        return HAL_ERROR;
+    }
+
+    return HAL_I2C_Mem_Read(&hi2c2,
+                            device_address,
+                            LM75B_REG_CONF,
+                            I2C_MEMADD_SIZE_8BIT,
+                            config,
+                            1U,
+                            LM75B_I2C_TIMEOUT_MS);
 }
 
-/**
-  * @brief Запись регистра конфигурации
-  */
-HAL_StatusTypeDef LM75B_WriteConfig(uint8_t dev_address, uint8_t config)
+HAL_StatusTypeDef LM75B_WriteConfig(uint8_t device_address, uint8_t config)
 {
-    // Очищаем зарезервированные биты 5-7
-    config &= 0x1F;
-    
-    return HAL_I2C_Mem_Write(&hi2c2, dev_address, LM75B_REG_CONF,
-                             I2C_MEMADD_SIZE_8BIT, &config, 1, 100);
+    config &= 0x1FU;
+
+    return HAL_I2C_Mem_Write(&hi2c2,
+                             device_address,
+                             LM75B_REG_CONF,
+                             I2C_MEMADD_SIZE_8BIT,
+                             &config,
+                             1U,
+                             LM75B_I2C_TIMEOUT_MS);
 }

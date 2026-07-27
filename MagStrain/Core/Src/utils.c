@@ -1,351 +1,349 @@
+/** @file utils.c @brief Строковые утилиты и неблокирующий вывод USART2. */
 #include "utils.h"
 #include "main.h"
+
+#include <math.h>
+#include <stddef.h>
 #include <string.h>
 
-/* Внешние переменные */
-extern UART_HandleTypeDef huart2;
+#define DEBUG_BUILD_BUFFER_SIZE  512U
+#define DEBUG_TX_QUEUE_SIZE      2048U
 
-/* Буферы для преобразования чисел в строки */
-static char str_buffer[32];
+static char debug_build_buffer[DEBUG_BUILD_BUFFER_SIZE];
+static uint16_t debug_build_length = 0U;
 
-/**
-  * @brief  Вывод строки через USART2
-  */
-void USART2_Print(const char* str)
+static uint8_t debug_tx_queue[DEBUG_TX_QUEUE_SIZE];
+static volatile uint16_t debug_tx_head = 0U;
+static volatile uint16_t debug_tx_tail = 0U;
+static volatile uint16_t debug_tx_active_length = 0U;
+static volatile uint8_t debug_tx_busy = 0U;
+static volatile uint32_t debug_tx_dropped = 0U;
+
+static uint32_t SignedMagnitude(int32_t value)
 {
-    if (str == NULL) return;
-    HAL_UART_Transmit(&huart2, (uint8_t*)str, strlen(str), 100);
+    return (value < 0) ? (uint32_t)(-(int64_t)value) : (uint32_t)value;
 }
 
-/**
-  * @brief  Вывод числа через USART2
-  */
-void USART2_PrintNum(uint32_t num)
+void uint32_to_dec_str(uint32_t value, char *buffer)
 {
-    /* Преобразование числа в строку */
-    if (num == 0) {
-        USART2_Print("0");
+    char reversed[11];
+    uint8_t count = 0U;
+    uint8_t i;
+
+    if (buffer == NULL) return;
+
+    do {
+        reversed[count++] = (char)('0' + value % 10U);
+        value /= 10U;
+    } while (value > 0U && count < sizeof(reversed));
+
+    for (i = 0U; i < count; ++i) {
+        buffer[i] = reversed[count - i - 1U];
+    }
+    buffer[count] = '\0';
+}
+
+void float_to_str(float value, char *buffer, int decimals)
+{
+    uint32_t scale = 1U;
+    uint32_t integer_part;
+    uint32_t fraction_part;
+    uint8_t offset = 0U;
+    char integer_text[12];
+    int i;
+
+    if (buffer == NULL) return;
+
+    if (!isfinite(value)) {
+        strcpy(buffer, isnan(value) ? "nan" : ((value < 0.0f) ? "-inf" : "inf"));
         return;
     }
-    
-    char temp[16];
-    int i = 0;
-    
-    while (num > 0 && i < 15) {
-        temp[i++] = (num % 10) + '0';
-        num /= 10;
-    }
-    
-    /* Вывод в обратном порядке */
-    for (int j = i - 1; j >= 0; j--) {
-        HAL_UART_Transmit(&huart2, (uint8_t*)&temp[j], 1, 100);
-    }
-}
 
-/**
-  * @brief  Вывод одного байта в hex формате на USART2
-  */
-void USART2_PrintHexByte(uint8_t byte)
-{
-    const char hex_chars[] = "0123456789ABCDEF";
-    str_buffer[0] = hex_chars[(byte >> 4) & 0x0F];
-    str_buffer[1] = hex_chars[byte & 0x0F];
-    str_buffer[2] = '\0';
-    USART2_Print(str_buffer);
-}
+    if (decimals < 0) decimals = 0;
+    if (decimals > 6) decimals = 6;
 
-/**
-  * @brief  Вывод буфера в hex формате на USART2
-  */
-void USART2_PrintHexBuffer(const uint8_t* buffer, uint16_t length)
-{
-    for (uint16_t i = 0; i < length; i++) {
-        USART2_PrintHexByte(buffer[i]);
-        if (i < length - 1) {
-            USART2_Print(" ");
-        }
-    }
-}
+    for (i = 0; i < decimals; ++i) scale *= 10U;
 
-/**
-  * @brief  Вывод ModBus команды в формате QModMaster на USART2
-  */
-void USART2_PrintModBusCommand(const uint8_t* data, uint16_t length)
-{
-    if (length == 0) return;
-
-    USART2_Print("Sys > ");
-
-    /* Получаем текущее время */
-    uint32_t tick = HAL_GetTick();
-    uint32_t hours = tick / 3600000;
-    uint32_t mins = (tick % 3600000) / 60000;
-    uint32_t secs = (tick % 60000) / 1000;
-    uint32_t ms = tick % 1000;
-
-    /* Выводим время в формате HH:MM:SS:mmm */
-    if (hours < 10) USART2_Print("0");
-    USART2_PrintNum(hours);
-    USART2_Print(":");
-    
-    if (mins < 10) USART2_Print("0");
-    USART2_PrintNum(mins);
-    USART2_Print(":");
-    
-    if (secs < 10) USART2_Print("0");
-    USART2_PrintNum(secs);
-    USART2_Print(":");
-    
-    if (ms < 100) USART2_Print("0");
-    if (ms < 10) USART2_Print("0");
-    USART2_PrintNum(ms);
-    USART2_Print(" - ");
-
-    /* Выводим данные команды */
-    USART2_PrintHexBuffer(data, length);
-    USART2_Print("\r\n");
-}
-
-/**
-  * @brief  Вывод ModBus ответа на USART2
-  */
-void USART2_PrintModBusResponse(const uint8_t* data, uint16_t length)
-{
-    if (length == 0) return;
-
-    USART2_Print("[RTU]>Tx > ");
-
-    /* Получаем текущее время */
-    uint32_t tick = HAL_GetTick();
-    uint32_t hours = tick / 3600000;
-    uint32_t mins = (tick % 3600000) / 60000;
-    uint32_t secs = (tick % 60000) / 1000;
-    uint32_t ms = tick % 1000;
-
-    /* Выводим время в формате HH:MM:SS:mmm */
-    if (hours < 10) USART2_Print("0");
-    USART2_PrintNum(hours);
-    USART2_Print(":");
-    
-    if (mins < 10) USART2_Print("0");
-    USART2_PrintNum(mins);
-    USART2_Print(":");
-    
-    if (secs < 10) USART2_Print("0");
-    USART2_PrintNum(secs);
-    USART2_Print(":");
-    
-    if (ms < 100) USART2_Print("0");
-    if (ms < 10) USART2_Print("0");
-    USART2_PrintNum(ms);
-    USART2_Print(" - ");
-
-    /* Выводим данные ответа */
-    USART2_PrintHexBuffer(data, length);
-    USART2_Print("\r\n");
-}
-
-/**
-  * @brief  Вывод ModBus фрейма в детальном формате
-  */
-void ModBus_DebugFrame(const uint8_t* frame, uint16_t length, const char* prefix)
-{
-    if (length == 0) return;
-
-    USART2_Print("[MODBUS] ");
-    USART2_Print(prefix);
-    USART2_Print(": ");
-
-    /* Вывод hex */
-    for(uint16_t i = 0; i < length; i++) {
-        USART2_PrintHexByte(frame[i]);
-        USART2_Print(" ");
-    }
-
-    USART2_Print(" | ");
-
-    /* Парсинг фрейма */
-    if (length >= 3) {
-        uint8_t addr = frame[0];
-        uint8_t func = frame[1];
-
-        USART2_Print("Addr=");
-        USART2_PrintNum(addr);
-        USART2_Print(" Func=");
-        USART2_PrintHexByte(func);
-
-        switch(func) {
-            case 0x03: /* Read Holding Registers */
-                if (length >= 8) {
-                    uint16_t start = (frame[2] << 8) | frame[3];
-                    uint16_t count = (frame[4] << 8) | frame[5];
-                    USART2_Print(" ReadHold Start=");
-                    USART2_PrintNum(start);
-                    USART2_Print(" Count=");
-                    USART2_PrintNum(count);
-                }
-                break;
-
-            case 0x04: /* Read Input Registers */
-                if (length >= 8) {
-                    uint16_t start = (frame[2] << 8) | frame[3];
-                    uint16_t count = (frame[4] << 8) | frame[5];
-                    USART2_Print(" ReadInput Start=");
-                    USART2_PrintNum(start);
-                    USART2_Print(" Count=");
-                    USART2_PrintNum(count);
-                }
-                break;
-
-            case 0x06: /* Write Single Register */
-                if (length >= 8) {
-                    uint16_t reg = (frame[2] << 8) | frame[3];
-                    uint16_t value = (frame[4] << 8) | frame[5];
-                    USART2_Print(" WriteSingle Reg=");
-                    USART2_PrintNum(reg);
-                    USART2_Print(" Value=");
-                    USART2_PrintNum(value);
-                }
-                break;
-
-            case 0x10: /* Write Multiple Registers */
-                if (length >= 9) {
-                    uint16_t start = (frame[2] << 8) | frame[3];
-                    uint16_t count = (frame[4] << 8) | frame[5];
-                    uint8_t byte_count = frame[6];
-                    USART2_Print(" WriteMulti Start=");
-                    USART2_PrintNum(start);
-                    USART2_Print(" Count=");
-                    USART2_PrintNum(count);
-                    USART2_Print(" Bytes=");
-                    USART2_PrintNum(byte_count);
-                }
-                break;
-
-            case 0x83: /* Exception for 0x03 */
-                USART2_Print(" Exception(0x03) Code=");
-                if (length >= 3) {
-                    USART2_PrintHexByte(frame[2]);
-                }
-                break;
-
-            case 0x84: /* Exception for 0x04 */
-                USART2_Print(" Exception(0x04) Code=");
-                if (length >= 3) {
-                    USART2_PrintHexByte(frame[2]);
-                }
-                break;
-
-            case 0x86: /* Exception for 0x06 */
-                USART2_Print(" Exception(0x06) Code=");
-                if (length >= 3) {
-                    USART2_PrintHexByte(frame[2]);
-                }
-                break;
-
-            case 0x90: /* Exception for 0x10 */
-                USART2_Print(" Exception(0x10) Code=");
-                if (length >= 3) {
-                    USART2_PrintHexByte(frame[2]);
-                }
-                break;
-
-            default:
-                USART2_Print(" Unknown function");
-                break;
-        }
-    }
-
-    /* Проверка CRC */
-    if (length >= 2) {
-        uint16_t recv_crc = (frame[length-1] << 8) | frame[length-2];
-        USART2_Print(" CRC=");
-        USART2_PrintHexByte((recv_crc >> 8) & 0xFF);
-        USART2_PrintHexByte(recv_crc & 0xFF);
-    }
-
-    USART2_Print("\r\n");
-}
-
-/**
-  * @brief  Преобразование uint32 в строку
-  */
-void uint32_to_dec_str(uint32_t value, char* buffer)
-{
-    if (value == 0) {
-        buffer[0] = '0';
-        buffer[1] = '\0';
-        return;
-    }
-    
-    char temp[16];
-    int i = 0;
-    
-    while (value > 0 && i < 15) {
-        temp[i++] = (value % 10) + '0';
-        value /= 10;
-    }
-    
-    for (int j = 0; j < i; j++) {
-        buffer[j] = temp[i - j - 1];
-    }
-    buffer[i] = '\0';
-}
-
-/**
-  * @brief  Преобразование float в строку
-  */
-void float_to_str(float value, char* buffer, int decimals)
-{
-    int offset = 0;
-    char temp_buffer[32];
-
-    if (value < 0) {
-        temp_buffer[0] = '-';
+    if (value < 0.0f) {
+        buffer[offset++] = '-';
         value = -value;
-        offset = 1;
     }
 
-    int int_part = (int)value;
-    float frac_part = value - (float)int_part;
-
-    /* Преобразуем целую часть */
-    if (int_part == 0) {
-        temp_buffer[offset] = '0';
-        offset += 1;
-    } else {
-        int i = 0;
-        while (int_part > 0 && i < 15) {
-            temp_buffer[offset + i] = (int_part % 10) + '0';
-            int_part /= 10;
-            i++;
-        }
-        
-        /* Переворачиваем цифры */
-        for (int j = 0; j < i/2; j++) {
-            char temp = temp_buffer[offset + j];
-            temp_buffer[offset + j] = temp_buffer[offset + i - j - 1];
-            temp_buffer[offset + i - j - 1] = temp;
-        }
-        offset += i;
+    integer_part = (uint32_t)value;
+    fraction_part = (uint32_t)(((value - (float)integer_part) * (float)scale) + 0.5f);
+    if (fraction_part >= scale && decimals > 0) {
+        integer_part++;
+        fraction_part = 0U;
     }
 
-    /* Добавляем дробную часть */
+    uint32_to_dec_str(integer_part, integer_text);
+    strcpy(&buffer[offset], integer_text);
+    offset = (uint8_t)(offset + strlen(integer_text));
+
     if (decimals > 0) {
-        temp_buffer[offset] = '.';
-        offset++;
-        
-        for (int i = 0; i < decimals; i++) {
-            frac_part *= 10.0f;
-            int digit = (int)frac_part;
-            temp_buffer[offset + i] = digit + '0';
-            frac_part -= (float)digit;
+        buffer[offset++] = '.';
+        for (i = decimals - 1; i >= 0; --i) {
+            uint32_t divisor = 1U;
+            int j;
+            for (j = 0; j < i; ++j) divisor *= 10U;
+            buffer[offset++] = (char)('0' + (fraction_part / divisor) % 10U);
         }
-        temp_buffer[offset + decimals] = '\0';
-    } else {
-        temp_buffer[offset] = '\0';
+    }
+    buffer[offset] = '\0';
+}
+
+static uint16_t QueueFree(uint16_t head, uint16_t tail)
+{
+    if (head >= tail) {
+        return (uint16_t)(DEBUG_TX_QUEUE_SIZE - (head - tail) - 1U);
+    }
+    return (uint16_t)(tail - head - 1U);
+}
+
+/* Вызывается либо с запрещенными IRQ, либо из USART2 IRQ. */
+static void DebugTxKickLocked(void)
+{
+    uint16_t head;
+    uint16_t tail;
+    uint16_t length;
+
+    if (debug_tx_busy != 0U) return;
+
+    head = debug_tx_head;
+    tail = debug_tx_tail;
+    if (head == tail) return;
+
+    length = (head > tail) ?
+        (uint16_t)(head - tail) :
+        (uint16_t)(DEBUG_TX_QUEUE_SIZE - tail);
+
+    debug_tx_active_length = length;
+    debug_tx_busy = 1U;
+
+    if (HAL_UART_Transmit_IT(&huart2, &debug_tx_queue[tail], length) != HAL_OK) {
+        debug_tx_busy = 0U;
+        debug_tx_active_length = 0U;
+    }
+}
+
+static void DebugTxEnqueue(const uint8_t *data, uint16_t length)
+{
+    uint16_t head;
+    uint16_t tail;
+    uint16_t free_space;
+    uint16_t accepted;
+    uint16_t i;
+
+    if (data == NULL || length == 0U) return;
+
+    head = debug_tx_head;
+    tail = debug_tx_tail;
+    free_space = QueueFree(head, tail);
+    accepted = (length <= free_space) ? length : free_space;
+
+    for (i = 0U; i < accepted; ++i) {
+        debug_tx_queue[head] = data[i];
+        head++;
+        if (head >= DEBUG_TX_QUEUE_SIZE) head = 0U;
     }
 
-    /* Копируем в выходной буфер */
-    strcpy(buffer, temp_buffer);
+    /* Публикуем head только после копирования данных. */
+    debug_tx_head = head;
+    if (accepted < length) {
+        debug_tx_dropped += (uint32_t)(length - accepted);
+    }
+
+    USART2_TxProcess();
+}
+
+void USART2_TxProcess(void)
+{
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    DebugTxKickLocked();
+    if (primask == 0U) {
+        __enable_irq();
+    }
+}
+
+void USART2_TxCpltCallback(UART_HandleTypeDef *huart)
+{
+    uint16_t tail;
+
+    if (huart == NULL || huart->Instance != USART2) return;
+
+    tail = (uint16_t)(debug_tx_tail + debug_tx_active_length);
+    if (tail >= DEBUG_TX_QUEUE_SIZE) {
+        tail = (uint16_t)(tail - DEBUG_TX_QUEUE_SIZE);
+    }
+    debug_tx_tail = tail;
+    debug_tx_active_length = 0U;
+    debug_tx_busy = 0U;
+    DebugTxKickLocked();
+}
+
+void USART2_TxErrorCallback(UART_HandleTypeDef *huart)
+{
+    if (huart == NULL || huart->Instance != USART2) return;
+    debug_tx_active_length = 0U;
+    debug_tx_busy = 0U;
+    DebugTxKickLocked();
+}
+
+bool USART2_TxIsIdle(void)
+{
+    return debug_tx_busy == 0U && debug_tx_head == debug_tx_tail;
+}
+
+uint16_t USART2_TxPendingBytes(void)
+{
+    uint16_t head = debug_tx_head;
+    uint16_t tail = debug_tx_tail;
+
+    if (head >= tail) return (uint16_t)(head - tail);
+    return (uint16_t)(DEBUG_TX_QUEUE_SIZE - tail + head);
+}
+
+uint32_t USART2_TxDroppedBytes(void)
+{
+    return debug_tx_dropped;
+}
+
+void USART2_Print(const char *text)
+{
+    if (text == NULL) return;
+    DebugTxEnqueue((const uint8_t *)text, (uint16_t)strlen(text));
+}
+
+void USART2_PrintNum(uint32_t value)
+{
+    char text[12];
+    uint32_to_dec_str(value, text);
+    USART2_Print(text);
+}
+
+void USART2_PrintInt(int32_t value)
+{
+    if (value < 0) USART2_Print("-");
+    USART2_PrintNum(SignedMagnitude(value));
+}
+
+void USART2_PrintFloat(float value)
+{
+    char text[24];
+    float_to_str(value, text, 2);
+    USART2_Print(text);
+}
+
+void USART2_PrintHexByte(uint8_t value)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    char text[3];
+    text[0] = hex[(value >> 4) & 0x0FU];
+    text[1] = hex[value & 0x0FU];
+    text[2] = '\0';
+    USART2_Print(text);
+}
+
+void USART2_PrintHexBuffer(const uint8_t *buffer, uint16_t length)
+{
+    uint16_t i;
+    if (buffer == NULL) return;
+    for (i = 0U; i < length; ++i) {
+        USART2_PrintHexByte(buffer[i]);
+        if (i + 1U < length) USART2_Print(" ");
+    }
+}
+
+void USART2_BufInit(void)
+{
+    debug_build_length = 0U;
+}
+
+static void BufferPutChar(char value)
+{
+    if (debug_build_length >= DEBUG_BUILD_BUFFER_SIZE) {
+        USART2_BufFlush();
+    }
+    debug_build_buffer[debug_build_length++] = value;
+}
+
+void USART2_BufPrint(const char *text)
+{
+    if (text == NULL) return;
+    while (*text != '\0') BufferPutChar(*text++);
+}
+
+void USART2_BufPrintInt(int32_t value)
+{
+    char text[12];
+    uint32_t magnitude = SignedMagnitude(value);
+    if (value < 0) BufferPutChar('-');
+    uint32_to_dec_str(magnitude, text);
+    USART2_BufPrint(text);
+}
+
+void USART2_BufPrintFloat(float value)
+{
+    char text[24];
+    float_to_str(value, text, 2);
+    USART2_BufPrint(text);
+}
+
+void USART2_BufFlush(void)
+{
+    if (debug_build_length == 0U) return;
+    DebugTxEnqueue((const uint8_t *)debug_build_buffer, debug_build_length);
+    debug_build_length = 0U;
+}
+
+static void PrintTimestamp(void)
+{
+    uint32_t tick = HAL_GetTick();
+    uint32_t hours = tick / 3600000UL;
+    uint32_t minutes = (tick / 60000UL) % 60UL;
+    uint32_t seconds = (tick / 1000UL) % 60UL;
+    uint32_t milliseconds = tick % 1000UL;
+
+    if (hours < 10U) USART2_Print("0");
+    USART2_PrintNum(hours);
+    USART2_Print(":");
+    if (minutes < 10U) USART2_Print("0");
+    USART2_PrintNum(minutes);
+    USART2_Print(":");
+    if (seconds < 10U) USART2_Print("0");
+    USART2_PrintNum(seconds);
+    USART2_Print(":");
+    if (milliseconds < 100U) USART2_Print("0");
+    if (milliseconds < 10U) USART2_Print("0");
+    USART2_PrintNum(milliseconds);
+}
+
+static void PrintFrame(const char *prefix, const uint8_t *data, uint16_t length)
+{
+    if (data == NULL || length == 0U) return;
+    USART2_Print(prefix);
+    PrintTimestamp();
+    USART2_Print(" - ");
+    USART2_PrintHexBuffer(data, length);
+    USART2_Print("\r\n");
+}
+
+void USART2_PrintModBusCommand(const uint8_t *data, uint16_t length)
+{
+    PrintFrame("[RTU]>Rx > ", data, length);
+}
+
+void USART2_PrintModBusResponse(const uint8_t *data, uint16_t length)
+{
+    PrintFrame("[RTU]>Tx > ", data, length);
+}
+
+void ModBus_DebugFrame(const uint8_t *frame, uint16_t length, const char *prefix)
+{
+    USART2_Print("[MODBUS] ");
+    USART2_Print((prefix != NULL) ? prefix : "FRAME");
+    USART2_Print(": ");
+    USART2_PrintHexBuffer(frame, length);
+    USART2_Print("\r\n");
 }

@@ -1,0 +1,3 @@
+../Core/Src/measurement_statistics.c:16:13:SortAscending	24	static
+../Core/Src/measurement_statistics.c:38:17:CalculateRoundedMean	72	static
+../Core/Src/measurement_statistics.c:53:6:MeasurementStatistics_Calculate	72	static

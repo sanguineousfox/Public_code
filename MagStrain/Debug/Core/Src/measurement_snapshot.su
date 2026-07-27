@@ -1,0 +1,8 @@
+../Core/Src/measurement_snapshot.c:16:13:FloatToWords	32	static
+../Core/Src/measurement_snapshot.c:25:6:MeasurementSnapshot_Init	8	static
+../Core/Src/measurement_snapshot.c:30:6:MeasurementSnapshot_Publish	48	static
+../Core/Src/measurement_snapshot.c:59:6:MeasurementSnapshot_ReadRange	32	static
+../Core/Src/measurement_snapshot.c:100:6:MeasurementSnapshot_ReadWord	16	static
+../Core/Src/measurement_snapshot.c:105:6:MeasurementSnapshot_IsValid	4	static
+../Core/Src/measurement_snapshot.c:110:10:MeasurementSnapshot_GetTimestamp	4	static
+../Core/Src/measurement_snapshot.c:115:10:MeasurementSnapshot_GetStatus	4	static
