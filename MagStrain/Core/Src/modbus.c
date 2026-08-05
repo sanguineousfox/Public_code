@@ -112,6 +112,12 @@ static const ModBus_Descriptor_t descriptors[] = {
     DESC_F32(MB_ADDR_DENSITY_15C, VOLATILE),
     DESC_F32(MB_ADDR_MATERIAL_WAVE_SPEED, PERSISTENT),
     DESC_F32(MB_ADDR_WAVEGUIDE_LEN, PERSISTENT),
+    DESC_F32(MB_ADDR_SENSOR_CAL_260, PERSISTENT),
+    DESC_F32(MB_ADDR_SENSOR_CAL_520, PERSISTENT),
+    DESC_F32(MB_ADDR_SENSOR_CAL_780, PERSISTENT),
+    DESC_U16(MB_ADDR_SENSOR_CAL_MASK, PERSISTENT),
+    DESC_F32(MB_ADDR_SENSOR_CAL_LOW_TOF, PERSISTENT),
+    DESC_F32(MB_ADDR_SENSOR_CAL_HIGH_TOF, PERSISTENT),
     DESC_F32(MB_ADDR_WAVEGUIDE_DEV, PERSISTENT),
     DESC_F32(MB_ADDR_LEVEL_CORR, PERSISTENT),
     DESC_F32(MB_ADDR_DENSITY_CORR, PERSISTENT),
@@ -209,6 +215,23 @@ static uint32_t storage_revision = 0U;
 static uint32_t storage_save_revision = 0U;
 
 /*
+ * Редакция, которая уже подтверждена успешной записью в EEPROM.
+ * Отдельный номер редакции нужен потому, что во время постраничной записи
+ * другие параметры могут снова измениться. Тогда завершение старой записи не
+ * должно ошибочно снимать признак storage_dirty для более новой редакции.
+ */
+static uint32_t storage_persisted_revision = 0U;
+
+/*
+ * Состояние именно принудительного сохранения, запрошенного командами
+ * 01/02 либо командой 223. Обычное отложенное сохранение
+ * параметров не меняет этот статус и не влияет на результат команды 3000.
+ */
+static ModBus_StorageSaveStatus_t forced_save_status =
+    MODBUS_STORAGE_SAVE_IDLE;
+static uint32_t forced_save_target_revision = 0U;
+
+/*
  * Таблица адресов регистров отображения 5000..5124.
  * Значение display_address_map[n] определяет, какой 16-битный регистр
  * возвращается через адрес 4000+n. Нулевое значение означает пустой канал.
@@ -235,8 +258,8 @@ static void WriteU16Direct(uint16_t address, uint16_t value);
 static float WordsToFloat(uint16_t high_word, uint16_t low_word);
 
 static const FloatDefault_t float_defaults[] = {
-    {MB_ADDR_CAL_LOW_LVL, 0.1f},
-    {MB_ADDR_CAL_HIGH_LVL, 1.0f},
+    {MB_ADDR_CAL_LOW_LVL, 0.0f},
+    {MB_ADDR_CAL_HIGH_LVL, 0.80f},
     {MB_ADDR_PROBE_DEPTH, 0.0f},
     {MB_ADDR_LEVEL_OFFSET, 0.0f},
     {MB_ADDR_TANK_GEOM, 0.0f},
@@ -244,8 +267,13 @@ static const FloatDefault_t float_defaults[] = {
     {MB_ADDR_TANK_VOLUME, 0.0f},
     {MB_ADDR_DAMPING_TIME, 10.0f},
     {MB_ADDR_POLL_PERIOD, 100.0f},
-    {MB_ADDR_MATERIAL_WAVE_SPEED, 3370.0f},
-    {MB_ADDR_WAVEGUIDE_LEN, 1.2f},
+    {MB_ADDR_MATERIAL_WAVE_SPEED, MODBUS_DEFAULT_MATERIAL_WAVE_SPEED_MPS},
+    {MB_ADDR_WAVEGUIDE_LEN, MODBUS_DEFAULT_WAVEGUIDE_LENGTH_M},
+    {MB_ADDR_SENSOR_CAL_260, 0.0f},
+    {MB_ADDR_SENSOR_CAL_520, 0.0f},
+    {MB_ADDR_SENSOR_CAL_780, 0.0f},
+    {MB_ADDR_SENSOR_CAL_LOW_TOF, 0.0f},
+    {MB_ADDR_SENSOR_CAL_HIGH_TOF, 0.0f},
     {MB_ADDR_THRESH_LVL, 0.9f},
     {MB_ADDR_MEDIUM_TYPE, 1.0f},
     {MB_ADDR_BAUD_RATE, (float)MODBUS_DEFAULT_BAUD_CODE},
@@ -264,7 +292,8 @@ static const U16Default_t u16_defaults[] = {
     {MB_ADDR_UNIT_TEMP, 24U},
     {MB_ADDR_UNIT_VOLUME, 41U},
     {MB_ADDR_UNIT_MASS, 56U},
-    {MB_ADDR_UNIT_DENSITY, 73U}
+    {MB_ADDR_UNIT_DENSITY, 73U},
+    {MB_ADDR_SENSOR_CAL_MASK, 0U}
 };
 
 static const ModBus_Descriptor_t *FindDescriptorByStart(uint16_t address,
@@ -691,6 +720,12 @@ static bool FloatValueIsValid(uint16_t address, float value)
             return value >= 1000.0f && value <= 10000.0f;
         case MB_ADDR_WAVEGUIDE_LEN:
             return value >= 0.1f && value <= 50.0f;
+        case MB_ADDR_SENSOR_CAL_260:
+        case MB_ADDR_SENSOR_CAL_520:
+        case MB_ADDR_SENSOR_CAL_780:
+        case MB_ADDR_SENSOR_CAL_LOW_TOF:
+        case MB_ADDR_SENSOR_CAL_HIGH_TOF:
+            return value >= 0.0f && value <= 50000.0f;
         case MB_ADDR_DEVICE_ADDR:
             return value >= 1.0f && value <= 247.0f;
         case MB_ADDR_BAUD_RATE:
@@ -921,6 +956,13 @@ static bool DeserializePersistent(const uint8_t *buffer, uint16_t size)
     return offset == size;
 }
 
+/**
+ * @brief Создает атомарный снимок всех постоянных параметров и запускает
+ *        постраничную запись в EEPROM.
+ *
+ * В storage_save_revision фиксируется редакция, реально попавшая в снимок.
+ * Это позволяет отличить ее от параметров, измененных уже во время записи.
+ */
 static void StorageStartSave(void)
 {
     uint16_t size;
@@ -931,29 +973,68 @@ static void StorageStartSave(void)
     }
 
     size = SerializePersistent(persistence_buffer, sizeof(persistence_buffer));
-    if (size == 0U) return;
+    if (size == 0U) {
+        if (forced_save_status == MODBUS_STORAGE_SAVE_PENDING) {
+            forced_save_status = MODBUS_STORAGE_SAVE_ERROR;
+        }
+        return;
+    }
 
     if (ParamsStorage_BeginSave(persistence_buffer, size) == HAL_OK) {
         storage_save_revision = storage_revision;
         storage_force_requested = false;
+
+        if (forced_save_status == MODBUS_STORAGE_SAVE_PENDING) {
+            forced_save_status = MODBUS_STORAGE_SAVE_BUSY;
+        }
+    } else if (forced_save_status == MODBUS_STORAGE_SAVE_PENDING) {
+        forced_save_status = MODBUS_STORAGE_SAVE_ERROR;
     }
 }
 
+/**
+ * @brief Выполняет не более одного шага фоновой записи EEPROM.
+ *
+ * Функция вызывается из главного цикла только в безопасном окне: нет активного
+ * кадра Modbus и до следующего 10-Гц измерения остается достаточно времени.
+ * Для команд 01/02/223 статус COMPLETE выставляется лишь после того, как драйвер
+ * AT24C64 подтвердил завершение записи редакции, содержащей новые C1/C2.
+ */
 void ModBus_StorageProcess(bool allow_write)
 {
     ParamsStorageSaveState_t state = ParamsStorage_GetSaveState();
 
     if (state == PARAMS_SAVE_COMPLETE) {
+        storage_persisted_revision = storage_save_revision;
+
         if (storage_save_revision == storage_revision) {
             storage_dirty = false;
         }
+
         ParamsStorage_ClearSaveResult();
         state = PARAMS_SAVE_IDLE;
+
+        if (forced_save_status == MODBUS_STORAGE_SAVE_BUSY ||
+            forced_save_status == MODBUS_STORAGE_SAVE_PENDING) {
+            if (storage_persisted_revision >= forced_save_target_revision) {
+                forced_save_status = MODBUS_STORAGE_SAVE_COMPLETE;
+            } else {
+                /* Завершилась более старая запись. Новая редакция, нужная
+                 * команде, будет записана следующим снимком. */
+                forced_save_status = MODBUS_STORAGE_SAVE_PENDING;
+                storage_force_requested = true;
+            }
+        }
     } else if (state == PARAMS_SAVE_ERROR) {
         ParamsStorage_ClearSaveResult();
         storage_dirty = true;
         storage_dirty_since = HAL_GetTick();
         state = PARAMS_SAVE_IDLE;
+
+        if (forced_save_status == MODBUS_STORAGE_SAVE_BUSY ||
+            forced_save_status == MODBUS_STORAGE_SAVE_PENDING) {
+            forced_save_status = MODBUS_STORAGE_SAVE_ERROR;
+        }
     }
 
     if (!allow_write || !storage_available) return;
@@ -977,6 +1058,32 @@ void ModBus_StorageProcess(bool allow_write)
 bool ModBus_StorageIsBusy(void)
 {
     return ParamsStorage_GetSaveState() == PARAMS_SAVE_BUSY;
+}
+
+/**
+ * @brief Возвращает состояние последнего принудительного сохранения.
+ *
+ * PENDING/BUSY означают, что регистр команды 3000 должен оставаться равным 85.
+ * COMPLETE разрешает вернуть 90, ERROR требует вернуть 0.
+ */
+ModBus_StorageSaveStatus_t ModBus_GetStorageSaveStatus(void)
+{
+    return forced_save_status;
+}
+
+/**
+ * @brief Сбрасывает конечный результат принудительного сохранения.
+ *
+ * Вызывать только после того, как обработчик команды перенес COMPLETE/ERROR
+ * в регистр 3000. Активные состояния PENDING/BUSY намеренно не сбрасываются.
+ */
+void ModBus_ClearStorageSaveStatus(void)
+{
+    if (forced_save_status == MODBUS_STORAGE_SAVE_COMPLETE ||
+        forced_save_status == MODBUS_STORAGE_SAVE_ERROR) {
+        forced_save_status = MODBUS_STORAGE_SAVE_IDLE;
+        forced_save_target_revision = storage_persisted_revision;
+    }
 }
 
 static void ApplyDefaults(void)
@@ -1826,6 +1933,10 @@ void ModBus_Init(void)
     storage_dirty = false;
     storage_force_requested = false;
     storage_revision = 0U;
+    storage_save_revision = 0U;
+    storage_persisted_revision = 0U;
+    forced_save_target_revision = 0U;
+    forced_save_status = MODBUS_STORAGE_SAVE_IDLE;
 
     if (storage_state == PARAMS_STORAGE_VALID &&
         ParamsStorage_Load(persistence_buffer,
@@ -1994,7 +2105,7 @@ float ModBus_GetWaveguideLength(void)
 {
     float value = ModBus_GetParameter_Float(MB_ADDR_WAVEGUIDE_LEN);
     return (isfinite(value) && value >= 0.1f && value <= 50.0f) ?
-        value : 1.2f;
+        value : MODBUS_DEFAULT_WAVEGUIDE_LENGTH_M;
 }
 
 void ModBus_SetWaveguideLength(float length_m)
@@ -2008,7 +2119,7 @@ float ModBus_GetMaterialWaveSpeed(void)
 {
     float value = ModBus_GetParameter_Float(MB_ADDR_MATERIAL_WAVE_SPEED);
     return (isfinite(value) && value >= 1000.0f && value <= 10000.0f) ?
-        value : 3370.0f;
+        value : MODBUS_DEFAULT_MATERIAL_WAVE_SPEED_MPS;
 }
 
 void ModBus_SetMaterialWaveSpeed(float speed_mps)
@@ -2103,9 +2214,39 @@ void ModBus_UpdateFirmwareVersion(uint16_t version)
     WriteU16Direct(MB_ADDR_FW_VERSION, version);
 }
 
+/**
+ * @brief Запрашивает сохранение текущей редакции постоянных параметров.
+ *
+ * Функция не выполняет блокирующую запись. Она запоминает номер редакции,
+ * которую требуется гарантированно сохранить, и переводит публичный статус в
+ * PENDING. ModBus_StorageProcess() выполнит запись по страницам в безопасном
+ * окне, не задерживая обработку Modbus и захват TIM3.
+ */
 void ModBus_ForceSaveToEEPROM(void)
 {
-    if (storage_dirty) {
-        storage_force_requested = true;
+    if (!storage_available) {
+        forced_save_status = MODBUS_STORAGE_SAVE_ERROR;
+        return;
+    }
+
+    forced_save_target_revision = storage_revision;
+
+    /* Если после последней подтвержденной записи параметры не менялись,
+     * требуемая редакция уже находится в EEPROM. */
+    if (!storage_dirty ||
+        storage_persisted_revision >= forced_save_target_revision) {
+        forced_save_status = MODBUS_STORAGE_SAVE_COMPLETE;
+        return;
+    }
+
+    storage_force_requested = true;
+
+    /* Если уже идет запись снимка, содержащего требуемую редакцию, команда
+     * может сразу отображать BUSY. Иначе ожидаем следующий снимок. */
+    if (ParamsStorage_GetSaveState() == PARAMS_SAVE_BUSY &&
+        storage_save_revision >= forced_save_target_revision) {
+        forced_save_status = MODBUS_STORAGE_SAVE_BUSY;
+    } else {
+        forced_save_status = MODBUS_STORAGE_SAVE_PENDING;
     }
 }

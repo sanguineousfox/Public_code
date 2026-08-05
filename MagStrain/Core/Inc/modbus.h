@@ -34,6 +34,17 @@ extern "C" {
 #define MODBUS_FLOAT_WORD_COUNT         2U
 #define MODBUS_INVALID_INDEX            0xFFFFU
 
+/* Заводские значения измерительного канала.
+ * Скорость 2841,37 м/с и постоянная задержка аналогового тракта 18,00 мкс
+ * получены по двум контрольным точкам реального звукопровода:
+ *   240 мм -> 102,47 мкс;
+ *   940 мм -> 348,83 мкс.
+ * Длина звукопровода по умолчанию — 1,040 м. Эти значения используются
+ * только при пустой/невалидной EEPROM; записанные пользователем параметры
+ * по адресам 2094 и 2096 имеют приоритет и сохраняются в AT24C64. */
+#define MODBUS_DEFAULT_MATERIAL_WAVE_SPEED_MPS  2733.0f
+#define MODBUS_DEFAULT_WAVEGUIDE_LENGTH_M        1.04f
+
 /* ========================================================================== */
 /* Таблица Е.4: измеряемые параметры int16                                    */
 /* ========================================================================== */
@@ -102,8 +113,8 @@ extern "C" {
 /* ========================================================================== */
 /* Таблица Е.4: основные настроечные параметры float32                        */
 /* ========================================================================== */
-#define MB_ADDR_CAL_LOW_LVL         2000U /* h_: нижняя контрольная точка уровня, м. */
-#define MB_ADDR_CAL_HIGH_LVL        2002U /* h-: верхняя контрольная точка уровня, м. */
+#define MB_ADDR_CAL_LOW_LVL         2000U /* h_: нижняя точка уровня, м; по умолчанию 0 м (пустой бак, магнит максимально удалён). */
+#define MB_ADDR_CAL_HIGH_LVL        2002U /* h-: верхняя точка уровня, м; по умолчанию 0,80 м при звукопроводе 1,04 м и верхней невалидной зоне 240 мм. */
 #define MB_ADDR_PROBE_DEPTH         2004U /* d1: глубина погружения поплавка уровня, м. */
 #define MB_ADDR_LEVEL_OFFSET        2006U /* d0: отступ от дна резервуара, м. */
 #define MB_ADDR_TANK_GEOM           2008U /* Gr: способ расчета объема, код 0..3. */
@@ -143,6 +154,20 @@ extern "C" {
 
 #define MB_ADDR_WAVEGUIDE_LEN       2096U /* Lc: текущая длина звукопровода, м. */
 #define MB_ADDR_WAVEGUIDE_DEV       2098U /* delta: отклонение длины звукопровода, %. */
+
+/* Пользовательское расширение: линейзация измерительного канала по ToFraw.
+ * Это НЕ штатная градуировочная таблица резервуара 32768...38779.
+ *
+ * Команды 01/02 сохраняют пределы 0 %/100 %, а 11/12/13 — промежуточные
+ * уровни 260/520/780 мм. При полной маске 0x001F расчёт не использует
+ * предполагаемую скорость волны Nispan.
+ */
+#define MB_ADDR_SENSOR_CAL_260      2100U /* ToFraw при уровне 260 мм, float32, мкс. */
+#define MB_ADDR_SENSOR_CAL_520      2102U /* ToFraw при уровне 520 мм, float32, мкс. */
+#define MB_ADDR_SENSOR_CAL_780      2104U /* ToFraw при уровне 780 мм, float32, мкс. */
+#define MB_ADDR_SENSOR_CAL_MASK     2106U /* Формат 0xA500 + маска точек 0x001F. */
+#define MB_ADDR_SENSOR_CAL_LOW_TOF  2108U /* ToFraw штатной точки 0 %, float32, мкс. */
+#define MB_ADDR_SENSOR_CAL_HIGH_TOF 2110U /* ToFraw штатной точки 100 %, float32, мкс. */
 #define MB_ADDR_LEVEL_CORR          2120U /* dh: поправка измерений уровня, м. */
 #define MB_ADDR_DENSITY_CORR        2148U /* dr: поправка измерений плотности, кг/м3. */
 #define MB_ADDR_MEDIUM_TYPE         2154U /* cE: тип среды: 0 произвольная, 1 нефтепродукт, 2 СУГ. */
@@ -259,10 +284,27 @@ typedef enum {
     MODBUS_REGISTER_FLOAT32
 } ModBus_RegisterType_t;
 
+/**
+ * @brief Состояние принудительного сохранения параметров в EEPROM.
+ *
+ * Состояние используется командами 01/02 и 223. Команда остается в
+ * состоянии 85 (выполняется), пока снимок параметров не будет физически
+ * записан в AT24C64 и подтвержден драйвером EEPROM.
+ */
+typedef enum {
+    MODBUS_STORAGE_SAVE_IDLE = 0,    /* Принудительное сохранение не запрашивалось. */
+    MODBUS_STORAGE_SAVE_PENDING,     /* Запрос принят, ожидается безопасное окно записи. */
+    MODBUS_STORAGE_SAVE_BUSY,        /* Идет постраничная запись в AT24C64. */
+    MODBUS_STORAGE_SAVE_COMPLETE,    /* Требуемая редакция параметров сохранена. */
+    MODBUS_STORAGE_SAVE_ERROR        /* EEPROM отсутствует или запись завершилась ошибкой. */
+} ModBus_StorageSaveStatus_t;
+
 void ModBus_Init(void);
 void ModBus_Process(void);
 void ModBus_StorageProcess(bool allow_write);
 bool ModBus_StorageIsBusy(void);
+ModBus_StorageSaveStatus_t ModBus_GetStorageSaveStatus(void);
+void ModBus_ClearStorageSaveStatus(void);
 void ModBus_RxCallback(UART_HandleTypeDef *huart);
 void ModBus_RestartRx(void);
 
@@ -296,6 +338,14 @@ void ModBus_PublishLiveMeasurements(float level_mm,
 void ModBus_UpdateMeasurements(float level, float temperature, float waveguide);
 void ModBus_UpdateVoltages(float vdda, float v24, float v12, float v5);
 void ModBus_UpdateFirmwareVersion(uint16_t version);
+
+/**
+ * @brief Запрашивает немедленное фоновое сохранение текущей редакции
+ *        постоянных Modbus-параметров в AT24C64.
+ *
+ * Функция не блокирует главный цикл. Результат контролируется через
+ * ModBus_GetStorageSaveStatus().
+ */
 void ModBus_ForceSaveToEEPROM(void);
 
 #ifdef __cplusplus

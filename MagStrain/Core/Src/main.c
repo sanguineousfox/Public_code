@@ -10,6 +10,7 @@
 #include "temp_sensors.h"
 #include "graduation.h"
 #include "measurement_statistics.h"
+#include "measurement_snapshot.h"
 #include <stdint.h>
 #include <string.h>
 #include <math.h>
@@ -41,7 +42,8 @@
 #define SWITCH_HOLD_ITERATIONS  12000
 #define SWITCH_PIN              GPIO_PIN_7
 #define SWITCH_PORT             GPIOB
-#define FIRMWARE_VERSION        104
+#define FIRMWARE_VERSION        114
+#define CALIBRATION_SAMPLE_MAX_AGE_MS 500U
 #define MIN_POLL_PERIOD_MS      EXCITATION_PERIOD_MS
 #define MAX_POLL_PERIOD_MS      60000
 #define EEPROM_MEASUREMENT_GUARD_MS 5U
@@ -109,6 +111,22 @@ static uint8_t measurement_fallback_count = 0U;
 static uint8_t capture_coil_fault_active = 0U;
 static uint16_t current_measurement_status = MEASUREMENT_STATUS_VALID;
 
+/* Последнее стабильное значение, опубликованное штатным 10-Гц циклом.
+ * Калибровочные команды не запускают отдельный импульс: они сохраняют именно
+ * этот отфильтрованный результат. Это исключает лишний запуск вне периода
+ * 100 мс и не позволяет записать точку по переходному или звенящему отклику. */
+static uint32_t last_stable_tof_ticks = 0U;
+static uint32_t last_stable_tof_time_ms = 0U;
+static uint8_t last_stable_tof_valid = 0U;
+
+/*
+ * Команды 01/02 и команда 223 завершаются кодом 90 только после
+ * подтвержденной записи требуемой редакции параметров в AT24C64. Пока идет
+ * фоновая запись, адрес 3000 остается 85.
+ */
+static uint8_t command_save_pending = 0U;
+static uint16_t command_save_code = 0U;
+
 /* ==========================================================================
 ПРОТОТИПЫ СТАТИЧЕСКИХ ФУНКЦИЙ
 ========================================================================== */
@@ -120,31 +138,442 @@ static void WaitForNextExcitationSlot(void);
 static LaunchResult_t MeasureSingleLaunch(void);
 static void UpdateCaptureCoilFault(uint8_t fault_active);
 static void AddMeasurementToWindow(uint32_t tof_ticks, uint8_t used_single_pulse);
+static void StartCommandSave(uint16_t command);
+static void ProcessCommandSaveResult(void);
+static float CorrectTofForElectronicsDelay(float raw_tof_us);
+static float DistanceFromRawTofMm(float raw_tof_us);
+static float GetUsableLevelHeightMm(void);
+static uint8_t CalculateWaveSpeedFromThreePoints(float *speed_m_s);
+static float InterpolateCalibratedLevel(float raw_tof_us);
+static uint8_t GetStableCalibrationSample(float *tof_us, float *distance_mm);
 
 /* ==========================================================================
 ФИЛЬТРАЦИЯ И РАСЧЕТЫ
 ========================================================================== */
-static float Calculate_Position(float tof_us)
+/**
+ * @brief Удаляет из сырого времени измерения постоянную задержку электроники.
+ *
+ * Таймер TIM3 считает время от задающего импульса PB5 до цифрового фронта
+ * после всей приемной цепи. Поэтому сырой ToF содержит две составляющие:
+ *
+ *     raw_tof = propagation_tof + electronics_delay.
+ *
+ * Проверка пары t2-t1 выполняется раньше в ISR и этой коррекции не требует:
+ * одинаковая задержка присутствует в обоих фронтах и взаимно сокращается.
+ */
+static float CorrectTofForElectronicsDelay(float raw_tof_us)
 {
-    float h_low   = ModBus_GetParameter_Float(MB_ADDR_CAL_LOW_LVL);
-    float h_high  = ModBus_GetParameter_Float(MB_ADDR_CAL_HIGH_LVL);
-    float C1_mm   = ModBus_GetParameter_Float(MB_ADDR_CAL_C1);
-    float C2_mm   = ModBus_GetParameter_Float(MB_ADDR_CAL_C2);
-    float measured_distance_mm = tof_us * 0.001f * ModBus_GetMaterialWaveSpeed();
+    if (!isfinite(raw_tof_us) || raw_tof_us <= ELECTRONICS_DELAY_US) {
+        return 0.0f;
+    }
 
-    if (C1_mm > 0.0f && C2_mm > 0.0f && C1_mm > C2_mm && h_high > h_low) {
-        float position_m = h_low + (C1_mm - measured_distance_mm) * (h_high - h_low) / (C1_mm - C2_mm);
-        if (position_m < 0.0f) position_m = 0.0f;
-        if (position_m > h_high * 1.1f) position_m = h_high * 1.1f;
-        return position_m * 1000.0f;
+    return raw_tof_us - ELECTRONICS_DELAY_US;
+}
+
+/**
+ * @brief Переводит сырой ToF в физическое расстояние до магнита.
+ *
+ * При единицах м/с и мкс произведение c * t / 1000 дает миллиметры.
+ * Скорость берется из Modbus 2094...2095 и может быть откалибрована без
+ * перекомпиляции. Постоянная задержка электроники удаляется до умножения.
+ */
+static float DistanceFromRawTofMm(float raw_tof_us)
+{
+    float propagation_tof_us = CorrectTofForElectronicsDelay(raw_tof_us);
+
+    if (propagation_tof_us <= 0.0f) {
+        return 0.0f;
+    }
+
+    return propagation_tof_us * 0.001f * ModBus_GetMaterialWaveSpeed();
+}
+
+/**
+ * @brief Возвращает полезную измеряемую высоту уровня от дна.
+ *
+ * Общая длина звукопровода включает верхнюю невалидную зону около
+ * электронной головки. Эта зона не является частью рабочего диапазона:
+ * магнит на её границе соответствует максимальному уровню, а не полной
+ * геометрической длине звукопровода.
+ */
+static float GetUsableLevelHeightMm(void)
+{
+    float waveguide_mm = ModBus_GetWaveguideLength() * 1000.0f;
+
+    if (!isfinite(waveguide_mm) || waveguide_mm <= UPPER_INVALID_ZONE_MM) {
+        return 0.0f;
+    }
+
+    return waveguide_mm - UPPER_INVALID_ZONE_MM;
+}
+
+/**
+ * @brief Рассчитывает фактическую скорость волны по точкам 260/520/780 мм.
+ *
+ * В EEPROM сохраняются только исходные калибровочные времена ToFraw.
+ * Рассчитанная скорость ни в EEPROM, ни в Modbus 2094...2095 не записывается:
+ * функция заново вычисляет её для диагностического вывода USART2.
+ *
+ * Для каждой контрольной высоты известна координата магнита от электроники:
+ *
+ *     distance_i = waveguide_length - level_i.
+ *
+ * Постоянная задержка усилителей присутствует во всех трёх ToFraw одинаково
+ * и поэтому не влияет на наклон зависимости distance(ToF). Скорость находится
+ * методом наименьших квадратов по всем трём точкам, а не по одной паре.
+ */
+static uint8_t CalculateWaveSpeedFromThreePoints(float *speed_m_s)
+{
+    const uint16_t required_bits =
+        SENSOR_CAL_POINT_260_BIT |
+        SENSOR_CAL_POINT_520_BIT |
+        SENSOR_CAL_POINT_780_BIT;
+    uint16_t stored_mask;
+    float tof_us[3];
+    float distance_mm[3];
+    float waveguide_mm;
+    float tof_mean;
+    float distance_mean;
+    float covariance = 0.0f;
+    float variance = 0.0f;
+    float slope_mm_per_us;
+    float calculated_speed_m_s;
+    uint8_t i;
+
+    if (speed_m_s == NULL) {
+        return 0U;
+    }
+
+    stored_mask = ModBus_GetParameter_Int(MB_ADDR_SENSOR_CAL_MASK);
+    if ((stored_mask & SENSOR_CAL_STORAGE_TAG_MASK) != SENSOR_CAL_STORAGE_TAG ||
+        (stored_mask & required_bits) != required_bits) {
+        return 0U;
+    }
+
+    tof_us[0] = ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_260);
+    tof_us[1] = ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_520);
+    tof_us[2] = ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_780);
+    waveguide_mm = ModBus_GetWaveguideLength() * 1000.0f;
+
+    if (!isfinite(waveguide_mm) || waveguide_mm <= SENSOR_CAL_LEVEL_780_MM ||
+        !isfinite(tof_us[0]) || !isfinite(tof_us[1]) ||
+        !isfinite(tof_us[2]) ||
+        !(tof_us[0] > tof_us[1] && tof_us[1] > tof_us[2])) {
+        return 0U;
+    }
+
+    distance_mm[0] = waveguide_mm - SENSOR_CAL_LEVEL_260_MM;
+    distance_mm[1] = waveguide_mm - SENSOR_CAL_LEVEL_520_MM;
+    distance_mm[2] = waveguide_mm - SENSOR_CAL_LEVEL_780_MM;
+
+    tof_mean = (tof_us[0] + tof_us[1] + tof_us[2]) / 3.0f;
+    distance_mean =
+        (distance_mm[0] + distance_mm[1] + distance_mm[2]) / 3.0f;
+
+    for (i = 0U; i < 3U; ++i) {
+        float dt = tof_us[i] - tof_mean;
+        float dd = distance_mm[i] - distance_mean;
+        covariance += dt * dd;
+        variance += dt * dt;
+    }
+
+    if (!isfinite(covariance) || !isfinite(variance) || variance <= 0.000001f) {
+        return 0U;
+    }
+
+    slope_mm_per_us = covariance / variance;
+    calculated_speed_m_s = slope_mm_per_us * 1000.0f;
+
+    /* Широкие границы защищают USART от NaN/мусора, не навязывая марку
+     * сплава. Реальное диагностическое значение ожидается около 2...4 км/с. */
+    if (!isfinite(calculated_speed_m_s) ||
+        calculated_speed_m_s < 500.0f ||
+        calculated_speed_m_s > 10000.0f) {
+        return 0U;
+    }
+
+    *speed_m_s = calculated_speed_m_s;
+    return 1U;
+}
+
+/**
+ * @brief Рассчитывает уровень по двум пределам и трём промежуточным точкам.
+ *
+ * Опорные точки:
+ *   команда 01 -> 0 % (h_low);
+ *   команда 11 -> 260 мм;
+ *   команда 12 -> 520 мм;
+ *   команда 13 -> 780 мм;
+ *   команда 02 -> 100 % (h_high, но не выше полезной длины звукопровода).
+ *
+ * Между соседними точками выполняется кусочно-линейная интерполяция по
+ * сырому ToFraw. За пределами 0 % и 100 % результат насыщается, а не
+ * экстраполируется. Благодаря этому команда 02 действительно фиксирует
+ * верхний предел и не допускает продолжения шкалы за 100 %.
+ *
+ * Таблица принимается только при полной маске и строгой монотонности ToFraw.
+ * Если около верхней зоны измеритель переключился на другой импульс и ToFraw
+ * начал расти, функция возвращает -1: такое неоднозначное измерение нельзя
+ * исправить одной статической таблицей.
+ */
+static float InterpolateCalibratedLevel(float raw_tof_us)
+{
+    uint16_t stored_mask = ModBus_GetParameter_Int(MB_ADDR_SENSOR_CAL_MASK);
+    float tof_low_us;
+    float tof_260_us;
+    float tof_520_us;
+    float tof_780_us;
+    float tof_high_us;
+    float level_low_mm;
+    float level_high_mm;
+    float usable_height_mm;
+    float x0;
+    float x1;
+    float y0;
+    float y1;
+
+    if ((stored_mask & SENSOR_CAL_STORAGE_TAG_MASK) != SENSOR_CAL_STORAGE_TAG ||
+        (stored_mask & SENSOR_CAL_FULL_MASK) != SENSOR_CAL_FULL_MASK) {
+        return -1.0f;
+    }
+
+    tof_low_us = ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_LOW_TOF);
+    tof_260_us = ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_260);
+    tof_520_us = ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_520);
+    tof_780_us = ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_780);
+    tof_high_us = ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_HIGH_TOF);
+
+    level_low_mm =
+        ModBus_GetParameter_Float(MB_ADDR_CAL_LOW_LVL) * 1000.0f;
+    level_high_mm =
+        ModBus_GetParameter_Float(MB_ADDR_CAL_HIGH_LVL) * 1000.0f;
+    usable_height_mm = GetUsableLevelHeightMm();
+
+    if (!isfinite(level_low_mm) || level_low_mm < 0.0f) {
+        level_low_mm = 0.0f;
+    }
+    if (!isfinite(level_high_mm) || level_high_mm <= level_low_mm ||
+        level_high_mm > usable_height_mm) {
+        level_high_mm = usable_height_mm;
+    }
+
+    if (!isfinite(raw_tof_us) || raw_tof_us <= 0.0f ||
+        !isfinite(tof_low_us) || !isfinite(tof_260_us) ||
+        !isfinite(tof_520_us) || !isfinite(tof_780_us) ||
+        !isfinite(tof_high_us) ||
+        !(tof_low_us > tof_260_us &&
+          tof_260_us > tof_520_us &&
+          tof_520_us > tof_780_us &&
+          tof_780_us > tof_high_us) ||
+        !(level_low_mm < SENSOR_CAL_LEVEL_260_MM &&
+          SENSOR_CAL_LEVEL_260_MM < SENSOR_CAL_LEVEL_520_MM &&
+          SENSOR_CAL_LEVEL_520_MM < SENSOR_CAL_LEVEL_780_MM &&
+          SENSOR_CAL_LEVEL_780_MM < level_high_mm)) {
+        return -1.0f;
+    }
+
+    if (raw_tof_us >= tof_low_us) {
+        return level_low_mm;
+    }
+    if (raw_tof_us <= tof_high_us) {
+        return level_high_mm;
+    }
+
+    if (raw_tof_us >= tof_260_us) {
+        x0 = tof_low_us;
+        x1 = tof_260_us;
+        y0 = level_low_mm;
+        y1 = SENSOR_CAL_LEVEL_260_MM;
+    } else if (raw_tof_us >= tof_520_us) {
+        x0 = tof_260_us;
+        x1 = tof_520_us;
+        y0 = SENSOR_CAL_LEVEL_260_MM;
+        y1 = SENSOR_CAL_LEVEL_520_MM;
+    } else if (raw_tof_us >= tof_780_us) {
+        x0 = tof_520_us;
+        x1 = tof_780_us;
+        y0 = SENSOR_CAL_LEVEL_520_MM;
+        y1 = SENSOR_CAL_LEVEL_780_MM;
     } else {
-        return measured_distance_mm;
+        x0 = tof_780_us;
+        x1 = tof_high_us;
+        y0 = SENSOR_CAL_LEVEL_780_MM;
+        y1 = level_high_mm;
+    }
+
+    if (x0 <= x1) {
+        return -1.0f;
+    }
+
+    return y0 + (x0 - raw_tof_us) * (y1 - y0) / (x0 - x1);
+}
+
+/**
+ * @brief Возвращает последнее стабильное измерение для записи точки калибровки.
+ *
+ * Калибровочная команда не должна сама вызывать measure_time_of_flight():
+ * такой вызов формирует дополнительный задающий импульс вне штатного периода
+ * 100 мс и может сохранить переходный отклик. Здесь используется ровно тот
+ * отфильтрованный ToF, по которому уже рассчитаны LEVEL и DistTop в консоли.
+ *
+ * Значение считается пригодным только пока оно свежее. Если после перемещения
+ * магнита статистическое окно ещё не стабилизировалось, новые валидные данные
+ * не публикуются, возраст превышает предел и команда завершается ошибкой.
+ */
+static uint8_t GetStableCalibrationSample(float *tof_us, float *distance_mm)
+{
+    uint32_t age_ms;
+    float local_tof_us;
+    float local_distance_mm;
+
+    if (tof_us == NULL || distance_mm == NULL || last_stable_tof_valid == 0U) {
+        return 0U;
+    }
+
+    age_ms = (uint32_t)(HAL_GetTick() - last_stable_tof_time_ms);
+    if (age_ms > CALIBRATION_SAMPLE_MAX_AGE_MS || last_stable_tof_ticks == 0U) {
+        return 0U;
+    }
+
+    local_tof_us = (float)last_stable_tof_ticks * TOF_TICK_US;
+    local_distance_mm = DistanceFromRawTofMm(local_tof_us);
+    if (!isfinite(local_tof_us) || !isfinite(local_distance_mm) ||
+        local_tof_us <= 0.0f || local_distance_mm <= 0.0f) {
+        return 0U;
+    }
+
+    *tof_us = local_tof_us;
+    *distance_mm = local_distance_mm;
+    return 1U;
+}
+
+/**
+ * @brief Переводит время пролёта в уровень жидкости, отсчитанный от дна.
+ *
+ * Приоритет расчета:
+ * 1. Полная таблица ToFraw: 0 %, 260, 520, 780 мм и 100 %.
+ * 2. Штатная двухточечная калибровка 0%/100% по C1/C2.
+ * 3. Геометрический расчёт по скорости и длине звукопровода.
+ */
+static float Calculate_Position(float raw_tof_us)
+{
+    float h_low_m = ModBus_GetParameter_Float(MB_ADDR_CAL_LOW_LVL);
+    float h_high_m = ModBus_GetParameter_Float(MB_ADDR_CAL_HIGH_LVL);
+    float C1_mm = ModBus_GetParameter_Float(MB_ADDR_CAL_C1);
+    float C2_mm = ModBus_GetParameter_Float(MB_ADDR_CAL_C2);
+    float measured_distance_mm = DistanceFromRawTofMm(raw_tof_us);
+    float usable_height_mm = GetUsableLevelHeightMm();
+    float configured_high_mm = h_high_m * 1000.0f;
+    float effective_high_mm;
+    float level_mm;
+
+    effective_high_mm = configured_high_mm;
+    if (!isfinite(effective_high_mm) || effective_high_mm <= 0.0f ||
+        effective_high_mm > usable_height_mm) {
+        effective_high_mm = usable_height_mm;
+    }
+
+    level_mm = InterpolateCalibratedLevel(raw_tof_us);
+    if (level_mm >= 0.0f) {
+        if (level_mm > usable_height_mm) {
+            level_mm = usable_height_mm;
+        }
+        return level_mm;
+    }
+
+    if (C1_mm > 0.0f && C2_mm > 0.0f && C1_mm > C2_mm &&
+        effective_high_mm > h_low_m * 1000.0f) {
+        level_mm =
+            h_low_m * 1000.0f +
+            (C1_mm - measured_distance_mm) *
+            (effective_high_mm - h_low_m * 1000.0f) /
+            (C1_mm - C2_mm);
+
+        if (level_mm < h_low_m * 1000.0f) {
+            level_mm = h_low_m * 1000.0f;
+        }
+        if (level_mm > effective_high_mm) {
+            level_mm = effective_high_mm;
+        }
+        return level_mm;
+    }
+
+    level_mm =
+        ModBus_GetWaveguideLength() * 1000.0f -
+        measured_distance_mm;
+
+    if (level_mm < 0.0f) {
+        level_mm = 0.0f;
+    }
+    if (level_mm > usable_height_mm) {
+        level_mm = usable_height_mm;
+    }
+
+    return level_mm;
+}
+
+
+/**
+ * @brief Запускает обязательное сохранение текущей команды.
+ *
+ * Для 01/02 и 11/12/13 новые точки калибровки к этому моменту уже записаны в RAM и помечены как
+ * persistent. Для 223 сохраняется текущая пользовательская конфигурация.
+ * Регистр 3000 остается равным 85 до подтверждения записи AT24C64.
+ */
+static void StartCommandSave(uint16_t command)
+{
+    command_save_pending = 1U;
+    command_save_code = command;
+    ModBus_ForceSaveToEEPROM();
+}
+
+/**
+ * @brief Завершает команду по фактическому результату EEPROM.
+ *
+ * COMPLETE -> 3000=90: новые коэффициенты переживут перезапуск питания.
+ * ERROR    -> 3000=0: измерение прошло, но калибровку нельзя считать
+ *             завершенной, потому что EEPROM не подтвердила запись.
+ * PENDING/BUSY -> 3000 остается 85.
+ */
+static void ProcessCommandSaveResult(void)
+{
+    ModBus_StorageSaveStatus_t state;
+
+    if (command_save_pending == 0U) {
+        return;
+    }
+
+    state = ModBus_GetStorageSaveStatus();
+
+    if (state == MODBUS_STORAGE_SAVE_COMPLETE) {
+        ModBus_SetParameter_Int(MB_ADDR_COMMAND, 90U);
+        USART2_BufInit();
+        USART2_BufPrint("[CAL] Команда ");
+        USART2_BufPrintInt(command_save_code);
+        USART2_BufPrint(": данные сохранены в EEPROM, статус 90\r\n");
+        USART2_BufFlush();
+
+        command_save_pending = 0U;
+        command_save_code = 0U;
+        ModBus_ClearStorageSaveStatus();
+    } else if (state == MODBUS_STORAGE_SAVE_ERROR) {
+        ModBus_SetParameter_Int(MB_ADDR_COMMAND, 0U);
+        USART2_BufInit();
+        USART2_BufPrint("[CAL] Команда ");
+        USART2_BufPrintInt(command_save_code);
+        USART2_BufPrint(": ОШИБКА сохранения EEPROM, статус 0\r\n");
+        USART2_BufFlush();
+
+        command_save_pending = 0U;
+        command_save_code = 0U;
+        ModBus_ClearStorageSaveStatus();
     }
 }
 
 void Process_Calibration_Command(uint16_t cmd)
 {
     uint8_t command_succeeded = 1U;
+    uint8_t requires_eeprom_commit = 0U;
 
     if (cmd >= 300U && cmd <= 302U) {
         float param = ModBus_GetParameter_Float(MB_ADDR_COMMAND_PARAM);
@@ -164,55 +593,182 @@ void Process_Calibration_Command(uint16_t cmd)
             break;
         }
         case 2: {
-            uint32_t measurement = measure_time_of_flight();
-            if (measurement > 0U && !tof_timeout) {
-                float tof_us = (float)measurement * TOF_TICK_US;
-                float distance_mm = tof_us * 0.001f *
-                    ModBus_GetMaterialWaveSpeed();
+            float tof_us;
+            float distance_mm;
+            if (GetStableCalibrationSample(&tof_us, &distance_mm) != 0U) {
+                uint16_t mask =
+                    ModBus_GetParameter_Int(MB_ADDR_SENSOR_CAL_MASK);
                 float h_high =
                     ModBus_GetParameter_Float(MB_ADDR_CAL_HIGH_LVL);
-                ModBus_SetParameter_Float(MB_ADDR_CAL_C2, distance_mm);
-                USART2_Print("[CAL] Команда 02: ВЕРХНЯЯ точка (полный бак, 100%)\r\n");
-                USART2_BufInit();
-                USART2_BufPrint("      C2 = ");
-                USART2_BufPrintFloat(distance_mm);
-                USART2_BufPrint(" мм (ToF = ");
-                USART2_BufPrintFloat(tof_us);
-                USART2_BufPrint(" мкс, h_high = ");
-                USART2_BufPrintFloat(h_high * 1000.0f);
-                USART2_BufPrint(" мм)\r\n");
-                USART2_BufFlush();
+                float tof_780 =
+                    ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_780);
+
+                if ((mask & SENSOR_CAL_STORAGE_TAG_MASK) != SENSOR_CAL_STORAGE_TAG ||
+                    (mask & (SENSOR_CAL_POINT_LOW_BIT |
+                             SENSOR_CAL_POINT_260_BIT |
+                             SENSOR_CAL_POINT_520_BIT |
+                             SENSOR_CAL_POINT_780_BIT)) !=
+                            (SENSOR_CAL_POINT_LOW_BIT |
+                             SENSOR_CAL_POINT_260_BIT |
+                             SENSOR_CAL_POINT_520_BIT |
+                             SENSOR_CAL_POINT_780_BIT)) {
+                    command_succeeded = 0U;
+                    USART2_Print("[CAL] Команда 02: сначала выполните 01, 11, 12 и 13\r\n");
+                } else if (!isfinite(tof_780) || tof_us >= tof_780) {
+                    command_succeeded = 0U;
+                    USART2_BufInit();
+                    USART2_BufPrint("[CAL] Команда 02: ОШИБКА монотонности, ToF100=");
+                    USART2_BufPrintFloat(tof_us);
+                    USART2_BufPrint(" мкс должен быть меньше ToF780=");
+                    USART2_BufPrintFloat(tof_780);
+                    USART2_BufPrint(" мкс. Возможен переход на ложный импульс в верхней зоне.\r\n");
+                    USART2_BufFlush();
+                } else {
+                    ModBus_SetParameter_Float(MB_ADDR_CAL_C2, distance_mm);
+                    ModBus_SetParameter_Float(MB_ADDR_SENSOR_CAL_HIGH_TOF,
+                                              tof_us);
+                    ModBus_SetParameter_Int(
+                        MB_ADDR_SENSOR_CAL_MASK,
+                        (uint16_t)(mask | SENSOR_CAL_POINT_HIGH_BIT));
+                    requires_eeprom_commit = 1U;
+
+                    USART2_BufInit();
+                    USART2_BufPrint("[CAL] Команда 02: сохранена точка 100 %, ToFraw=");
+                    USART2_BufPrintFloat(tof_us);
+                    USART2_BufPrint(" мкс, h_high=");
+                    USART2_BufPrintFloat(h_high * 1000.0f);
+                    USART2_BufPrint(" мм, CalMask=31\r\n");
+                    USART2_BufFlush();
+                }
             } else {
                 command_succeeded = 0U;
-                USART2_Print("[CAL] Команда 02: ОШИБКА измерения!\r\n");
+                USART2_Print("[CAL] Команда 02: нет свежего стабильного измерения; подождите стабилизации\r\n");
             }
             break;
         }
         case 1: {
-            uint32_t measurement = measure_time_of_flight();
-            if (measurement > 0U && !tof_timeout) {
-                float tof_us = (float)measurement * TOF_TICK_US;
-                float distance_mm = tof_us * 0.001f *
-                    ModBus_GetMaterialWaveSpeed();
-                float h_low =
-                    ModBus_GetParameter_Float(MB_ADDR_CAL_LOW_LVL);
+            float tof_us;
+            float distance_mm;
+            if (GetStableCalibrationSample(&tof_us, &distance_mm) != 0U) {
                 ModBus_SetParameter_Float(MB_ADDR_CAL_C1, distance_mm);
-                USART2_Print("[CAL] Команда 01: НИЖНЯЯ точка (пустой бак, 0%)\r\n");
+                ModBus_SetParameter_Float(MB_ADDR_SENSOR_CAL_LOW_TOF,
+                                          tof_us);
+
+                /* Команда 01 начинает новый полный цикл калибровки.
+                 * Старые промежуточные и верхняя точки остаются в EEPROM,
+                 * но становятся невалидными до повторного набора маски. */
+                ModBus_SetParameter_Int(
+                    MB_ADDR_SENSOR_CAL_MASK,
+                    (uint16_t)(SENSOR_CAL_STORAGE_TAG |
+                               SENSOR_CAL_POINT_LOW_BIT));
+                requires_eeprom_commit = 1U;
+
                 USART2_BufInit();
-                USART2_BufPrint("      C1 = ");
-                USART2_BufPrintFloat(distance_mm);
-                USART2_BufPrint(" мм (ToF = ");
+                USART2_BufPrint("[CAL] Команда 01: сохранена точка 0 %, ToFraw=");
                 USART2_BufPrintFloat(tof_us);
-                USART2_BufPrint(" мкс, h_low = ");
-                USART2_BufPrintFloat(h_low * 1000.0f);
+                USART2_BufPrint(" мкс. Новый цикл, CalMask=1\r\n");
+                USART2_BufFlush();
+            } else {
+                command_succeeded = 0U;
+                USART2_Print("[CAL] Команда 01: нет свежего стабильного измерения; подождите стабилизации\r\n");
+            }
+            break;
+        }
+        case 11:
+        case 12:
+        case 13: {
+            float tof_us;
+            float distance_mm;
+            if (GetStableCalibrationSample(&tof_us, &distance_mm) != 0U) {
+                uint16_t mask = ModBus_GetParameter_Int(MB_ADDR_SENSOR_CAL_MASK);
+                uint16_t address;
+                uint16_t bit;
+                float reference_level_mm;
+
+                float previous_tof_us;
+                uint16_t required_previous_bit;
+
+                if ((mask & SENSOR_CAL_STORAGE_TAG_MASK) != SENSOR_CAL_STORAGE_TAG) {
+                    command_succeeded = 0U;
+                    USART2_Print("[CAL] Сначала выполните команду 01\r\n");
+                    break;
+                }
+
+                if (cmd == 11U) {
+                    address = MB_ADDR_SENSOR_CAL_260;
+                    bit = SENSOR_CAL_POINT_260_BIT;
+                    reference_level_mm = SENSOR_CAL_LEVEL_260_MM;
+                    previous_tof_us =
+                        ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_LOW_TOF);
+                    required_previous_bit = SENSOR_CAL_POINT_LOW_BIT;
+                } else if (cmd == 12U) {
+                    address = MB_ADDR_SENSOR_CAL_520;
+                    bit = SENSOR_CAL_POINT_520_BIT;
+                    reference_level_mm = SENSOR_CAL_LEVEL_520_MM;
+                    previous_tof_us =
+                        ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_260);
+                    required_previous_bit = SENSOR_CAL_POINT_260_BIT;
+                } else {
+                    address = MB_ADDR_SENSOR_CAL_780;
+                    bit = SENSOR_CAL_POINT_780_BIT;
+                    reference_level_mm = SENSOR_CAL_LEVEL_780_MM;
+                    previous_tof_us =
+                        ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_520);
+                    required_previous_bit = SENSOR_CAL_POINT_520_BIT;
+                }
+
+                if ((mask & required_previous_bit) == 0U) {
+                    command_succeeded = 0U;
+                    USART2_Print("[CAL] Нарушен порядок команд 01 -> 11 -> 12 -> 13 -> 02\r\n");
+                    break;
+                }
+                if (!isfinite(previous_tof_us) || tof_us >= previous_tof_us) {
+                    command_succeeded = 0U;
+                    USART2_BufInit();
+                    USART2_BufPrint("[CAL] ОШИБКА монотонности: новый ToFraw=");
+                    USART2_BufPrintFloat(tof_us);
+                    USART2_BufPrint(" мкс должен быть меньше предыдущего ");
+                    USART2_BufPrintFloat(previous_tof_us);
+                    USART2_BufPrint(" мкс\r\n");
+                    USART2_BufFlush();
+                    break;
+                }
+
+                /* В EEPROM сохраняется именно ToFraw. Значение distance_mm
+                 * выводится только как диагностика старой модели скорости. */
+                ModBus_SetParameter_Float(address, tof_us);
+                ModBus_SetParameter_Int(MB_ADDR_SENSOR_CAL_MASK,
+                                        (uint16_t)(mask | bit));
+                requires_eeprom_commit = 1U;
+
+                USART2_BufInit();
+                USART2_BufPrint("[CAL] Команда ");
+                USART2_BufPrintInt(cmd);
+                USART2_BufPrint(": уровень ");
+                USART2_BufPrintFloat(reference_level_mm);
+                USART2_BufPrint(" мм, сохранён ToFraw = ");
+                USART2_BufPrintFloat(tof_us);
+                USART2_BufPrint(" мкс (DistRaw = ");
+                USART2_BufPrintFloat(distance_mm);
                 USART2_BufPrint(" мм)\r\n");
                 USART2_BufFlush();
             } else {
                 command_succeeded = 0U;
-                USART2_Print("[CAL] Команда 01: ОШИБКА измерения!\r\n");
+                USART2_Print("[CAL] Промежуточная точка: нет свежего стабильного измерения; подождите стабилизации\r\n");
             }
             break;
         }
+
+        case 223:
+            /*
+             * Таблица Е.10: сохранить пользовательские настройки.
+             * Здесь не выполняется синхронная запись: адрес 3000 остается 85,
+             * а итог 90/0 формируется после ответа фонового драйвера AT24C64.
+             */
+            requires_eeprom_commit = 1U;
+            USART2_Print("[CFG] Команда 223: сохранение пользовательских настроек\r\n");
+            break;
+
         case 4:
             USART2_Print("[CAL] Команда 04: Разность высот магнитов\r\n");
             break;
@@ -221,9 +777,20 @@ void Process_Calibration_Command(uint16_t cmd)
             break;
     }
 
-    /* Таблица Е.4: 90 = команда выполнена, 0 = отказ в выполнении. */
-    ModBus_SetParameter_Int(MB_ADDR_COMMAND,
-                            command_succeeded ? 90U : 0U);
+    /*
+     * Для 01/11/12/13/02 и 223 код 90 нельзя выдавать до подтверждения EEPROM:
+     * питание может исчезнуть во время фоновой постраничной записи. Поэтому
+     * команда остается в состоянии 85 и завершается только в
+     * ProcessCommandSaveResult().
+     */
+    if (command_succeeded == 0U) {
+        ModBus_SetParameter_Int(MB_ADDR_COMMAND, 0U);
+    } else if (requires_eeprom_commit != 0U) {
+        ModBus_SetParameter_Int(MB_ADDR_COMMAND, 85U);
+        StartCommandSave(cmd);
+    } else {
+        ModBus_SetParameter_Int(MB_ADDR_COMMAND, 90U);
+    }
 }
 
 /* ==========================================================================
@@ -272,10 +839,11 @@ static uint32_t GetMeasurementTimeoutMs(void)
     float expected_ms;
     uint32_t timeout_ms;
 
-    if (!isfinite(length_m) || length_m <= 0.0f) length_m = 1.2f;
-    if (!isfinite(speed_m_s) || speed_m_s < 100.0f) speed_m_s = 3370.0f;
+    if (!isfinite(length_m) || length_m <= 0.0f) length_m = MODBUS_DEFAULT_WAVEGUIDE_LENGTH_M;
+    if (!isfinite(speed_m_s) || speed_m_s < 100.0f) speed_m_s = MODBUS_DEFAULT_MATERIAL_WAVE_SPEED_MPS;
 
-    expected_ms = (length_m / speed_m_s) * 1000.0f;
+    expected_ms = (length_m / speed_m_s) * 1000.0f +
+                  ELECTRONICS_DELAY_US / 1000.0f;
     timeout_ms = (uint32_t)ceilf(expected_ms + MEAS_TIMEOUT_MARGIN_MS);
 
     if (timeout_ms < MEAS_TIMEOUT_MIN_MS) timeout_ms = MEAS_TIMEOUT_MIN_MS;
@@ -286,6 +854,35 @@ static uint32_t GetMeasurementTimeoutMs(void)
 /* ==========================================================================
 ОБРАБОТКА РЕЗУЛЬТАТОВ ИЗМЕРЕНИЯ
 ========================================================================== */
+/**
+ * @brief Читает float32 непосредственно из быстрого Modbus-снимка.
+ *
+ * Снимок 1000..1007 хранит слова в документированном порядке ПМП-201Е:
+ * младшее слово по базовому адресу, старшее — по следующему. Отладочная
+ * консоль обязана показывать именно тот уровень и процент, которые реально
+ * читает внешняя утилита, поэтому для печати выполняется обратная сборка
+ * float32 из опубликованных слов, а не используется промежуточная локальная
+ * переменная расчёта.
+ *
+ * @param base_address Базовый адрес float32 в диапазоне 1000..1007.
+ * @param value        Указатель для результата.
+ * @return true, если оба слова атомарно прочитаны из снимка.
+ */
+static bool ReadPublishedFloat32(uint16_t base_address, float *value)
+{
+    uint16_t words[2];
+    uint32_t raw;
+
+    if (value == NULL ||
+        !MeasurementSnapshot_ReadRange(base_address, 2U, words)) {
+        return false;
+    }
+
+    raw = (uint32_t)words[0] | ((uint32_t)words[1] << 16);
+    memcpy(value, &raw, sizeof(raw));
+    return isfinite(*value);
+}
+
 void Process_Measurement_Results(float tof_us,
                                  float position_mm,
                                  uint8_t signal_was_captured)
@@ -300,6 +897,16 @@ void Process_Measurement_Results(float tof_us,
     float tank_geom_raw;
     float volume_m3 = 0.0f;
     float wave_speed;
+    float calculated_wave_speed = 0.0f;
+    uint8_t calculated_wave_speed_valid;
+    float corrected_tof_us;
+    float published_level_mm;
+    float published_percent;
+    float distance_from_top_raw_mm;
+    float distance_from_top_cal_mm;
+    float usable_height_mm;
+    uint16_t sensor_cal_mask;
+    uint8_t sensor_cal_active;
     GradTankType_t tank_type = GRAD_TYPE_VERTICAL;
 
     if (!signal_was_captured || !isfinite(tof_us) || tof_us <= 0.0f) {
@@ -308,21 +915,32 @@ void Process_Measurement_Results(float tof_us,
 
     waveguide_len_m = ModBus_GetWaveguideLength();
     waveguide_len_mm = waveguide_len_m * 1000.0f;
+    usable_height_mm = GetUsableLevelHeightMm();
     wave_speed = ModBus_GetMaterialWaveSpeed();
+    calculated_wave_speed_valid =
+        CalculateWaveSpeedFromThreePoints(&calculated_wave_speed);
+    corrected_tof_us = CorrectTofForElectronicsDelay(tof_us);
+    distance_from_top_raw_mm = DistanceFromRawTofMm(tof_us);
     cal_low_mm = ModBus_GetParameter_Float(MB_ADDR_CAL_LOW_LVL) * 1000.0f;
     cal_high_mm = ModBus_GetParameter_Float(MB_ADDR_CAL_HIGH_LVL) * 1000.0f;
+    if (!isfinite(cal_high_mm) || cal_high_mm > usable_height_mm) {
+        cal_high_mm = usable_height_mm;
+    }
 
     if (!isfinite(position_mm) || position_mm < 0.0f) position_mm = 0.0f;
     if (position_mm > waveguide_len_mm) position_mm = waveguide_len_mm;
 
+    /* position_mm уже является уровнем, отсчитанным от дна. Поэтому
+     * процент заполнения возрастает вместе с position_mm. Повторно
+     * инвертировать значение нельзя: это и было причиной показания около
+     * 97 % при фактически почти пустом метровом звукопроводе. */
     if (isfinite(cal_low_mm) && isfinite(cal_high_mm) &&
         cal_high_mm > cal_low_mm) {
         level_percent =
-            ((cal_high_mm - position_mm) /
+            ((position_mm - cal_low_mm) /
              (cal_high_mm - cal_low_mm)) * 100.0f;
-    } else if (waveguide_len_mm > 0.0f) {
-        level_percent =
-            ((waveguide_len_mm - position_mm) / waveguide_len_mm) * 100.0f;
+    } else if (usable_height_mm > 0.0f) {
+        level_percent = position_mm / usable_height_mm * 100.0f;
     }
 
     if (level_percent < 0.0f) level_percent = 0.0f;
@@ -355,6 +973,27 @@ void Process_Measurement_Results(float tof_us,
                                    volume_m3,
                                    current_measurement_status);
 
+    /* Консоль и внешняя утилита должны показывать один и тот же снимок.
+     * Обычно прочитанные значения совпадают с position_mm/level_percent.
+     * Если снимок временно недоступен, используем локальные значения как
+     * безопасный резерв, не влияющий на Modbus и измерительный расчёт. */
+    published_level_mm = position_mm;
+    published_percent = level_percent;
+    (void)ReadPublishedFloat32(MB_ADDR_LEVEL, &published_level_mm);
+    (void)ReadPublishedFloat32(MB_ADDR_PERCENT, &published_percent);
+
+    /* DistTopCal — удобная для линейки координата от электроники, полученная
+     * из уже откалиброванного уровня. DistRaw оставлен отдельно для оценки
+     * исходной модели скорости и задержки электронного тракта. */
+    distance_from_top_cal_mm = waveguide_len_mm - published_level_mm;
+    if (distance_from_top_cal_mm < 0.0f) distance_from_top_cal_mm = 0.0f;
+    if (distance_from_top_cal_mm > waveguide_len_mm) {
+        distance_from_top_cal_mm = waveguide_len_mm;
+    }
+    sensor_cal_mask = ModBus_GetParameter_Int(MB_ADDR_SENSOR_CAL_MASK);
+    sensor_cal_active =
+        (InterpolateCalibratedLevel(tof_us) >= 0.0f) ? 1U : 0U;
+
     ModBus_SetParameter_Int(MB_ADDR_LEVEL_INT,
                             (uint16_t)(int16_t)position_mm);
     ModBus_SetParameter_Int(MB_ADDR_TEMP_INT,
@@ -372,14 +1011,30 @@ void Process_Measurement_Results(float tof_us,
     if (!ModBus_CommunicationIsBusy()) {
         USART2_BufInit();
         USART2_BufPrint("[LEVEL] ");
-        USART2_BufPrintFloat(position_mm);
+        USART2_BufPrintFloat(published_level_mm);
         USART2_BufPrint(" mm | ");
-        USART2_BufPrintFloat(level_percent);
-        USART2_BufPrint(" % | ToF=");
+        USART2_BufPrintFloat(published_percent);
+        USART2_BufPrint(" % | DistTopCal=");
+        USART2_BufPrintFloat(distance_from_top_cal_mm);
+        USART2_BufPrint(" mm | DistRaw=");
+        USART2_BufPrintFloat(distance_from_top_raw_mm);
+        USART2_BufPrint(" mm | CalMask=");
+        USART2_BufPrintInt((uint16_t)(sensor_cal_mask & SENSOR_CAL_FULL_MASK));
+        USART2_BufPrint(sensor_cal_active ? " CAL=5P" : " CAL=FALLBACK");
+        USART2_BufPrint(" | ToFraw=");
         USART2_BufPrintFloat(tof_us);
+        USART2_BufPrint(" us | ToF=");
+        USART2_BufPrintFloat(corrected_tof_us);
         USART2_BufPrint(" us | T=");
         USART2_BufPrintFloat(current_temperature);
-        USART2_BufPrint(" C | c=");
+        USART2_BufPrint(" C | cCalc3P=");
+        if (calculated_wave_speed_valid != 0U) {
+            USART2_BufPrintFloat(calculated_wave_speed);
+            USART2_BufPrint(" m/s");
+        } else {
+            USART2_BufPrint("N/A");
+        }
+        USART2_BufPrint(" | cCfg=");
         USART2_BufPrintFloat(wave_speed);
         USART2_BufPrint(" m/s");
         if (capture_coil_fault_active != 0U) {
@@ -473,16 +1128,23 @@ int main(void)
     USART2_BufPrintFloat(ModBus_GetMaterialWaveSpeed());
     USART2_BufPrint(" м/с (регистры 2094-2095)\r\n");
 
-    float C1 = ModBus_GetParameter_Float(MB_ADDR_CAL_C1);
-    float C2 = ModBus_GetParameter_Float(MB_ADDR_CAL_C2);
-    if (C1 > 0.0f && C2 > 0.0f && C1 > C2) {
-        USART2_BufPrint("[CAL] Калибровка найдена: C1=");
-        USART2_BufPrintFloat(C1);
-        USART2_BufPrint(" мм, C2=");
-        USART2_BufPrintFloat(C2);
-        USART2_BufPrint(" мм\r\n");
-    } else {
-        USART2_BufPrint("[CAL] Калибровка НЕ найдена (используется скорость звука)\r\n");
+    {
+        uint16_t cal_mask = ModBus_GetParameter_Int(MB_ADDR_SENSOR_CAL_MASK);
+        float C1 = ModBus_GetParameter_Float(MB_ADDR_CAL_C1);
+        float C2 = ModBus_GetParameter_Float(MB_ADDR_CAL_C2);
+
+        if ((cal_mask & SENSOR_CAL_STORAGE_TAG_MASK) == SENSOR_CAL_STORAGE_TAG &&
+            (cal_mask & SENSOR_CAL_FULL_MASK) == SENSOR_CAL_FULL_MASK) {
+            USART2_BufPrint("[CAL] Активна калибровка 5P по ToFraw: 0%/260/520/780/100%\r\n");
+        } else if (C1 > 0.0f && C2 > 0.0f && C1 > C2) {
+            USART2_BufPrint("[CAL] Активна резервная калибровка 0/100%: C1=");
+            USART2_BufPrintFloat(C1);
+            USART2_BufPrint(" мм, C2=");
+            USART2_BufPrintFloat(C2);
+            USART2_BufPrint(" мм\r\n");
+        } else {
+            USART2_BufPrint("[CAL] Калибровка не завершена: используется расчёт по скорости\r\n");
+        }
     }
     USART2_BufFlush();
 
@@ -504,6 +1166,11 @@ int main(void)
 
         /* Modbus-кадры обрабатываются быстро; EEPROM здесь не пишется. */
         ModBus_Process();
+
+        /* Проверяем обязательную запись 01/02/223. Функция не блокирует
+         * цикл и только переносит результат EEPROM в адрес 3000. */
+        ProcessCommandSaveResult();
+
         USART2_TxProcess();
         now = HAL_GetTick();
 
@@ -529,7 +1196,8 @@ int main(void)
         {
             uint16_t cmd = ModBus_GetParameter_Int(MB_ADDR_COMMAND);
             /* 0/85/90/99 являются кодами результата, а не номерами команд. */
-            if (cmd != 0U && cmd != 85U && cmd != 90U && cmd != 99U) {
+            if (command_save_pending == 0U &&
+                cmd != 0U && cmd != 85U && cmd != 90U && cmd != 99U) {
                 USART2_Print("[CAL] Получена команда: ");
                 USART2_PrintInt(cmd);
                 USART2_Print("\r\n");
@@ -557,6 +1225,14 @@ int main(void)
                  * при первоначальном заполнении возвращается текущий t1.
                  * Дополнительный EMA намеренно не применяется. */
                 raw_tof_us = (float)measurement * TOF_TICK_US;
+
+                /* Запоминаем именно стабильный результат штатного цикла.
+                 * Команды 01/02/11/12/13 сохранят этот же ToF без отдельного
+                 * импульса и без расхождения с отображаемым значением. */
+                last_stable_tof_ticks = measurement;
+                last_stable_tof_time_ms = HAL_GetTick();
+                last_stable_tof_valid = 1U;
+
                 raw_position_mm = Calculate_Position(raw_tof_us);
                 position_mm = raw_position_mm;
 
@@ -598,12 +1274,25 @@ int main(void)
             (elapsed_since_measure < current_poll_period_ms) ?
             (current_poll_period_ms - elapsed_since_measure) : 0U;
 
-        /* EEPROM — только когда нет активного Modbus-кадра, измерения и
-         * незавершенного отладочного вывода. Она никогда не блокирует захват. */
-        allow_storage = !measurement_processed &&
-                        !ModBus_CommunicationIsBusy() &&
-                        USART2_TxIsIdle() &&
-                        time_to_next_measure > EEPROM_MEASUREMENT_GUARD_MS;
+        /*
+         * EEPROM запускается только без активного Modbus-кадра и вдали от
+         * следующего 10-Гц измерения. Обычная отложенная запись дополнительно
+         * ждет освобождения USART2. Для обязательной фиксации C1/C2 отладочный
+         * вывод не имеет права бесконечно откладывать запись, поэтому состояния
+         * PENDING/BUSY получают приоритет над USART2.
+         */
+        {
+            ModBus_StorageSaveStatus_t save_state =
+                ModBus_GetStorageSaveStatus();
+            bool command_save_has_priority =
+                (save_state == MODBUS_STORAGE_SAVE_PENDING) ||
+                (save_state == MODBUS_STORAGE_SAVE_BUSY);
+
+            allow_storage = !measurement_processed &&
+                            !ModBus_CommunicationIsBusy() &&
+                            (command_save_has_priority || USART2_TxIsIdle()) &&
+                            time_to_next_measure > EEPROM_MEASUREMENT_GUARD_MS;
+        }
         ModBus_StorageProcess(allow_storage);
 
         /* После первого байта запроса цикл больше не засыпает. */
@@ -720,10 +1409,11 @@ void generate_pulse_and_measure(void)
  * Нижняя граница фиксирована: первые 100 мкс подавлены как наводка.
  * Верхняя граница получается из длины волновода и скорости волны:
  *
- *     t_max = L / c + запас аналогового тракта.
+ *     t_max = L / c + задержка электроники + запас.
  *
- * Для L=1,2 м и c=3370 м/с получаем примерно 356 мкс + 60 мкс запаса.
- * Поэтому ложные пары на 850–970 мкс больше не могут быть приняты.
+ * Для L=1,0 м, c=2841,37 м/с и задержки 18 мкс получаем примерно
+ * 352 мкс + 18 мкс + 60 мкс запаса. Поэтому ложные пары на 850–970 мкс
+ * больше не могут быть приняты.
  */
 static void PrepareCaptureWindow(void)
 {
@@ -733,14 +1423,15 @@ static void PrepareCaptureWindow(void)
     uint32_t maximum_ticks;
 
     if (!isfinite(length_m) || length_m <= 0.0f) {
-        length_m = 1.2f;
+        length_m = MODBUS_DEFAULT_WAVEGUIDE_LENGTH_M;
     }
     if (!isfinite(speed_m_s) || speed_m_s < 100.0f) {
-        speed_m_s = 3370.0f;
+        speed_m_s = MODBUS_DEFAULT_MATERIAL_WAVE_SPEED_MPS;
     }
 
     maximum_tof_us =
         (length_m / speed_m_s) * 1000000.0f +
+        ELECTRONICS_DELAY_US +
         (float)CAPTURE_MAX_TOF_MARGIN_US;
 
     /* Верхняя граница должна оставлять место и для второго сформированного импульса пары. */
