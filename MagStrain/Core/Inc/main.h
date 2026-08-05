@@ -126,7 +126,7 @@ extern "C" {
  * Второй захват — время второго сформированного импульса t2.
  * Валидность пары определяется интервалом t2 - t1.
  */
-#define CAPTURE_PAIR_INTERVAL_MIN_US   14U
+#define CAPTURE_PAIR_INTERVAL_MIN_US   12U
 #define CAPTURE_PAIR_INTERVAL_MAX_US   26U
 #define MIN_CLICK_WIDTH_TICKS          CAPTURE_US_TO_TICKS_CEIL(CAPTURE_PAIR_INTERVAL_MIN_US)
 #define MAX_CLICK_WIDTH_TICKS          CAPTURE_US_TO_TICKS_FLOOR(CAPTURE_PAIR_INTERVAL_MAX_US)

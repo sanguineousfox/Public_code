@@ -42,7 +42,7 @@
 #define SWITCH_HOLD_ITERATIONS  12000
 #define SWITCH_PIN              GPIO_PIN_7
 #define SWITCH_PORT             GPIOB
-#define FIRMWARE_VERSION        114
+#define FIRMWARE_VERSION        116
 #define CALIBRATION_SAMPLE_MAX_AGE_MS 500U
 #define MIN_POLL_PERIOD_MS      EXCITATION_PERIOD_MS
 #define MAX_POLL_PERIOD_MS      60000
@@ -111,6 +111,17 @@ static uint8_t measurement_fallback_count = 0U;
 static uint8_t capture_coil_fault_active = 0U;
 static uint16_t current_measurement_status = MEASUREMENT_STATUS_VALID;
 
+/*
+ * Активный режим таблицы калибровки:
+ * 0 — таблица не используется;
+ * 3 — используются точки 260/520/780 мм;
+ * 5 — используются границы 0/100 % и три промежуточные точки.
+ *
+ * Значение обновляется внутри InterpolateCalibratedLevel() и применяется
+ * только для диагностического вывода USART2.
+ */
+static uint8_t last_sensor_cal_mode = 0U;
+
 /* Последнее стабильное значение, опубликованное штатным 10-Гц циклом.
  * Калибровочные команды не запускают отдельный импульс: они сохраняют именно
  * этот отфильтрованный результат. Это исключает лишний запуск вне периода
@@ -146,6 +157,7 @@ static float GetUsableLevelHeightMm(void);
 static uint8_t CalculateWaveSpeedFromThreePoints(float *speed_m_s);
 static float InterpolateCalibratedLevel(float raw_tof_us);
 static uint8_t GetStableCalibrationSample(float *tof_us, float *distance_mm);
+static uint8_t RestoreThreePointCalibrationState(void);
 
 /* ==========================================================================
 ФИЛЬТРАЦИЯ И РАСЧЕТЫ
@@ -208,6 +220,59 @@ static float GetUsableLevelHeightMm(void)
 }
 
 /**
+ * @brief Восстанавливает состояние трёхточечной калибровки после загрузки EEPROM.
+ *
+ * В ранних версиях точки 2100/2102/2104 могли быть успешно сохранены, а
+ * служебная маска 2106 — отсутствовать или не содержать тег 0xA500. Тогда
+ * значения ToFraw переживали перезапуск, но основной расчёт переходил в
+ * CAL=FALLBACK.
+ *
+ * Восстановление выполняется только когда служебного тега вообще нет. Если
+ * тег присутствует, но биты точек сброшены командой 01, это считается
+ * намеренным началом нового цикла и старые точки не активируются.
+ *
+ * @return 1, если маска была восстановлена в RAM; иначе 0.
+ */
+static uint8_t RestoreThreePointCalibrationState(void)
+{
+    const uint16_t three_point_mask =
+        SENSOR_CAL_POINT_260_BIT |
+        SENSOR_CAL_POINT_520_BIT |
+        SENSOR_CAL_POINT_780_BIT;
+    uint16_t stored_mask =
+        ModBus_GetParameter_Int(MB_ADDR_SENSOR_CAL_MASK);
+    float tof_260_us;
+    float tof_520_us;
+    float tof_780_us;
+    uint16_t normalized_mask;
+
+    /* Тег уже присутствует: состояние маски считается осознанным и не
+     * реконструируется по оставшимся в EEPROM значениям. */
+    if ((stored_mask & SENSOR_CAL_STORAGE_TAG_MASK) == SENSOR_CAL_STORAGE_TAG) {
+        return 0U;
+    }
+
+    tof_260_us = ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_260);
+    tof_520_us = ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_520);
+    tof_780_us = ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_780);
+
+    if (!isfinite(tof_260_us) || !isfinite(tof_520_us) ||
+        !isfinite(tof_780_us) ||
+        !(tof_260_us > tof_520_us && tof_520_us > tof_780_us) ||
+        tof_780_us <= 0.0f) {
+        return 0U;
+    }
+
+    normalized_mask = (uint16_t)(SENSOR_CAL_STORAGE_TAG |
+                                 three_point_mask |
+                                 (stored_mask &
+                                  (SENSOR_CAL_POINT_LOW_BIT |
+                                   SENSOR_CAL_POINT_HIGH_BIT)));
+    ModBus_SetParameter_Int(MB_ADDR_SENSOR_CAL_MASK, normalized_mask);
+    return 1U;
+}
+
+/**
  * @brief Рассчитывает фактическую скорость волны по точкам 260/520/780 мм.
  *
  * В EEPROM сохраняются только исходные калибровочные времена ToFraw.
@@ -245,8 +310,12 @@ static uint8_t CalculateWaveSpeedFromThreePoints(float *speed_m_s)
     }
 
     stored_mask = ModBus_GetParameter_Int(MB_ADDR_SENSOR_CAL_MASK);
-    if ((stored_mask & SENSOR_CAL_STORAGE_TAG_MASK) != SENSOR_CAL_STORAGE_TAG ||
-        (stored_mask & required_bits) != required_bits) {
+    /* Три точки являются достаточным признаком готовой временной калибровки.
+     * Проверка не зависит от служебного тега: так читаются данные ранней
+     * версии, где точки уже сохранялись, а маска могла быть записана без
+     * старшего байта 0xA5. После старта RestoreThreePointCalibrationState()
+     * нормализует такую маску в RAM. */
+    if ((stored_mask & required_bits) != required_bits) {
         return 0U;
     }
 
@@ -306,18 +375,20 @@ static uint8_t CalculateWaveSpeedFromThreePoints(float *speed_m_s)
  *   команда 13 -> 780 мм;
  *   команда 02 -> 100 % (h_high, но не выше полезной длины звукопровода).
  *
- * Между соседними точками выполняется кусочно-линейная интерполяция по
- * сырому ToFraw. За пределами 0 % и 100 % результат насыщается, а не
- * экстраполируется. Благодаря этому команда 02 действительно фиксирует
- * верхний предел и не допускает продолжения шкалы за 100 %.
+ * При наличии всех пяти точек между соседними значениями выполняется
+ * кусочно-линейная интерполяция, а за пределами 0/100 % результат насыщается.
  *
- * Таблица принимается только при полной маске и строгой монотонности ToFraw.
- * Если около верхней зоны измеритель переключился на другой импульс и ToFraw
- * начал расти, функция возвращает -1: такое неоднозначное измерение нельзя
- * исправить одной статической таблицей.
+ * Если после перезапуска доступны только сохранённые команды 11/12/13,
+ * включается трёхточечный режим: внутри 260...780 мм выполняется интерполяция,
+ * а снаружи — продолжение ближайшего участка с ограничением физическим
+ * диапазоном звукопровода. Поэтому маска 0x0E/0x0F уже активирует CAL=3P.
  */
 static float InterpolateCalibratedLevel(float raw_tof_us)
 {
+    const uint16_t three_point_mask =
+        SENSOR_CAL_POINT_260_BIT |
+        SENSOR_CAL_POINT_520_BIT |
+        SENSOR_CAL_POINT_780_BIT;
     uint16_t stored_mask = ModBus_GetParameter_Int(MB_ADDR_SENSOR_CAL_MASK);
     float tof_low_us;
     float tof_260_us;
@@ -331,81 +402,132 @@ static float InterpolateCalibratedLevel(float raw_tof_us)
     float x1;
     float y0;
     float y1;
+    float result_mm;
+    uint8_t full_table_valid = 0U;
 
-    if ((stored_mask & SENSOR_CAL_STORAGE_TAG_MASK) != SENSOR_CAL_STORAGE_TAG ||
-        (stored_mask & SENSOR_CAL_FULL_MASK) != SENSOR_CAL_FULL_MASK) {
+    last_sensor_cal_mode = 0U;
+
+    /* Для основного временного режима достаточно точек 260/520/780 мм.
+     * Команды 01 и 02 задают штатные границы 0/100 %, но их отсутствие
+     * не должно блокировать восстановление трёхточечной таблицы после
+     * перезагрузки. */
+    /* Для CAL=3P достаточно наличия трёх битов 260/520/780.
+     * Служебный тег 0xA5 проверяется и восстанавливается при старте, но его
+     * отсутствие само по себе больше не блокирует уже сохранённые точки. */
+    if ((stored_mask & three_point_mask) != three_point_mask) {
         return -1.0f;
     }
 
-    tof_low_us = ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_LOW_TOF);
     tof_260_us = ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_260);
     tof_520_us = ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_520);
     tof_780_us = ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_780);
-    tof_high_us = ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_HIGH_TOF);
-
-    level_low_mm =
-        ModBus_GetParameter_Float(MB_ADDR_CAL_LOW_LVL) * 1000.0f;
-    level_high_mm =
-        ModBus_GetParameter_Float(MB_ADDR_CAL_HIGH_LVL) * 1000.0f;
     usable_height_mm = GetUsableLevelHeightMm();
 
-    if (!isfinite(level_low_mm) || level_low_mm < 0.0f) {
-        level_low_mm = 0.0f;
-    }
-    if (!isfinite(level_high_mm) || level_high_mm <= level_low_mm ||
-        level_high_mm > usable_height_mm) {
-        level_high_mm = usable_height_mm;
-    }
-
     if (!isfinite(raw_tof_us) || raw_tof_us <= 0.0f ||
-        !isfinite(tof_low_us) || !isfinite(tof_260_us) ||
-        !isfinite(tof_520_us) || !isfinite(tof_780_us) ||
-        !isfinite(tof_high_us) ||
-        !(tof_low_us > tof_260_us &&
-          tof_260_us > tof_520_us &&
-          tof_520_us > tof_780_us &&
-          tof_780_us > tof_high_us) ||
-        !(level_low_mm < SENSOR_CAL_LEVEL_260_MM &&
-          SENSOR_CAL_LEVEL_260_MM < SENSOR_CAL_LEVEL_520_MM &&
-          SENSOR_CAL_LEVEL_520_MM < SENSOR_CAL_LEVEL_780_MM &&
-          SENSOR_CAL_LEVEL_780_MM < level_high_mm)) {
+        !isfinite(tof_260_us) || !isfinite(tof_520_us) ||
+        !isfinite(tof_780_us) ||
+        !(tof_260_us > tof_520_us && tof_520_us > tof_780_us) ||
+        !isfinite(usable_height_mm) || usable_height_mm <= 0.0f) {
         return -1.0f;
     }
 
-    if (raw_tof_us >= tof_low_us) {
-        return level_low_mm;
-    }
-    if (raw_tof_us <= tof_high_us) {
-        return level_high_mm;
+    /* Если выполнены также команды 01 и 02 и все пять точек монотонны,
+     * используем полную таблицу с жёсткими границами 0 и 100 %. */
+    if ((stored_mask & SENSOR_CAL_STORAGE_TAG_MASK) == SENSOR_CAL_STORAGE_TAG &&
+        (stored_mask & SENSOR_CAL_FULL_MASK) == SENSOR_CAL_FULL_MASK) {
+        tof_low_us = ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_LOW_TOF);
+        tof_high_us = ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_HIGH_TOF);
+        level_low_mm =
+            ModBus_GetParameter_Float(MB_ADDR_CAL_LOW_LVL) * 1000.0f;
+        level_high_mm =
+            ModBus_GetParameter_Float(MB_ADDR_CAL_HIGH_LVL) * 1000.0f;
+
+        if (!isfinite(level_low_mm) || level_low_mm < 0.0f) {
+            level_low_mm = 0.0f;
+        }
+        if (!isfinite(level_high_mm) || level_high_mm <= level_low_mm ||
+            level_high_mm > usable_height_mm) {
+            level_high_mm = usable_height_mm;
+        }
+
+        if (isfinite(tof_low_us) && isfinite(tof_high_us) &&
+            tof_low_us > tof_260_us &&
+            tof_780_us > tof_high_us &&
+            level_low_mm < SENSOR_CAL_LEVEL_260_MM &&
+            SENSOR_CAL_LEVEL_780_MM < level_high_mm) {
+            full_table_valid = 1U;
+        }
     }
 
-    if (raw_tof_us >= tof_260_us) {
-        x0 = tof_low_us;
-        x1 = tof_260_us;
-        y0 = level_low_mm;
-        y1 = SENSOR_CAL_LEVEL_260_MM;
-    } else if (raw_tof_us >= tof_520_us) {
-        x0 = tof_260_us;
-        x1 = tof_520_us;
-        y0 = SENSOR_CAL_LEVEL_260_MM;
-        y1 = SENSOR_CAL_LEVEL_520_MM;
-    } else if (raw_tof_us >= tof_780_us) {
-        x0 = tof_520_us;
-        x1 = tof_780_us;
-        y0 = SENSOR_CAL_LEVEL_520_MM;
-        y1 = SENSOR_CAL_LEVEL_780_MM;
+    if (full_table_valid != 0U) {
+        last_sensor_cal_mode = 5U;
+
+        if (raw_tof_us >= tof_low_us) {
+            return level_low_mm;
+        }
+        if (raw_tof_us <= tof_high_us) {
+            return level_high_mm;
+        }
+
+        if (raw_tof_us >= tof_260_us) {
+            x0 = tof_low_us;
+            x1 = tof_260_us;
+            y0 = level_low_mm;
+            y1 = SENSOR_CAL_LEVEL_260_MM;
+        } else if (raw_tof_us >= tof_520_us) {
+            x0 = tof_260_us;
+            x1 = tof_520_us;
+            y0 = SENSOR_CAL_LEVEL_260_MM;
+            y1 = SENSOR_CAL_LEVEL_520_MM;
+        } else if (raw_tof_us >= tof_780_us) {
+            x0 = tof_520_us;
+            x1 = tof_780_us;
+            y0 = SENSOR_CAL_LEVEL_520_MM;
+            y1 = SENSOR_CAL_LEVEL_780_MM;
+        } else {
+            x0 = tof_780_us;
+            x1 = tof_high_us;
+            y0 = SENSOR_CAL_LEVEL_780_MM;
+            y1 = level_high_mm;
+        }
     } else {
-        x0 = tof_780_us;
-        x1 = tof_high_us;
-        y0 = SENSOR_CAL_LEVEL_780_MM;
-        y1 = level_high_mm;
+        /* Трёхточечный режим. Между точками выполняется интерполяция,
+         * ниже 260 и выше 780 мм — продолжение ближайшего участка. Итог
+         * обязательно ограничивается физическим диапазоном звукопровода. */
+        last_sensor_cal_mode = 3U;
+
+        if (raw_tof_us >= tof_520_us) {
+            x0 = tof_260_us;
+            x1 = tof_520_us;
+            y0 = SENSOR_CAL_LEVEL_260_MM;
+            y1 = SENSOR_CAL_LEVEL_520_MM;
+        } else {
+            x0 = tof_520_us;
+            x1 = tof_780_us;
+            y0 = SENSOR_CAL_LEVEL_520_MM;
+            y1 = SENSOR_CAL_LEVEL_780_MM;
+        }
     }
 
     if (x0 <= x1) {
+        last_sensor_cal_mode = 0U;
         return -1.0f;
     }
 
-    return y0 + (x0 - raw_tof_us) * (y1 - y0) / (x0 - x1);
+    result_mm = y0 + (x0 - raw_tof_us) * (y1 - y0) / (x0 - x1);
+
+    if (!isfinite(result_mm)) {
+        last_sensor_cal_mode = 0U;
+        return -1.0f;
+    }
+    if (result_mm < 0.0f) {
+        result_mm = 0.0f;
+    }
+    if (result_mm > usable_height_mm) {
+        result_mm = usable_height_mm;
+    }
+
+    return result_mm;
 }
 
 /**
@@ -452,8 +574,9 @@ static uint8_t GetStableCalibrationSample(float *tof_us, float *distance_mm)
  *
  * Приоритет расчета:
  * 1. Полная таблица ToFraw: 0 %, 260, 520, 780 мм и 100 %.
- * 2. Штатная двухточечная калибровка 0%/100% по C1/C2.
- * 3. Геометрический расчёт по скорости и длине звукопровода.
+ * 2. Трёхточечная таблица ToFraw: 260, 520 и 780 мм.
+ * 3. Штатная двухточечная калибровка 0%/100% по C1/C2.
+ * 4. Геометрический расчёт по скорости и длине звукопровода.
  */
 static float Calculate_Position(float raw_tof_us)
 {
@@ -680,27 +803,23 @@ void Process_Calibration_Command(uint16_t cmd)
             float tof_us;
             float distance_mm;
             if (GetStableCalibrationSample(&tof_us, &distance_mm) != 0U) {
-                uint16_t mask = ModBus_GetParameter_Int(MB_ADDR_SENSOR_CAL_MASK);
+                uint16_t mask =
+                    ModBus_GetParameter_Int(MB_ADDR_SENSOR_CAL_MASK);
                 uint16_t address;
                 uint16_t bit;
                 float reference_level_mm;
-
-                float previous_tof_us;
-                uint16_t required_previous_bit;
-
-                if ((mask & SENSOR_CAL_STORAGE_TAG_MASK) != SENSOR_CAL_STORAGE_TAG) {
-                    command_succeeded = 0U;
-                    USART2_Print("[CAL] Сначала выполните команду 01\r\n");
-                    break;
-                }
+                float previous_tof_us = 0.0f;
+                uint16_t required_previous_bit = 0U;
 
                 if (cmd == 11U) {
                     address = MB_ADDR_SENSOR_CAL_260;
                     bit = SENSOR_CAL_POINT_260_BIT;
                     reference_level_mm = SENSOR_CAL_LEVEL_260_MM;
-                    previous_tof_us =
-                        ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_LOW_TOF);
-                    required_previous_bit = SENSOR_CAL_POINT_LOW_BIT;
+
+                    /* Команда 11 начинает самостоятельный цикл CAL=3P.
+                     * Команда 01 для этого режима не обязательна. Старые
+                     * точки 520/780 и верхняя граница становятся невалидны. */
+                    mask = SENSOR_CAL_STORAGE_TAG;
                 } else if (cmd == 12U) {
                     address = MB_ADDR_SENSOR_CAL_520;
                     bit = SENSOR_CAL_POINT_520_BIT;
@@ -708,6 +827,13 @@ void Process_Calibration_Command(uint16_t cmd)
                     previous_tof_us =
                         ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_260);
                     required_previous_bit = SENSOR_CAL_POINT_260_BIT;
+
+                    /* Нормализация ранней маски без тега. */
+                    if ((mask & SENSOR_CAL_STORAGE_TAG_MASK) !=
+                        SENSOR_CAL_STORAGE_TAG) {
+                        mask = (uint16_t)(SENSOR_CAL_STORAGE_TAG |
+                                          (mask & SENSOR_CAL_FULL_MASK));
+                    }
                 } else {
                     address = MB_ADDR_SENSOR_CAL_780;
                     bit = SENSOR_CAL_POINT_780_BIT;
@@ -715,14 +841,23 @@ void Process_Calibration_Command(uint16_t cmd)
                     previous_tof_us =
                         ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_520);
                     required_previous_bit = SENSOR_CAL_POINT_520_BIT;
+
+                    if ((mask & SENSOR_CAL_STORAGE_TAG_MASK) !=
+                        SENSOR_CAL_STORAGE_TAG) {
+                        mask = (uint16_t)(SENSOR_CAL_STORAGE_TAG |
+                                          (mask & SENSOR_CAL_FULL_MASK));
+                    }
                 }
 
-                if ((mask & required_previous_bit) == 0U) {
+                if (required_previous_bit != 0U &&
+                    (mask & required_previous_bit) == 0U) {
                     command_succeeded = 0U;
-                    USART2_Print("[CAL] Нарушен порядок команд 01 -> 11 -> 12 -> 13 -> 02\r\n");
+                    USART2_Print("[CAL] Нарушен порядок команд 11 -> 12 -> 13\r\n");
                     break;
                 }
-                if (!isfinite(previous_tof_us) || tof_us >= previous_tof_us) {
+
+                if (required_previous_bit != 0U &&
+                    (!isfinite(previous_tof_us) || tof_us >= previous_tof_us)) {
                     command_succeeded = 0U;
                     USART2_BufInit();
                     USART2_BufPrint("[CAL] ОШИБКА монотонности: новый ToFraw=");
@@ -734,8 +869,6 @@ void Process_Calibration_Command(uint16_t cmd)
                     break;
                 }
 
-                /* В EEPROM сохраняется именно ToFraw. Значение distance_mm
-                 * выводится только как диагностика старой модели скорости. */
                 ModBus_SetParameter_Float(address, tof_us);
                 ModBus_SetParameter_Int(MB_ADDR_SENSOR_CAL_MASK,
                                         (uint16_t)(mask | bit));
@@ -750,7 +883,10 @@ void Process_Calibration_Command(uint16_t cmd)
                 USART2_BufPrintFloat(tof_us);
                 USART2_BufPrint(" мкс (DistRaw = ");
                 USART2_BufPrintFloat(distance_mm);
-                USART2_BufPrint(" мм)\r\n");
+                USART2_BufPrint(" мм), CalMask=");
+                USART2_BufPrintInt((uint16_t)((mask | bit) &
+                                              SENSOR_CAL_FULL_MASK));
+                USART2_BufPrint("\r\n");
                 USART2_BufFlush();
             } else {
                 command_succeeded = 0U;
@@ -906,7 +1042,7 @@ void Process_Measurement_Results(float tof_us,
     float distance_from_top_cal_mm;
     float usable_height_mm;
     uint16_t sensor_cal_mask;
-    uint8_t sensor_cal_active;
+    uint8_t sensor_cal_mode;
     GradTankType_t tank_type = GRAD_TYPE_VERTICAL;
 
     if (!signal_was_captured || !isfinite(tof_us) || tof_us <= 0.0f) {
@@ -991,8 +1127,8 @@ void Process_Measurement_Results(float tof_us,
         distance_from_top_cal_mm = waveguide_len_mm;
     }
     sensor_cal_mask = ModBus_GetParameter_Int(MB_ADDR_SENSOR_CAL_MASK);
-    sensor_cal_active =
-        (InterpolateCalibratedLevel(tof_us) >= 0.0f) ? 1U : 0U;
+    (void)InterpolateCalibratedLevel(tof_us);
+    sensor_cal_mode = last_sensor_cal_mode;
 
     ModBus_SetParameter_Int(MB_ADDR_LEVEL_INT,
                             (uint16_t)(int16_t)position_mm);
@@ -1020,7 +1156,13 @@ void Process_Measurement_Results(float tof_us,
         USART2_BufPrintFloat(distance_from_top_raw_mm);
         USART2_BufPrint(" mm | CalMask=");
         USART2_BufPrintInt((uint16_t)(sensor_cal_mask & SENSOR_CAL_FULL_MASK));
-        USART2_BufPrint(sensor_cal_active ? " CAL=5P" : " CAL=FALLBACK");
+        if (sensor_cal_mode == 5U) {
+            USART2_BufPrint(" CAL=5P");
+        } else if (sensor_cal_mode == 3U) {
+            USART2_BufPrint(" CAL=3P");
+        } else {
+            USART2_BufPrint(" CAL=FALLBACK");
+        }
         USART2_BufPrint(" | ToFraw=");
         USART2_BufPrintFloat(tof_us);
         USART2_BufPrint(" us | ToF=");
@@ -1084,6 +1226,15 @@ int main(void)
 
     ModBus_Init();
 
+    /* Восстанавливаем старую трёхточечную таблицу, если сами ToFraw
+     * загрузились из EEPROM, а служебная маска ранней версии отсутствует. */
+    {
+        uint8_t cal_mask_recovered = RestoreThreePointCalibrationState();
+        if (cal_mask_recovered != 0U) {
+            USART2_Print("[CAL] Маска 3P восстановлена по ToFraw из EEPROM\r\n");
+        }
+    }
+
     /* После включения авария катушки фиксации считается снятой. Она будет
      * установлена при первом запуске без корректного второго импульса. */
     ModBus_SetParameter_Int(MB_ADDR_ERROR_CODE, MEASUREMENT_ERROR_NONE);
@@ -1132,10 +1283,37 @@ int main(void)
         uint16_t cal_mask = ModBus_GetParameter_Int(MB_ADDR_SENSOR_CAL_MASK);
         float C1 = ModBus_GetParameter_Float(MB_ADDR_CAL_C1);
         float C2 = ModBus_GetParameter_Float(MB_ADDR_CAL_C2);
+        float tof_260 = ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_260);
+        float tof_520 = ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_520);
+        float tof_780 = ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_780);
 
-        if ((cal_mask & SENSOR_CAL_STORAGE_TAG_MASK) == SENSOR_CAL_STORAGE_TAG &&
-            (cal_mask & SENSOR_CAL_FULL_MASK) == SENSOR_CAL_FULL_MASK) {
+        const uint16_t three_point_mask =
+            SENSOR_CAL_POINT_260_BIT |
+            SENSOR_CAL_POINT_520_BIT |
+            SENSOR_CAL_POINT_780_BIT;
+        float tof_probe =
+            ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_520);
+
+        (void)InterpolateCalibratedLevel(tof_probe);
+
+        USART2_BufPrint("[CAL] EEPROM: mask=");
+        USART2_BufPrintInt(cal_mask);
+        USART2_BufPrint(", bits=");
+        USART2_BufPrintInt((uint16_t)(cal_mask & SENSOR_CAL_FULL_MASK));
+        USART2_BufPrint(", T260=");
+        USART2_BufPrintFloat(tof_260);
+        USART2_BufPrint(", T520=");
+        USART2_BufPrintFloat(tof_520);
+        USART2_BufPrint(", T780=");
+        USART2_BufPrintFloat(tof_780);
+        USART2_BufPrint(" мкс\r\n");
+
+        if (last_sensor_cal_mode == 5U) {
             USART2_BufPrint("[CAL] Активна калибровка 5P по ToFraw: 0%/260/520/780/100%\r\n");
+        } else if (last_sensor_cal_mode == 3U &&
+                   (cal_mask & SENSOR_CAL_STORAGE_TAG_MASK) == SENSOR_CAL_STORAGE_TAG &&
+                   (cal_mask & three_point_mask) == three_point_mask) {
+            USART2_BufPrint("[CAL] Активна калибровка 3P по ToFraw: 260/520/780 мм\r\n");
         } else if (C1 > 0.0f && C2 > 0.0f && C1 > C2) {
             USART2_BufPrint("[CAL] Активна резервная калибровка 0/100%: C1=");
             USART2_BufPrintFloat(C1);
