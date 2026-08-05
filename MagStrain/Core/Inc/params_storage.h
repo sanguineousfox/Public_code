@@ -34,6 +34,20 @@ typedef enum {
     PARAMS_SAVE_ERROR
 } ParamsStorageSaveState_t;
 
+/* Точная причина последней ошибки чтения/записи EEPROM. */
+typedef enum {
+    PARAMS_STORAGE_ERROR_NONE = 0,
+    PARAMS_STORAGE_ERROR_NOT_AVAILABLE,
+    PARAMS_STORAGE_ERROR_READ,
+    PARAMS_STORAGE_ERROR_BAD_MAGIC,
+    PARAMS_STORAGE_ERROR_BAD_VERSION,
+    PARAMS_STORAGE_ERROR_BAD_SIZE,
+    PARAMS_STORAGE_ERROR_BAD_CRC,
+    PARAMS_STORAGE_ERROR_WRITE,
+    PARAMS_STORAGE_ERROR_WRITE_TIMEOUT,
+    PARAMS_STORAGE_ERROR_VERIFY_MISMATCH
+} ParamsStorageError_t;
+
 ParamsStorageState_t ParamsStorage_Init(void);
 bool ParamsStorage_IsAvailable(void);
 
@@ -47,6 +61,10 @@ HAL_StatusTypeDef ParamsStorage_BeginSave(const uint8_t *payload,
 ParamsStorageSaveState_t ParamsStorage_ProcessSave(void);
 ParamsStorageSaveState_t ParamsStorage_GetSaveState(void);
 void ParamsStorage_ClearSaveResult(void);
+
+/* Диагностика последней причины отказа. */
+ParamsStorageError_t ParamsStorage_GetLastError(void);
+const char *ParamsStorage_ErrorToString(ParamsStorageError_t error);
 
 /* Совместимый синхронный интерфейс; в основном цикле не использовать. */
 HAL_StatusTypeDef ParamsStorage_Save(const uint8_t *payload,

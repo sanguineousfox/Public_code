@@ -23,13 +23,27 @@ extern "C" {
 
 HAL_StatusTypeDef AT24C64_Init(uint8_t device_address);
 HAL_StatusTypeDef AT24C64_IsReady(uint8_t device_address);
-/* Быстрая проверка готовности: один опрос с коротким таймаутом. */
+
+/*
+ * Быстрый опрос завершения внутреннего цикла EEPROM.
+ * Если ранее была запущена фоновая запись страницы, WP возвращается в
+ * защищённое состояние только после получения ACK от микросхемы.
+ */
 HAL_StatusTypeDef AT24C64_PollReady(uint8_t device_address);
-/* Запуск записи одной страницы без ожидания внутреннего цикла EEPROM. */
+
+/*
+ * Запускает запись одной страницы без ожидания внутреннего цикла EEPROM.
+ * После успешной передачи WP намеренно остаётся в нуле до завершения
+ * AT24C64_PollReady(). Это критично для микросхем, которые учитывают WP
+ * в течение всего внутреннего цикла программирования.
+ */
 HAL_StatusTypeDef AT24C64_WritePageBegin(uint8_t device_address,
                                          uint16_t memory_address,
                                          const uint8_t *data,
                                          uint16_t size);
+
+/* Аварийно завершает незаконченный цикл и возвращает WP в защитное состояние. */
+void AT24C64_AbortWriteCycle(void);
 
 HAL_StatusTypeDef AT24C64_ReadByte(uint8_t device_address,
                                    uint16_t memory_address,

@@ -175,8 +175,13 @@ static const ModBus_Descriptor_t descriptors[] = {
 #define DESCRIPTOR_COUNT ((uint16_t)(sizeof(descriptors) / sizeof(descriptors[0])))
 #define REGISTER_STORAGE_WORDS ((uint16_t)(DESCRIPTOR_COUNT * 2U))
 
-/* Максимум: count + все persistent слова. */
-#define PERSISTENCE_BUFFER_SIZE  400U
+/*
+ * Используем весь допустимый payload области параметров EEPROM.
+ * Старое значение 400 байт оставляло только 8 байт запаса при текущих
+ * 69 постоянных параметрах и могло привести к отказу SerializePersistent()
+ * после добавления очередного регистра.
+ */
+#define PERSISTENCE_BUFFER_SIZE  PARAMS_STORAGE_MAX_PAYLOAD
 
 #if PERSISTENCE_BUFFER_SIZE > PARAMS_STORAGE_MAX_PAYLOAD
 #error "Persistence buffer is larger than EEPROM storage payload"
@@ -207,6 +212,8 @@ typedef struct {
 static ModBus_State_t modbus;
 static uint8_t persistence_buffer[PERSISTENCE_BUFFER_SIZE];
 static bool storage_available = false;
+/* true только после загрузки либо полной проверки записанного снимка. */
+static bool storage_image_valid = false;
 static bool storage_dirty = false;
 static bool storage_force_requested = false;
 static bool request_is_broadcast = false;
@@ -224,7 +231,7 @@ static uint32_t storage_persisted_revision = 0U;
 
 /*
  * Состояние именно принудительного сохранения, запрошенного командами
- * 01/02 либо командой 223. Обычное отложенное сохранение
+ * 01/02/11/12/13 либо командой 223. Обычное отложенное сохранение
  * параметров не меняет этот статус и не влияет на результат команды 3000.
  */
 static ModBus_StorageSaveStatus_t forced_save_status =
@@ -997,7 +1004,7 @@ static void StorageStartSave(void)
  *
  * Функция вызывается из главного цикла только в безопасном окне: нет активного
  * кадра Modbus и до следующего 10-Гц измерения остается достаточно времени.
- * Для команд 01/02/223 статус COMPLETE выставляется лишь после того, как драйвер
+ * Для команд 01/02/11/12/13/223 статус COMPLETE выставляется лишь после того, как драйвер
  * AT24C64 подтвердил завершение записи редакции, содержащей новые C1/C2.
  */
 void ModBus_StorageProcess(bool allow_write)
@@ -1005,6 +1012,9 @@ void ModBus_StorageProcess(bool allow_write)
     ParamsStorageSaveState_t state = ParamsStorage_GetSaveState();
 
     if (state == PARAMS_SAVE_COMPLETE) {
+        /* ParamsStorage выдает COMPLETE только после полной проверки
+         * заголовка, размера, побайтного содержимого и CRC всего payload. */
+        storage_image_valid = true;
         storage_persisted_revision = storage_save_revision;
 
         if (storage_save_revision == storage_revision) {
@@ -1026,6 +1036,7 @@ void ModBus_StorageProcess(bool allow_write)
             }
         }
     } else if (state == PARAMS_SAVE_ERROR) {
+        storage_image_valid = false;
         ParamsStorage_ClearSaveResult();
         storage_dirty = true;
         storage_dirty_since = HAL_GetTick();
@@ -1935,6 +1946,7 @@ void ModBus_Init(void)
     storage_revision = 0U;
     storage_save_revision = 0U;
     storage_persisted_revision = 0U;
+    storage_image_valid = false;
     forced_save_target_revision = 0U;
     forced_save_status = MODBUS_STORAGE_SAVE_IDLE;
 
@@ -1944,15 +1956,56 @@ void ModBus_Init(void)
                            &payload_size) == HAL_OK) {
         loaded = DeserializePersistent(persistence_buffer, payload_size);
     }
+    storage_image_valid = loaded;
 
-    if (!loaded && storage_available) {
-        /* Старый/поврежденный формат не используется; перезапись только в фоне. */
+    /*
+     * Автоматически создаём новый блок только для действительно пустой EEPROM.
+     * При ошибке чтения/CRC старые данные больше не затираются значениями по
+     * умолчанию через пять секунд. Это особенно важно при медленном запуске
+     * питания EEPROM: временный сбой чтения не должен уничтожать калибровку.
+     */
+    if (!loaded && storage_available &&
+        storage_state == PARAMS_STORAGE_EMPTY) {
         storage_dirty = true;
         storage_dirty_since = HAL_GetTick();
         storage_revision++;
     }
 
-    AutoWriteSerialNumber();
+    USART2_BufInit();
+    USART2_BufPrint("[EEPROM] init=");
+    switch (storage_state) {
+        case PARAMS_STORAGE_VALID:
+            USART2_BufPrint(loaded ? "VALID, параметры загружены"
+                                   : "VALID, ошибка разбора payload");
+            break;
+        case PARAMS_STORAGE_EMPTY:
+            USART2_BufPrint("EMPTY, будут сохранены значения по умолчанию");
+            break;
+        case PARAMS_STORAGE_CORRUPTED:
+            USART2_BufPrint("CORRUPTED, EEPROM не перезаписывается автоматически");
+            break;
+        case PARAMS_STORAGE_NOT_AVAILABLE:
+        default:
+            USART2_BufPrint("NOT_AVAILABLE после повторных попыток");
+            break;
+    }
+    USART2_BufPrint(", detail=");
+    USART2_BufPrint(
+        ParamsStorage_ErrorToString(ParamsStorage_GetLastError()));
+    USART2_BufPrint(", payload=");
+    USART2_BufPrintInt(payload_size);
+    USART2_BufPrint(" байт\r\n");
+    USART2_BufFlush();
+
+    /*
+     * Серийный номер дописывается только в корректно загруженный либо новый
+     * пустой блок. При повреждённом/недоступном хранилище нельзя создавать
+     * фоновую запись, иначе значения по умолчанию затрут диагностируемые данные.
+     */
+    if (loaded || storage_state == PARAMS_STORAGE_EMPTY) {
+        AutoWriteSerialNumber();
+    }
+
     WriteU16Direct(MB_ADDR_COMMAND, 99U);
     SynchronizeCommunicationSettings(MB_ADDR_MB_ADDR_SET);
     SynchronizeCommunicationSettings(MB_ADDR_MB_BAUD_SET);
@@ -2229,12 +2282,25 @@ void ModBus_ForceSaveToEEPROM(void)
         return;
     }
 
+    /*
+     * После старта с CORRUPTED команда 223 обязана реально сформировать новый
+     * снимок, даже если пользовательские значения в RAM ещё не менялись.
+     * Раньше !storage_dirty немедленно давал COMPLETE, хотя корректного образа
+     * в EEPROM не существовало.
+     */
+    if (!storage_dirty && !storage_image_valid) {
+        storage_dirty = true;
+        storage_dirty_since = HAL_GetTick();
+        storage_revision++;
+    }
+
     forced_save_target_revision = storage_revision;
 
-    /* Если после последней подтвержденной записи параметры не менялись,
-     * требуемая редакция уже находится в EEPROM. */
-    if (!storage_dirty ||
-        storage_persisted_revision >= forced_save_target_revision) {
+    /* Если корректный снимок уже подтверждён и параметры не менялись,
+     * повторная физическая запись не требуется. */
+    if (storage_image_valid &&
+        (!storage_dirty ||
+         storage_persisted_revision >= forced_save_target_revision)) {
         forced_save_status = MODBUS_STORAGE_SAVE_COMPLETE;
         return;
     }

@@ -11,6 +11,7 @@
 #include "graduation.h"
 #include "measurement_statistics.h"
 #include "measurement_snapshot.h"
+#include "params_storage.h"
 #include <stdint.h>
 #include <string.h>
 #include <math.h>
@@ -42,7 +43,7 @@
 #define SWITCH_HOLD_ITERATIONS  12000
 #define SWITCH_PIN              GPIO_PIN_7
 #define SWITCH_PORT             GPIOB
-#define FIRMWARE_VERSION        116
+#define FIRMWARE_VERSION        120
 #define CALIBRATION_SAMPLE_MAX_AGE_MS 500U
 #define MIN_POLL_PERIOD_MS      EXCITATION_PERIOD_MS
 #define MAX_POLL_PERIOD_MS      60000
@@ -138,6 +139,15 @@ static uint8_t last_stable_tof_valid = 0U;
 static uint8_t command_save_pending = 0U;
 static uint16_t command_save_code = 0U;
 
+/*
+ * Отложенный программный перезапуск для диагностики EEPROM.
+ * Команда 224 перезапускает только STM32 через NVIC_SystemReset(), поэтому
+ * питание AT24C64 остаётся включённым. Это позволяет отличить ошибку
+ * программного формата/CRC от повреждения данных при снятии питания.
+ */
+static uint8_t software_reset_pending = 0U;
+static uint32_t software_reset_requested_ms = 0U;
+
 /* ==========================================================================
 ПРОТОТИПЫ СТАТИЧЕСКИХ ФУНКЦИЙ
 ========================================================================== */
@@ -158,6 +168,7 @@ static uint8_t CalculateWaveSpeedFromThreePoints(float *speed_m_s);
 static float InterpolateCalibratedLevel(float raw_tof_us);
 static uint8_t GetStableCalibrationSample(float *tof_us, float *distance_mm);
 static uint8_t RestoreThreePointCalibrationState(void);
+static void ProcessSoftwareReset(void);
 
 /* ==========================================================================
 ФИЛЬТРАЦИЯ И РАСЧЕТЫ
@@ -241,34 +252,59 @@ static uint8_t RestoreThreePointCalibrationState(void)
         SENSOR_CAL_POINT_780_BIT;
     uint16_t stored_mask =
         ModBus_GetParameter_Int(MB_ADDR_SENSOR_CAL_MASK);
-    float tof_260_us;
-    float tof_520_us;
-    float tof_780_us;
+    uint16_t stored_bits =
+        (uint16_t)(stored_mask & SENSOR_CAL_FULL_MASK);
+    float tof_260_us =
+        ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_260);
+    float tof_520_us =
+        ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_520);
+    float tof_780_us =
+        ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_780);
     uint16_t normalized_mask;
 
-    /* Тег уже присутствует: состояние маски считается осознанным и не
-     * реконструируется по оставшимся в EEPROM значениям. */
-    if ((stored_mask & SENSOR_CAL_STORAGE_TAG_MASK) == SENSOR_CAL_STORAGE_TAG) {
-        return 0U;
-    }
-
-    tof_260_us = ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_260);
-    tof_520_us = ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_520);
-    tof_780_us = ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_780);
-
-    if (!isfinite(tof_260_us) || !isfinite(tof_520_us) ||
+    /*
+     * Важна не только служебная сигнатура 0xA500, но и три реально
+     * сохранённых значения ToFraw. Ранний выход только по наличию сигнатуры
+     * был ошибкой: маска могла сохраниться как 0xA500/0xA502/0xA506, тогда
+     * правильные T260/T520/T780 оставались в EEPROM, но CAL=3P не включался.
+     */
+    if (!isfinite(tof_260_us) ||
+        !isfinite(tof_520_us) ||
         !isfinite(tof_780_us) ||
-        !(tof_260_us > tof_520_us && tof_520_us > tof_780_us) ||
-        tof_780_us <= 0.0f) {
+        tof_780_us <= 0.0f ||
+        !(tof_260_us > tof_520_us &&
+          tof_520_us > tof_780_us)) {
         return 0U;
     }
 
-    normalized_mask = (uint16_t)(SENSOR_CAL_STORAGE_TAG |
-                                 three_point_mask |
-                                 (stored_mask &
-                                  (SENSOR_CAL_POINT_LOW_BIT |
-                                   SENSOR_CAL_POINT_HIGH_BIT)));
-    ModBus_SetParameter_Int(MB_ADDR_SENSOR_CAL_MASK, normalized_mask);
+    /*
+     * Если сигнатура и все три бита уже присутствуют, таблица загружена
+     * полностью и менять её состояние не требуется.
+     */
+    if ((stored_mask & SENSOR_CAL_STORAGE_TAG_MASK) ==
+            SENSOR_CAL_STORAGE_TAG &&
+        (stored_bits & three_point_mask) == three_point_mask) {
+        return 0U;
+    }
+
+    normalized_mask =
+        (uint16_t)(SENSOR_CAL_STORAGE_TAG | three_point_mask);
+
+    /*
+     * Биты 0 % и 100 % сохраняются только из записи с правильной сигнатурой.
+     * Их окончательная пригодность всё равно проверяется внутри
+     * InterpolateCalibratedLevel() по монотонности всех пяти точек.
+     */
+    if ((stored_mask & SENSOR_CAL_STORAGE_TAG_MASK) ==
+        SENSOR_CAL_STORAGE_TAG) {
+        normalized_mask |=
+            (uint16_t)(stored_bits &
+                (SENSOR_CAL_POINT_LOW_BIT |
+                 SENSOR_CAL_POINT_HIGH_BIT));
+    }
+
+    ModBus_SetParameter_Int(MB_ADDR_SENSOR_CAL_MASK,
+                            normalized_mask);
     return 1U;
 }
 
@@ -684,12 +720,47 @@ static void ProcessCommandSaveResult(void)
         USART2_BufInit();
         USART2_BufPrint("[CAL] Команда ");
         USART2_BufPrintInt(command_save_code);
-        USART2_BufPrint(": ОШИБКА сохранения EEPROM, статус 0\r\n");
+        USART2_BufPrint(": ОШИБКА сохранения EEPROM, статус 0, причина=");
+        USART2_BufPrint(
+            ParamsStorage_ErrorToString(ParamsStorage_GetLastError()));
+        USART2_BufPrint("\r\n");
         USART2_BufFlush();
 
         command_save_pending = 0U;
         command_save_code = 0U;
         ModBus_ClearStorageSaveStatus();
+    }
+}
+
+/**
+ * @brief Выполняет безопасный программный перезапуск STM32 по команде 224.
+ *
+ * Сброс откладывается минимум на 500 мс, чтобы завершились передача Modbus,
+ * диагностическое сообщение USART2 и возможная фоновая запись AT24C64.
+ * NVIC_SystemReset() перезапускает ядро и периферию STM32, но не снимает
+ * питание с внешней EEPROM.
+ */
+static void ProcessSoftwareReset(void)
+{
+    if (software_reset_pending == 0U) {
+        return;
+    }
+
+    if ((uint32_t)(HAL_GetTick() - software_reset_requested_ms) < 500U) {
+        return;
+    }
+
+    if (ModBus_CommunicationIsBusy() ||
+        ModBus_StorageIsBusy() ||
+        !USART2_TxIsIdle()) {
+        return;
+    }
+
+    __disable_irq();
+    NVIC_SystemReset();
+
+    while (1) {
+        /* После NVIC_SystemReset() выполнение сюда не должно вернуться. */
     }
 }
 
@@ -777,9 +848,17 @@ void Process_Calibration_Command(uint16_t cmd)
                 ModBus_SetParameter_Float(MB_ADDR_SENSOR_CAL_LOW_TOF,
                                           tof_us);
 
-                /* Команда 01 начинает новый полный цикл калибровки.
-                 * Старые промежуточные и верхняя точки остаются в EEPROM,
-                 * но становятся невалидными до повторного набора маски. */
+                /*
+                 * Команда 01 начинает новый полный цикл 5P.
+                 * Старые промежуточные значения очищаются физически, а не
+                 * только маской. Поэтому после внезапного отключения питания
+                 * RestoreThreePointCalibrationState() не сможет принять
+                 * незавершённый новый цикл за готовую старую таблицу.
+                 */
+                ModBus_SetParameter_Float(MB_ADDR_SENSOR_CAL_260, 0.0f);
+                ModBus_SetParameter_Float(MB_ADDR_SENSOR_CAL_520, 0.0f);
+                ModBus_SetParameter_Float(MB_ADDR_SENSOR_CAL_780, 0.0f);
+                ModBus_SetParameter_Float(MB_ADDR_SENSOR_CAL_HIGH_TOF, 0.0f);
                 ModBus_SetParameter_Int(
                     MB_ADDR_SENSOR_CAL_MASK,
                     (uint16_t)(SENSOR_CAL_STORAGE_TAG |
@@ -816,10 +895,40 @@ void Process_Calibration_Command(uint16_t cmd)
                     bit = SENSOR_CAL_POINT_260_BIT;
                     reference_level_mm = SENSOR_CAL_LEVEL_260_MM;
 
-                    /* Команда 11 начинает самостоятельный цикл CAL=3P.
-                     * Команда 01 для этого режима не обязательна. Старые
-                     * точки 520/780 и верхняя граница становятся невалидны. */
-                    mask = SENSOR_CAL_STORAGE_TAG;
+                    /*
+                     * Команда 11 начинает новый набор промежуточных точек.
+                     *
+                     * Если непосредственно перед ней была выполнена команда
+                     * 01 (маска содержит только бит LOW), сохраняем этот бит:
+                     * так последовательность 01->11->12->13->02 действительно
+                     * формирует полноценную таблицу 5P.
+                     *
+                     * Во всех остальных случаях команда 11 начинает отдельный
+                     * цикл CAL=3P и отбрасывает старые крайние точки.
+                     */
+                    if ((mask & SENSOR_CAL_STORAGE_TAG_MASK) ==
+                            SENSOR_CAL_STORAGE_TAG &&
+                        (mask & SENSOR_CAL_FULL_MASK) ==
+                            SENSOR_CAL_POINT_LOW_BIT) {
+                        mask = (uint16_t)(SENSOR_CAL_STORAGE_TAG |
+                                          SENSOR_CAL_POINT_LOW_BIT);
+                    } else {
+                        mask = SENSOR_CAL_STORAGE_TAG;
+                        ModBus_SetParameter_Float(
+                            MB_ADDR_SENSOR_CAL_LOW_TOF, 0.0f);
+                    }
+
+                    /*
+                     * Последующие точки старого цикла очищаются физически.
+                     * Это исключает восстановление неполной таблицы после
+                     * отключения питания между командами 11, 12 и 13.
+                     */
+                    ModBus_SetParameter_Float(
+                        MB_ADDR_SENSOR_CAL_520, 0.0f);
+                    ModBus_SetParameter_Float(
+                        MB_ADDR_SENSOR_CAL_780, 0.0f);
+                    ModBus_SetParameter_Float(
+                        MB_ADDR_SENSOR_CAL_HIGH_TOF, 0.0f);
                 } else if (cmd == 12U) {
                     address = MB_ADDR_SENSOR_CAL_520;
                     bit = SENSOR_CAL_POINT_520_BIT;
@@ -894,6 +1003,20 @@ void Process_Calibration_Command(uint16_t cmd)
             }
             break;
         }
+
+        case 224:
+            /*
+             * Диагностический программный перезапуск STM32.
+             * Параметры автоматически не сохраняются: перед командой 224
+             * необходимо дождаться статуса 90 от команды 223 либо от
+             * последней калибровочной команды.
+             */
+            ModBus_SetParameter_Int(MB_ADDR_COMMAND, 90U);
+            USART2_Print(
+                "[SYS] Команда 224: программный перезапуск STM32 через 500 мс\r\n");
+            software_reset_requested_ms = HAL_GetTick();
+            software_reset_pending = 1U;
+            return;
 
         case 223:
             /*
@@ -1226,12 +1349,15 @@ int main(void)
 
     ModBus_Init();
 
-    /* Восстанавливаем старую трёхточечную таблицу, если сами ToFraw
-     * загрузились из EEPROM, а служебная маска ранней версии отсутствует. */
+    /*
+     * Нормализуем состояние трёхточечной таблицы после загрузки EEPROM.
+     * Восстановление выполняется по полной монотонной тройке ToFraw даже
+     * тогда, когда сигнатура 0xA500 присутствует, но биты маски неполны.
+     */
     {
         uint8_t cal_mask_recovered = RestoreThreePointCalibrationState();
         if (cal_mask_recovered != 0U) {
-            USART2_Print("[CAL] Маска 3P восстановлена по ToFraw из EEPROM\r\n");
+            USART2_Print("[CAL] Маска 3P нормализована по ToFraw из EEPROM\r\n");
         }
     }
 
@@ -1472,6 +1598,12 @@ int main(void)
                             time_to_next_measure > EEPROM_MEASUREMENT_GUARD_MS;
         }
         ModBus_StorageProcess(allow_storage);
+
+        /*
+         * Команда 224 обрабатывается после Modbus и EEPROM. Системный сброс
+         * не должен обрывать ответ внешней программе или постраничную запись.
+         */
+        ProcessSoftwareReset();
 
         /* После первого байта запроса цикл больше не засыпает. */
         if (!ModBus_CommunicationIsBusy()) {

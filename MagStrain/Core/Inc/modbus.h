@@ -42,8 +42,8 @@ extern "C" {
  * Длина звукопровода по умолчанию — 1,040 м. Эти значения используются
  * только при пустой/невалидной EEPROM; записанные пользователем параметры
  * по адресам 2094 и 2096 имеют приоритет и сохраняются в AT24C64. */
-#define MODBUS_DEFAULT_MATERIAL_WAVE_SPEED_MPS  2880.0f
-#define MODBUS_DEFAULT_WAVEGUIDE_LENGTH_M        1.04f
+#define MODBUS_DEFAULT_MATERIAL_WAVE_SPEED_MPS  2950.0f
+#define MODBUS_DEFAULT_WAVEGUIDE_LENGTH_M        1.00f
 
 /* ========================================================================== */
 /* Таблица Е.4: измеряемые параметры int16                                    */
