@@ -273,7 +273,7 @@ static const FloatDefault_t float_defaults[] = {
     {MB_ADDR_TANK_HEIGHT, 0.95f},
     {MB_ADDR_TANK_VOLUME, 0.0f},
     {MB_ADDR_DAMPING_TIME, 10.0f},
-    {MB_ADDR_POLL_PERIOD, 100.0f},
+    {MB_ADDR_POLL_PERIOD, 50.0f},
     {MB_ADDR_MATERIAL_WAVE_SPEED, MODBUS_DEFAULT_MATERIAL_WAVE_SPEED_MPS},
     {MB_ADDR_WAVEGUIDE_LEN, MODBUS_DEFAULT_WAVEGUIDE_LENGTH_M},
     {MB_ADDR_SENSOR_CAL_260, 0.0f},
@@ -722,7 +722,7 @@ static bool FloatValueIsValid(uint16_t address, float value)
 
     switch (address) {
         case MB_ADDR_POLL_PERIOD:
-            return value >= 100.0f && value <= 60000.0f;
+            return value >= 50.0f && value <= 60000.0f;
         case MB_ADDR_MATERIAL_WAVE_SPEED:
             return value >= 1000.0f && value <= 10000.0f;
         case MB_ADDR_WAVEGUIDE_LEN:
@@ -1975,18 +1975,18 @@ void ModBus_Init(void)
     USART2_BufPrint("[EEPROM] init=");
     switch (storage_state) {
         case PARAMS_STORAGE_VALID:
-            USART2_BufPrint(loaded ? "VALID, параметры загружены"
-                                   : "VALID, ошибка разбора payload");
+            USART2_BufPrint(loaded ? "VALID"
+                                   : "VALID/PAYLOAD_ERR");
             break;
         case PARAMS_STORAGE_EMPTY:
-            USART2_BufPrint("EMPTY, будут сохранены значения по умолчанию");
+            USART2_BufPrint("EMPTY");
             break;
         case PARAMS_STORAGE_CORRUPTED:
-            USART2_BufPrint("CORRUPTED, EEPROM не перезаписывается автоматически");
+            USART2_BufPrint("CORRUPTED");
             break;
         case PARAMS_STORAGE_NOT_AVAILABLE:
         default:
-            USART2_BufPrint("NOT_AVAILABLE после повторных попыток");
+            USART2_BufPrint("NOT_AVAILABLE");
             break;
     }
     USART2_BufPrint(", detail=");
@@ -1994,7 +1994,7 @@ void ModBus_Init(void)
         ParamsStorage_ErrorToString(ParamsStorage_GetLastError()));
     USART2_BufPrint(", payload=");
     USART2_BufPrintInt(payload_size);
-    USART2_BufPrint(" байт\r\n");
+    USART2_BufPrint(" B\r\n");
     USART2_BufFlush();
 
     /*

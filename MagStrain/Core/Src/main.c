@@ -30,7 +30,7 @@
 #define DIV_24V_FACTOR          9.4f
 #define DIV_12V_FACTOR          4.0f
 #define DIV_5V_FACTOR           2.0f
-#define PULSE_PERIOD_MS_DEFAULT 100
+#define PULSE_PERIOD_MS_DEFAULT EXCITATION_PERIOD_MS
 #define LED_RED_PIN             GPIO_PIN_13
 #define LED_BLUE_PIN            GPIO_PIN_12
 #define LED_RED_ON_TIME_MS      1000
@@ -43,8 +43,38 @@
 #define SWITCH_HOLD_ITERATIONS  12000
 #define SWITCH_PIN              GPIO_PIN_7
 #define SWITCH_PORT             GPIOB
-#define FIRMWARE_VERSION        120
+#define FIRMWARE_VERSION        132
 #define CALIBRATION_SAMPLE_MAX_AGE_MS 500U
+#define CALIBRATION_STABLE_WINDOWS_REQUIRED 10U
+#define CALIBRATION_MIN_ACCEPTED_SAMPLES 16U
+
+/*
+ * Для записи калибровочной координаты используются только запуски PAIR,
+ * поскольку в режиме 1P единственный принятый фронт может принадлежать
+ * второй катушке и быть сдвинут примерно на межимпульсный интервал.
+ *
+ * В верхней части звукопровода полноценная пара появляется реже. Поэтому
+ * одиночные запуски теперь ПРОПУСКАЮТСЯ, но не обнуляют уже набранные PAIR.
+ * Это позволяет получить правильный t1 первой катушки даже при 80...90 %
+ * запусков 1P.
+ */
+#define CALIBRATION_PAIR_SAMPLE_TARGET   8U
+#define CALIBRATION_PAIR_TRIM_COUNT      1U
+#define CALIBRATION_CAPTURE_MAX_ATTEMPTS 160U
+
+/*
+ * Допустимый диапазон расчётной скорости между соседними контрольными
+ * точками. Проверка не участвует в рабочем пересчёте уровня: она только
+ * запрещает случайно записать команду 12 или 13 не в той физической точке.
+ * Для текущего звукопровода ожидается примерно 2700...3000 м/с.
+ */
+#define CALIBRATION_SEGMENT_SPEED_MIN_MPS 2000.0f
+#define CALIBRATION_SEGMENT_SPEED_MAX_MPS 4000.0f
+/* 0,5 мкс при текущей частоте TIM3. Используется только для записи
+ * калибровочной точки и не ограничивает обычное измерение уровня. */
+#define CALIBRATION_MAX_SPREAD_TICKS \
+    ((uint32_t)(((uint64_t)TIM3_CAPTURE_FREQUENCY_HZ + 1999999ULL) / \
+                2000000ULL))
 #define MIN_POLL_PERIOD_MS      EXCITATION_PERIOD_MS
 #define MAX_POLL_PERIOD_MS      60000
 #define EEPROM_MEASUREMENT_GUARD_MS 5U
@@ -99,7 +129,7 @@ static uint8_t vdda_error = 0;
  * Состояние генератора и скользящего статистического окна.
  * last_excitation_time_ms гарантирует не более 10 задающих импульсов в секунду.
  * measurement_pair_fallback[] хранит признак работы по одному импульсу для
- * каждого элемента окна. Авария снимается только после 11 последовательных
+ * каждого элемента окна. Авария снимается только после полного окна последовательных
  * запусков с полноценной парой, поэтому сообщение не мигает при единичных сбоях.
  */
 static uint32_t last_excitation_time_ms = 0U;
@@ -116,20 +146,35 @@ static uint16_t current_measurement_status = MEASUREMENT_STATUS_VALID;
  * Активный режим таблицы калибровки:
  * 0 — таблица не используется;
  * 3 — используются точки 260/520/780 мм;
- * 5 — используются границы 0/100 % и три промежуточные точки.
+ * 4 — те же три точки с активными границами анализа 01/02.
  *
  * Значение обновляется внутри InterpolateCalibratedLevel() и применяется
  * только для диагностического вывода USART2.
  */
 static uint8_t last_sensor_cal_mode = 0U;
 
-/* Последнее стабильное значение, опубликованное штатным 10-Гц циклом.
- * Калибровочные команды не запускают отдельный импульс: они сохраняют именно
- * этот отфильтрованный результат. Это исключает лишний запуск вне периода
- * 100 мс и не позволяет записать точку по переходному или звенящему отклику. */
-static uint32_t last_stable_tof_ticks = 0U;
-static uint32_t last_stable_tof_time_ms = 0U;
-static uint8_t last_stable_tof_valid = 0U;
+/* Последнее стабильное значение штатного измерительного цикла.
+ * Оно сохраняется для диагностики, но команды 01/02/11/12/13 в версии 130
+ * формируют собственную свежую серию подтверждённых PAIR и не используют старый кэш. */
+
+/*
+ * Выходной фильтр одиночных скачков уровня.
+ *
+ * Основная статистика работает в тиках ToF и удаляет по три крайних
+ * значения с каждой стороны. Этот дополнительный уровень защиты действует
+ * уже после калибровочного преобразования ToF -> мм и не позволяет одному
+ * редкому помеховому результату попасть в Modbus.
+ *
+ * Малые изменения принимаются сразу. Изменение более
+ * LEVEL_JUMP_CONFIRM_THRESHOLD_MM должно повториться три раза подряд.
+ * Поэтому реальный скачок уровня принимается не позднее чем примерно через
+ * 300 мс при частоте измерения 10 Гц, а одиночный выброс отбрасывается.
+ */
+static float published_filtered_level_mm = 0.0f;
+static float pending_level_mm = 0.0f;
+static uint8_t published_level_initialized = 0U;
+static uint8_t pending_level_count = 0U;
+static uint8_t pending_spike_reported = 0U;
 
 /*
  * Команды 01/02 и команда 223 завершаются кодом 90 только после
@@ -167,6 +212,7 @@ static float GetUsableLevelHeightMm(void);
 static uint8_t CalculateWaveSpeedFromThreePoints(float *speed_m_s);
 static float InterpolateCalibratedLevel(float raw_tof_us);
 static uint8_t GetStableCalibrationSample(float *tof_us, float *distance_mm);
+static float ConfirmMeasuredLevel(float candidate_mm);
 static uint8_t RestoreThreePointCalibrationState(void);
 static void ProcessSoftwareReset(void);
 
@@ -325,11 +371,6 @@ static uint8_t RestoreThreePointCalibrationState(void)
  */
 static uint8_t CalculateWaveSpeedFromThreePoints(float *speed_m_s)
 {
-    const uint16_t required_bits =
-        SENSOR_CAL_POINT_260_BIT |
-        SENSOR_CAL_POINT_520_BIT |
-        SENSOR_CAL_POINT_780_BIT;
-    uint16_t stored_mask;
     float tof_us[3];
     float distance_mm[3];
     float waveguide_mm;
@@ -345,16 +386,11 @@ static uint8_t CalculateWaveSpeedFromThreePoints(float *speed_m_s)
         return 0U;
     }
 
-    stored_mask = ModBus_GetParameter_Int(MB_ADDR_SENSOR_CAL_MASK);
-    /* Три точки являются достаточным признаком готовой временной калибровки.
-     * Проверка не зависит от служебного тега: так читаются данные ранней
-     * версии, где точки уже сохранялись, а маска могла быть записана без
-     * старшего байта 0xA5. После старта RestoreThreePointCalibrationState()
-     * нормализует такую маску в RAM. */
-    if ((stored_mask & required_bits) != required_bits) {
-        return 0U;
-    }
-
+    /*
+     * Готовность расчёта определяется самими тремя значениями ToFraw,
+     * а не служебной маской. Маска могла не обновиться после записи одного
+     * из параметров, хотя все три точки уже находятся в RAM/EEPROM.
+     */
     tof_us[0] = ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_260);
     tof_us[1] = ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_520);
     tof_us[2] = ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_780);
@@ -362,7 +398,7 @@ static uint8_t CalculateWaveSpeedFromThreePoints(float *speed_m_s)
 
     if (!isfinite(waveguide_mm) || waveguide_mm <= SENSOR_CAL_LEVEL_780_MM ||
         !isfinite(tof_us[0]) || !isfinite(tof_us[1]) ||
-        !isfinite(tof_us[2]) ||
+        !isfinite(tof_us[2]) || tof_us[2] <= 0.0f ||
         !(tof_us[0] > tof_us[1] && tof_us[1] > tof_us[2])) {
         return 0U;
     }
@@ -389,8 +425,6 @@ static uint8_t CalculateWaveSpeedFromThreePoints(float *speed_m_s)
     slope_mm_per_us = covariance / variance;
     calculated_speed_m_s = slope_mm_per_us * 1000.0f;
 
-    /* Широкие границы защищают USART от NaN/мусора, не навязывая марку
-     * сплава. Реальное диагностическое значение ожидается около 2...4 км/с. */
     if (!isfinite(calculated_speed_m_s) ||
         calculated_speed_m_s < 500.0f ||
         calculated_speed_m_s > 10000.0f) {
@@ -402,22 +436,24 @@ static uint8_t CalculateWaveSpeedFromThreePoints(float *speed_m_s)
 }
 
 /**
- * @brief Рассчитывает уровень по двум пределам и трём промежуточным точкам.
+ * @brief Рассчитывает уровень только по трём калибровочным точкам ToFraw.
  *
- * Опорные точки:
- *   команда 01 -> 0 % (h_low);
- *   команда 11 -> 260 мм;
- *   команда 12 -> 520 мм;
- *   команда 13 -> 780 мм;
- *   команда 02 -> 100 % (h_high, но не выше полезной длины звукопровода).
+ * Команды 11, 12 и 13 являются единственными точками, формирующими наклон
+ * функции ToF -> уровень:
  *
- * При наличии всех пяти точек между соседними значениями выполняется
- * кусочно-линейная интерполяция, а за пределами 0/100 % результат насыщается.
+ *   11 -> 260 мм;
+ *   12 -> 520 мм;
+ *   13 -> 780 мм.
  *
- * Если после перезапуска доступны только сохранённые команды 11/12/13,
- * включается трёхточечный режим: внутри 260...780 мм выполняется интерполяция,
- * а снаружи — продолжение ближайшего участка с ограничением физическим
- * диапазоном звукопровода. Поэтому маска 0x0E/0x0F уже активирует CAL=3P.
+ * Команды 01 и 02 не участвуют в интерполяции и не меняют коэффициент
+ * пересчёта. Они сохраняют только нижнюю и верхнюю границы анализа. При выходе
+ * сырого ToF за сохранённую границу результат насыщается соответствующим
+ * уровнем h_low/h_high.
+ *
+ * Между 260 и 520 мм используется первый линейный участок, между 520 и
+ * 780 мм — второй. Ниже 260 и выше 780 мм продолжается ближайший участок,
+ * после чего результат ограничивается границами 01/02 и физической полезной
+ * длиной звукопровода.
  */
 static float InterpolateCalibratedLevel(float raw_tof_us)
 {
@@ -425,12 +461,16 @@ static float InterpolateCalibratedLevel(float raw_tof_us)
         SENSOR_CAL_POINT_260_BIT |
         SENSOR_CAL_POINT_520_BIT |
         SENSOR_CAL_POINT_780_BIT;
+    const uint16_t boundary_mask =
+        SENSOR_CAL_POINT_LOW_BIT |
+        SENSOR_CAL_POINT_HIGH_BIT;
     uint16_t stored_mask = ModBus_GetParameter_Int(MB_ADDR_SENSOR_CAL_MASK);
-    float tof_low_us;
+    uint16_t normalized_mask;
     float tof_260_us;
     float tof_520_us;
     float tof_780_us;
-    float tof_high_us;
+    float tof_low_us = 0.0f;
+    float tof_high_us = 0.0f;
     float level_low_mm;
     float level_high_mm;
     float usable_height_mm;
@@ -439,21 +479,16 @@ static float InterpolateCalibratedLevel(float raw_tof_us)
     float y0;
     float y1;
     float result_mm;
-    uint8_t full_table_valid = 0U;
+    uint8_t low_bound_valid = 0U;
+    uint8_t high_bound_valid = 0U;
 
     last_sensor_cal_mode = 0U;
 
-    /* Для основного временного режима достаточно точек 260/520/780 мм.
-     * Команды 01 и 02 задают штатные границы 0/100 %, но их отсутствие
-     * не должно блокировать восстановление трёхточечной таблицы после
-     * перезагрузки. */
-    /* Для CAL=3P достаточно наличия трёх битов 260/520/780.
-     * Служебный тег 0xA5 проверяется и восстанавливается при старте, но его
-     * отсутствие само по себе больше не блокирует уже сохранённые точки. */
-    if ((stored_mask & three_point_mask) != three_point_mask) {
-        return -1.0f;
-    }
-
+    /*
+     * Сначала читаем сами калибровочные точки. Они являются источником
+     * истины. Ранее функция немедленно переходила в FALLBACK при неполной
+     * маске, даже когда T260/T520/T780 были корректно сохранены.
+     */
     tof_260_us = ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_260);
     tof_520_us = ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_520);
     tof_780_us = ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_780);
@@ -461,101 +496,105 @@ static float InterpolateCalibratedLevel(float raw_tof_us)
 
     if (!isfinite(raw_tof_us) || raw_tof_us <= 0.0f ||
         !isfinite(tof_260_us) || !isfinite(tof_520_us) ||
-        !isfinite(tof_780_us) ||
+        !isfinite(tof_780_us) || tof_780_us <= 0.0f ||
         !(tof_260_us > tof_520_us && tof_520_us > tof_780_us) ||
         !isfinite(usable_height_mm) || usable_height_mm <= 0.0f) {
         return -1.0f;
     }
 
-    /* Если выполнены также команды 01 и 02 и все пять точек монотонны,
-     * используем полную таблицу с жёсткими границами 0 и 100 %. */
-    if ((stored_mask & SENSOR_CAL_STORAGE_TAG_MASK) == SENSOR_CAL_STORAGE_TAG &&
-        (stored_mask & SENSOR_CAL_FULL_MASK) == SENSOR_CAL_FULL_MASK) {
-        tof_low_us = ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_LOW_TOF);
-        tof_high_us = ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_HIGH_TOF);
-        level_low_mm =
-            ModBus_GetParameter_Float(MB_ADDR_CAL_LOW_LVL) * 1000.0f;
-        level_high_mm =
-            ModBus_GetParameter_Float(MB_ADDR_CAL_HIGH_LVL) * 1000.0f;
+    /*
+     * Если три точки корректны, таблица активируется независимо от состояния
+     * служебной маски. Маска автоматически нормализуется в RAM. Биты границ
+     * 01/02 сохраняются, но сами границы не участвуют в наклоне интерполяции.
+     */
+    normalized_mask = (uint16_t)(SENSOR_CAL_STORAGE_TAG |
+                                 three_point_mask |
+                                 (stored_mask & boundary_mask));
 
-        if (!isfinite(level_low_mm) || level_low_mm < 0.0f) {
-            level_low_mm = 0.0f;
-        }
-        if (!isfinite(level_high_mm) || level_high_mm <= level_low_mm ||
-            level_high_mm > usable_height_mm) {
-            level_high_mm = usable_height_mm;
-        }
+    if ((stored_mask & SENSOR_CAL_STORAGE_TAG_MASK) !=
+            SENSOR_CAL_STORAGE_TAG ||
+        (stored_mask & three_point_mask) != three_point_mask) {
+        ModBus_SetParameter_Int(MB_ADDR_SENSOR_CAL_MASK, normalized_mask);
+        stored_mask = normalized_mask;
+    }
 
-        if (isfinite(tof_low_us) && isfinite(tof_high_us) &&
-            tof_low_us > tof_260_us &&
-            tof_780_us > tof_high_us &&
-            level_low_mm < SENSOR_CAL_LEVEL_260_MM &&
-            SENSOR_CAL_LEVEL_780_MM < level_high_mm) {
-            full_table_valid = 1U;
+    level_low_mm =
+        ModBus_GetParameter_Float(MB_ADDR_CAL_LOW_LVL) * 1000.0f;
+    level_high_mm =
+        ModBus_GetParameter_Float(MB_ADDR_CAL_HIGH_LVL) * 1000.0f;
+
+    if (!isfinite(level_low_mm) || level_low_mm < 0.0f ||
+        level_low_mm >= SENSOR_CAL_LEVEL_260_MM) {
+        level_low_mm = 0.0f;
+    }
+    if (!isfinite(level_high_mm) ||
+        level_high_mm <= SENSOR_CAL_LEVEL_780_MM ||
+        level_high_mm > usable_height_mm) {
+        level_high_mm = usable_height_mm;
+    }
+
+    /* Команда 01 задаёт только дальнюю границу анализа. */
+    if ((stored_mask & SENSOR_CAL_POINT_LOW_BIT) != 0U) {
+        tof_low_us =
+            ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_LOW_TOF);
+
+        if (isfinite(tof_low_us) && tof_low_us > tof_260_us) {
+            low_bound_valid = 1U;
         }
     }
 
-    if (full_table_valid != 0U) {
-        last_sensor_cal_mode = 5U;
+    /* Команда 02 задаёт только ближнюю границу анализа. */
+    if ((stored_mask & SENSOR_CAL_POINT_HIGH_BIT) != 0U) {
+        tof_high_us =
+            ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_HIGH_TOF);
 
-        if (raw_tof_us >= tof_low_us) {
-            return level_low_mm;
+        if (isfinite(tof_high_us) && tof_high_us > 0.0f &&
+            tof_high_us < tof_780_us) {
+            high_bound_valid = 1U;
         }
-        if (raw_tof_us <= tof_high_us) {
-            return level_high_mm;
-        }
+    }
 
-        if (raw_tof_us >= tof_260_us) {
-            x0 = tof_low_us;
-            x1 = tof_260_us;
-            y0 = level_low_mm;
-            y1 = SENSOR_CAL_LEVEL_260_MM;
-        } else if (raw_tof_us >= tof_520_us) {
-            x0 = tof_260_us;
-            x1 = tof_520_us;
-            y0 = SENSOR_CAL_LEVEL_260_MM;
-            y1 = SENSOR_CAL_LEVEL_520_MM;
-        } else if (raw_tof_us >= tof_780_us) {
-            x0 = tof_520_us;
-            x1 = tof_780_us;
-            y0 = SENSOR_CAL_LEVEL_520_MM;
-            y1 = SENSOR_CAL_LEVEL_780_MM;
-        } else {
-            x0 = tof_780_us;
-            x1 = tof_high_us;
-            y0 = SENSOR_CAL_LEVEL_780_MM;
-            y1 = level_high_mm;
-        }
+    /*
+     * Кусочно-линейная интерполяция:
+     *   T260...T520 -> 260...520 мм;
+     *   T520...T780 -> 520...780 мм.
+     * За пределами трёх точек продолжается ближайший участок.
+     */
+    if (raw_tof_us >= tof_520_us) {
+        x0 = tof_260_us;
+        x1 = tof_520_us;
+        y0 = SENSOR_CAL_LEVEL_260_MM;
+        y1 = SENSOR_CAL_LEVEL_520_MM;
     } else {
-        /* Трёхточечный режим. Между точками выполняется интерполяция,
-         * ниже 260 и выше 780 мм — продолжение ближайшего участка. Итог
-         * обязательно ограничивается физическим диапазоном звукопровода. */
-        last_sensor_cal_mode = 3U;
-
-        if (raw_tof_us >= tof_520_us) {
-            x0 = tof_260_us;
-            x1 = tof_520_us;
-            y0 = SENSOR_CAL_LEVEL_260_MM;
-            y1 = SENSOR_CAL_LEVEL_520_MM;
-        } else {
-            x0 = tof_520_us;
-            x1 = tof_780_us;
-            y0 = SENSOR_CAL_LEVEL_520_MM;
-            y1 = SENSOR_CAL_LEVEL_780_MM;
-        }
+        x0 = tof_520_us;
+        x1 = tof_780_us;
+        y0 = SENSOR_CAL_LEVEL_520_MM;
+        y1 = SENSOR_CAL_LEVEL_780_MM;
     }
 
     if (x0 <= x1) {
-        last_sensor_cal_mode = 0U;
         return -1.0f;
     }
 
-    result_mm = y0 + (x0 - raw_tof_us) * (y1 - y0) / (x0 - x1);
+    result_mm =
+        y0 + (x0 - raw_tof_us) * (y1 - y0) / (x0 - x1);
 
     if (!isfinite(result_mm)) {
-        last_sensor_cal_mode = 0U;
         return -1.0f;
     }
+
+    /* Насыщение по сохранённым границам анализа 01/02. */
+    if (low_bound_valid != 0U) {
+        if (raw_tof_us >= tof_low_us || result_mm < level_low_mm) {
+            result_mm = level_low_mm;
+        }
+    }
+    if (high_bound_valid != 0U) {
+        if (raw_tof_us <= tof_high_us || result_mm > level_high_mm) {
+            result_mm = level_high_mm;
+        }
+    }
+
     if (result_mm < 0.0f) {
         result_mm = 0.0f;
     }
@@ -563,105 +602,335 @@ static float InterpolateCalibratedLevel(float raw_tof_us)
         result_mm = usable_height_mm;
     }
 
+    last_sensor_cal_mode =
+        (low_bound_valid != 0U || high_bound_valid != 0U) ? 4U : 3U;
+
     return result_mm;
 }
 
 /**
- * @brief Возвращает последнее стабильное измерение для записи точки калибровки.
+ * @brief Формирует свежую калибровочную точку по редким корректным PAIR.
  *
- * Калибровочная команда не должна сама вызывать measure_time_of_flight():
- * такой вызов формирует дополнительный задающий импульс вне штатного периода
- * 100 мс и может сохранить переходный отклик. Здесь используется ровно тот
- * отфильтрованный ToF, по которому уже рассчитаны LEVEL и DistTop в консоли.
+ * Главная ошибка предыдущей версии заключалась в требовании получить
+ * двадцать PAIR подряд. В верхней части звукопровода второй импульс часто
+ * не фиксируется, поэтому любой 1P обнулял уже набранную серию и команды
+ * 13/02 практически всегда завершались CAP FAIL.
  *
- * Значение считается пригодным только пока оно свежее. Если после перемещения
- * магнита статистическое окно ещё не стабилизировалось, новые валидные данные
- * не публикуются, возраст превышает предел и команда завершается ошибкой.
+ * В этой версии:
+ *  - после команды выполняются только новые физические запуски;
+ *  - в калибровку попадает исключительно t1 из LAUNCH_VALID_PAIR;
+ *  - запуски 1P и запуски без входного импульса просто пропускаются;
+ *  - ранее набранные корректные PAIR не удаляются;
+ *  - собираются восемь PAIR, затем отбрасываются минимум и максимум;
+ *  - среднее оставшихся шести t1 сохраняется как калибровочная точка;
+ *  - допустимый разброс после отсечения остаётся не более 0,5 мкс.
+ *
+ * Использовать одиночный 1P непосредственно как калибровочный t1 нельзя:
+ * когда первая катушка не сформировала фронт, единственный принятый импульс
+ * может оказаться импульсом второй катушки. Для обычного аварийного измерения
+ * 1P по-прежнему разрешён, но калибровка ждёт редкие подтверждённые PAIR.
  */
 static uint8_t GetStableCalibrationSample(float *tof_us, float *distance_mm)
 {
-    uint32_t age_ms;
+    uint32_t pair_samples[CALIBRATION_PAIR_SAMPLE_TARGET];
+    uint64_t sum_ticks = 0ULL;
+    uint32_t mean_ticks;
+    uint32_t spread_ticks;
+    uint32_t key;
+    uint8_t pair_count = 0U;
+    uint8_t single_count = 0U;
+    uint8_t no_input_count = 0U;
+    uint16_t attempts = 0U;
+    uint8_t i;
+    uint8_t j;
     float local_tof_us;
     float local_distance_mm;
 
-    if (tof_us == NULL || distance_mm == NULL || last_stable_tof_valid == 0U) {
+    if (tof_us == NULL || distance_mm == NULL) {
         return 0U;
     }
 
-    age_ms = (uint32_t)(HAL_GetTick() - last_stable_tof_time_ms);
-    if (age_ms > CALIBRATION_SAMPLE_MAX_AGE_MS || last_stable_tof_ticks == 0U) {
+    USART2_Print("[CAL] CAP\r\n");
+
+    while (pair_count < CALIBRATION_PAIR_SAMPLE_TARGET &&
+           attempts < CALIBRATION_CAPTURE_MAX_ATTEMPTS) {
+        LaunchResult_t launch;
+
+        PrepareCaptureWindow();
+        launch = MeasureSingleLaunch();
+        ++attempts;
+
+        if (launch.tof_ticks == 0U) {
+            ++no_input_count;
+            continue;
+        }
+
+        /*
+         * Важное отличие от версии 128: запуск 1P не сбрасывает ранее
+         * накопленные PAIR. Он только исключается из калибровочной выборки.
+         */
+        if (launch.quality != LAUNCH_VALID_PAIR) {
+            ++single_count;
+            continue;
+        }
+
+        pair_samples[pair_count] = launch.tof_ticks;
+        ++pair_count;
+    }
+
+    if (pair_count < CALIBRATION_PAIR_SAMPLE_TARGET) {
+        USART2_BufInit();
+        USART2_BufPrint("[CAL] PAIR ");
+        USART2_BufPrintInt(pair_count);
+        USART2_BufPrint("/8 A=");
+        USART2_BufPrintInt(attempts);
+        USART2_BufPrint(" 1P=");
+        USART2_BufPrintInt(single_count);
+        USART2_BufPrint(" N=");
+        USART2_BufPrintInt(no_input_count);
+        USART2_BufPrint("\r\n");
+        USART2_BufFlush();
         return 0U;
     }
 
-    local_tof_us = (float)last_stable_tof_ticks * TOF_TICK_US;
+    /* Сортировка восьми значений по возрастанию методом вставок. */
+    for (i = 1U; i < CALIBRATION_PAIR_SAMPLE_TARGET; ++i) {
+        key = pair_samples[i];
+        j = i;
+
+        while (j > 0U && pair_samples[j - 1U] > key) {
+            pair_samples[j] = pair_samples[j - 1U];
+            --j;
+        }
+        pair_samples[j] = key;
+    }
+
+    /*
+     * Отбрасываем один минимум и один максимум. Разброс оценивается уже по
+     * шести значениям, которые реально участвуют в среднем.
+     */
+    spread_ticks =
+        pair_samples[CALIBRATION_PAIR_SAMPLE_TARGET -
+                     CALIBRATION_PAIR_TRIM_COUNT - 1U] -
+        pair_samples[CALIBRATION_PAIR_TRIM_COUNT];
+
+    if (spread_ticks > CALIBRATION_MAX_SPREAD_TICKS) {
+        USART2_BufInit();
+        USART2_BufPrint("[CAL] S=");
+        USART2_BufPrintFloat(
+            (float)spread_ticks * TIM3_CAPTURE_TICK_US);
+        USART2_BufPrint("\r\n");
+        USART2_BufFlush();
+        return 0U;
+    }
+
+    for (i = CALIBRATION_PAIR_TRIM_COUNT;
+         i < (CALIBRATION_PAIR_SAMPLE_TARGET -
+              CALIBRATION_PAIR_TRIM_COUNT);
+         ++i) {
+        sum_ticks += pair_samples[i];
+    }
+
+    mean_ticks = (uint32_t)(
+        (sum_ticks +
+         ((CALIBRATION_PAIR_SAMPLE_TARGET -
+           2U * CALIBRATION_PAIR_TRIM_COUNT) / 2U)) /
+        (CALIBRATION_PAIR_SAMPLE_TARGET -
+         2U * CALIBRATION_PAIR_TRIM_COUNT));
+
+    local_tof_us = (float)mean_ticks * TIM3_CAPTURE_TICK_US;
     local_distance_mm = DistanceFromRawTofMm(local_tof_us);
+
     if (!isfinite(local_tof_us) || !isfinite(local_distance_mm) ||
         local_tof_us <= 0.0f || local_distance_mm <= 0.0f) {
+        USART2_Print("[CAL] VAL\r\n");
         return 0U;
     }
+
+    /* Специальная серия не должна попадать в рабочее скользящее окно. */
+    memset(measurement_window, 0, sizeof(measurement_window));
+    memset(measurement_pair_fallback, 0,
+           sizeof(measurement_pair_fallback));
+    measurement_window_count = 0U;
+    measurement_window_index = 0U;
+    measurement_fallback_count = 0U;
 
     *tof_us = local_tof_us;
     *distance_mm = local_distance_mm;
+
+    USART2_BufInit();
+    USART2_BufPrint("[CAL] OK T=");
+    USART2_BufPrintFloat(local_tof_us);
+    USART2_BufPrint(" A=");
+    USART2_BufPrintInt(attempts);
+    USART2_BufPrint(" 1P=");
+    USART2_BufPrintInt(single_count);
+    USART2_BufPrint(" s=");
+    USART2_BufPrintFloat(
+        (float)spread_ticks * TIM3_CAPTURE_TICK_US);
+    USART2_BufPrint("\r\n");
+    USART2_BufFlush();
+
     return 1U;
+}
+
+
+/**
+ * @brief Подавляет одиночные скачки уже рассчитанного уровня.
+ *
+ * Функция не участвует в калибровке и не изменяет сохранённый ToFraw.
+ * Она применяется только к готовому кандидату уровня перед публикацией в
+ * Modbus и USART2.
+ *
+ * Алгоритм:
+ *  - первое корректное значение принимается сразу;
+ *  - изменение не более LEVEL_JUMP_CONFIRM_THRESHOLD_MM принимается сразу;
+ *  - больший скачок временно удерживается как кандидат;
+ *  - три последовательных кандидата с той же стороны от опубликованного
+ *    значения подтверждают реальное перемещение;
+ *  - если следующий результат вернулся к прежнему уровню, одиночный скачок
+ *    считается помехой и отбрасывается.
+ *
+ * Проверка «с той же стороны» позволяет не замораживать показания при
+ * реальном непрерывном перемещении поплавка. Допуск
+ * LEVEL_JUMP_CONFIRM_TOLERANCE_MM используется для устойчивого ступенчатого
+ * изменения, но не является обязательным при монотонном движении.
+ */
+static float ConfirmMeasuredLevel(float candidate_mm)
+{
+    float jump_mm;
+    float pending_difference_mm;
+    uint8_t same_side;
+
+    if (!isfinite(candidate_mm)) {
+        return published_filtered_level_mm;
+    }
+
+    if (published_level_initialized == 0U) {
+        published_filtered_level_mm = candidate_mm;
+        pending_level_mm = candidate_mm;
+        pending_level_count = 0U;
+        pending_spike_reported = 0U;
+        published_level_initialized = 1U;
+        return candidate_mm;
+    }
+
+    jump_mm = fabsf(candidate_mm - published_filtered_level_mm);
+
+    /* Обычные небольшие изменения принимаются без дополнительной задержки. */
+    if (jump_mm <= LEVEL_JUMP_CONFIRM_THRESHOLD_MM) {
+        if (pending_level_count != 0U && pending_spike_reported != 0U &&
+            !ModBus_CommunicationIsBusy()) {
+            USART2_Print("[SPK] DROP\r\n");
+        }
+
+        published_filtered_level_mm = candidate_mm;
+        pending_level_mm = candidate_mm;
+        pending_level_count = 0U;
+        pending_spike_reported = 0U;
+        return candidate_mm;
+    }
+
+    /* Первый большой скачок только запоминается. */
+    if (pending_level_count == 0U) {
+        pending_level_mm = candidate_mm;
+        pending_level_count = 1U;
+        pending_spike_reported = 1U;
+
+        if (!ModBus_CommunicationIsBusy()) {
+            USART2_BufInit();
+            USART2_BufPrint("[SPK] c=");
+            USART2_BufPrintFloat(candidate_mm);
+            USART2_BufPrint(" p=");
+            USART2_BufPrintFloat(published_filtered_level_mm);
+            USART2_BufPrint(" c=1/");
+            USART2_BufPrintInt(LEVEL_JUMP_CONFIRM_COUNT);
+            USART2_BufPrint("\r\n");
+            USART2_BufFlush();
+        }
+
+        return published_filtered_level_mm;
+    }
+
+    pending_difference_mm = fabsf(candidate_mm - pending_level_mm);
+    same_side =
+        ((candidate_mm > published_filtered_level_mm &&
+          pending_level_mm > published_filtered_level_mm) ||
+         (candidate_mm < published_filtered_level_mm &&
+          pending_level_mm < published_filtered_level_mm)) ? 1U : 0U;
+
+    /* Подтверждаем либо устойчивую ступень, либо последовательное движение
+     * в одну сторону. Смена стороны начинает подтверждение заново. */
+    if (pending_difference_mm <= LEVEL_JUMP_CONFIRM_TOLERANCE_MM ||
+        same_side != 0U) {
+        pending_level_mm = candidate_mm;
+        if (pending_level_count < 0xFFU) {
+            ++pending_level_count;
+        }
+    } else {
+        pending_level_mm = candidate_mm;
+        pending_level_count = 1U;
+    }
+
+    if (pending_level_count >= LEVEL_JUMP_CONFIRM_COUNT) {
+        float previous_level_mm = published_filtered_level_mm;
+
+        published_filtered_level_mm = candidate_mm;
+        pending_level_mm = candidate_mm;
+        pending_level_count = 0U;
+        pending_spike_reported = 0U;
+
+        if (!ModBus_CommunicationIsBusy()) {
+            USART2_BufInit();
+            USART2_BufPrint("[LVL] JUMP ");
+            USART2_BufPrintFloat(previous_level_mm);
+            USART2_BufPrint(" -> ");
+            USART2_BufPrintFloat(candidate_mm);
+            USART2_BufPrint(" mm\r\n");
+            USART2_BufFlush();
+        }
+    }
+
+    return published_filtered_level_mm;
 }
 
 /**
  * @brief Переводит время пролёта в уровень жидкости, отсчитанный от дна.
  *
- * Приоритет расчета:
- * 1. Полная таблица ToFraw: 0 %, 260, 520, 780 мм и 100 %.
- * 2. Трёхточечная таблица ToFraw: 260, 520 и 780 мм.
- * 3. Штатная двухточечная калибровка 0%/100% по C1/C2.
- * 4. Геометрический расчёт по скорости и длине звукопровода.
+ * Приоритет расчёта:
+ * 1. Трёхточечная таблица ToFraw команд 11/12/13:
+ *    260, 520 и 780 мм. Команды 01/02 задают только границы анализа.
+ * 2. Геометрический аварийный расчёт по скорости волны и длине звукопровода.
+ *
+ * Параметры C1/C2 сохранены в карте Modbus для совместимости с ПМП-201Е,
+ * но намеренно не участвуют в измерительном пересчёте. Ранее оставшийся
+ * двухточечный участок C1/C2 создавал скрытое смещение около 20 мм, когда
+ * трёхточечная таблица временно не активировалась.
  */
 static float Calculate_Position(float raw_tof_us)
 {
-    float h_low_m = ModBus_GetParameter_Float(MB_ADDR_CAL_LOW_LVL);
-    float h_high_m = ModBus_GetParameter_Float(MB_ADDR_CAL_HIGH_LVL);
-    float C1_mm = ModBus_GetParameter_Float(MB_ADDR_CAL_C1);
-    float C2_mm = ModBus_GetParameter_Float(MB_ADDR_CAL_C2);
     float measured_distance_mm = DistanceFromRawTofMm(raw_tof_us);
     float usable_height_mm = GetUsableLevelHeightMm();
-    float configured_high_mm = h_high_m * 1000.0f;
-    float effective_high_mm;
     float level_mm;
 
-    effective_high_mm = configured_high_mm;
-    if (!isfinite(effective_high_mm) || effective_high_mm <= 0.0f ||
-        effective_high_mm > usable_height_mm) {
-        effective_high_mm = usable_height_mm;
-    }
-
+    /* Основной и единственный калиброванный режим — точки 11/12/13. */
     level_mm = InterpolateCalibratedLevel(raw_tof_us);
-    if (level_mm >= 0.0f) {
+    if (isfinite(level_mm) && level_mm >= 0.0f) {
         if (level_mm > usable_height_mm) {
             level_mm = usable_height_mm;
         }
         return level_mm;
     }
 
-    if (C1_mm > 0.0f && C2_mm > 0.0f && C1_mm > C2_mm &&
-        effective_high_mm > h_low_m * 1000.0f) {
-        level_mm =
-            h_low_m * 1000.0f +
-            (C1_mm - measured_distance_mm) *
-            (effective_high_mm - h_low_m * 1000.0f) /
-            (C1_mm - C2_mm);
-
-        if (level_mm < h_low_m * 1000.0f) {
-            level_mm = h_low_m * 1000.0f;
-        }
-        if (level_mm > effective_high_mm) {
-            level_mm = effective_high_mm;
-        }
-        return level_mm;
-    }
-
+    /*
+     * Аварийный расчёт используется только при отсутствующей либо
+     * немонотонной таблице 11/12/13. C1/C2 здесь не применяются.
+     */
     level_mm =
         ModBus_GetWaveguideLength() * 1000.0f -
         measured_distance_mm;
 
-    if (level_mm < 0.0f) {
+    if (!isfinite(level_mm) || level_mm < 0.0f) {
         level_mm = 0.0f;
     }
     if (level_mm > usable_height_mm) {
@@ -675,7 +944,8 @@ static float Calculate_Position(float raw_tof_us)
 /**
  * @brief Запускает обязательное сохранение текущей команды.
  *
- * Для 01/02 и 11/12/13 новые точки калибровки к этому моменту уже записаны в RAM и помечены как
+ * Для 01/02 сохраняются границы анализа, для 11/12/13 — точки калибровки.
+ * Все значения к этому моменту уже записаны в RAM и помечены как
  * persistent. Для 223 сохраняется текущая пользовательская конфигурация.
  * Регистр 3000 остается равным 85 до подтверждения записи AT24C64.
  */
@@ -707,9 +977,9 @@ static void ProcessCommandSaveResult(void)
     if (state == MODBUS_STORAGE_SAVE_COMPLETE) {
         ModBus_SetParameter_Int(MB_ADDR_COMMAND, 90U);
         USART2_BufInit();
-        USART2_BufPrint("[CAL] Команда ");
+        USART2_BufPrint("[CAL] ");
         USART2_BufPrintInt(command_save_code);
-        USART2_BufPrint(": данные сохранены в EEPROM, статус 90\r\n");
+        USART2_BufPrint(": SAVE OK\r\n");
         USART2_BufFlush();
 
         command_save_pending = 0U;
@@ -718,9 +988,9 @@ static void ProcessCommandSaveResult(void)
     } else if (state == MODBUS_STORAGE_SAVE_ERROR) {
         ModBus_SetParameter_Int(MB_ADDR_COMMAND, 0U);
         USART2_BufInit();
-        USART2_BufPrint("[CAL] Команда ");
+        USART2_BufPrint("[CAL] ");
         USART2_BufPrintInt(command_save_code);
-        USART2_BufPrint(": ОШИБКА сохранения EEPROM, статус 0, причина=");
+        USART2_BufPrint(": SAVE ERR=");
         USART2_BufPrint(
             ParamsStorage_ErrorToString(ParamsStorage_GetLastError()));
         USART2_BufPrint("\r\n");
@@ -764,6 +1034,36 @@ static void ProcessSoftwareReset(void)
     }
 }
 
+/**
+ * @brief Проверяет правдоподобие участка калибровки по расчётной скорости.
+ *
+ * Формула использует разность уровней 260 мм и разность ToF соседних точек.
+ * Проверка нужна только против ошибочной команды, например когда команда 12
+ * была отправлена при физическом положении 780 мм. В таком случае скорость
+ * получается около 1500 м/с, и точка не должна попадать в EEPROM.
+ */
+static uint8_t CalibrationSegmentIsPlausible(float previous_tof_us,
+                                              float current_tof_us)
+{
+    float delta_t_us;
+    float speed_mps;
+
+    if (!isfinite(previous_tof_us) || !isfinite(current_tof_us)) {
+        return 0U;
+    }
+
+    delta_t_us = previous_tof_us - current_tof_us;
+    if (delta_t_us <= 0.0f) {
+        return 0U;
+    }
+
+    /* 260 мм / delta_t[мкс] = 260000 / delta_t м/с. */
+    speed_mps = 260000.0f / delta_t_us;
+
+    return (speed_mps >= CALIBRATION_SEGMENT_SPEED_MIN_MPS &&
+            speed_mps <= CALIBRATION_SEGMENT_SPEED_MAX_MPS) ? 1U : 0U;
+}
+
 void Process_Calibration_Command(uint16_t cmd)
 {
     uint8_t command_succeeded = 1U;
@@ -779,100 +1079,98 @@ void Process_Calibration_Command(uint16_t cmd)
     switch (cmd) {
         case 3: {
             float waveguide_len = ModBus_GetWaveguideLength();
-            USART2_Print("[CAL] Команда 03: Длина звукопровода = ");
+            USART2_Print("[CAL] L=");
             USART2_BufInit();
             USART2_BufPrintFloat(waveguide_len * 1000.0f);
-            USART2_BufPrint(" мм\r\n");
+            USART2_BufPrint(" mm\r\n");
             USART2_BufFlush();
             break;
         }
         case 2: {
             float tof_us;
             float distance_mm;
+
             if (GetStableCalibrationSample(&tof_us, &distance_mm) != 0U) {
                 uint16_t mask =
                     ModBus_GetParameter_Int(MB_ADDR_SENSOR_CAL_MASK);
-                float h_high =
-                    ModBus_GetParameter_Float(MB_ADDR_CAL_HIGH_LVL);
                 float tof_780 =
                     ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_780);
 
-                if ((mask & SENSOR_CAL_STORAGE_TAG_MASK) != SENSOR_CAL_STORAGE_TAG ||
-                    (mask & (SENSOR_CAL_POINT_LOW_BIT |
-                             SENSOR_CAL_POINT_260_BIT |
-                             SENSOR_CAL_POINT_520_BIT |
-                             SENSOR_CAL_POINT_780_BIT)) !=
-                            (SENSOR_CAL_POINT_LOW_BIT |
-                             SENSOR_CAL_POINT_260_BIT |
-                             SENSOR_CAL_POINT_520_BIT |
-                             SENSOR_CAL_POINT_780_BIT)) {
+                if ((mask & SENSOR_CAL_STORAGE_TAG_MASK) !=
+                    SENSOR_CAL_STORAGE_TAG) {
+                    mask = (uint16_t)(SENSOR_CAL_STORAGE_TAG |
+                                      (mask & SENSOR_CAL_FULL_MASK));
+                }
+
+                /* Команда 02 задаёт только верхнюю границу анализа.
+                 * Она не меняет C2 и не становится четвёртым узлом формулы. */
+                if ((mask & SENSOR_CAL_POINT_780_BIT) != 0U &&
+                    (!isfinite(tof_780) || tof_us >= tof_780)) {
                     command_succeeded = 0U;
-                    USART2_Print("[CAL] Команда 02: сначала выполните 01, 11, 12 и 13\r\n");
-                } else if (!isfinite(tof_780) || tof_us >= tof_780) {
-                    command_succeeded = 0U;
-                    USART2_BufInit();
-                    USART2_BufPrint("[CAL] Команда 02: ОШИБКА монотонности, ToF100=");
-                    USART2_BufPrintFloat(tof_us);
-                    USART2_BufPrint(" мкс должен быть меньше ToF780=");
-                    USART2_BufPrintFloat(tof_780);
-                    USART2_BufPrint(" мкс. Возможен переход на ложный импульс в верхней зоне.\r\n");
-                    USART2_BufFlush();
+                    USART2_Print("[CAL] 02 BND\r\n");
                 } else {
-                    ModBus_SetParameter_Float(MB_ADDR_CAL_C2, distance_mm);
-                    ModBus_SetParameter_Float(MB_ADDR_SENSOR_CAL_HIGH_TOF,
-                                              tof_us);
+                    ModBus_SetParameter_Float(
+                        MB_ADDR_SENSOR_CAL_HIGH_TOF, tof_us);
                     ModBus_SetParameter_Int(
                         MB_ADDR_SENSOR_CAL_MASK,
                         (uint16_t)(mask | SENSOR_CAL_POINT_HIGH_BIT));
                     requires_eeprom_commit = 1U;
 
                     USART2_BufInit();
-                    USART2_BufPrint("[CAL] Команда 02: сохранена точка 100 %, ToFraw=");
+                    USART2_BufPrint("[CAL] 02 T=");
                     USART2_BufPrintFloat(tof_us);
-                    USART2_BufPrint(" мкс, h_high=");
-                    USART2_BufPrintFloat(h_high * 1000.0f);
-                    USART2_BufPrint(" мм, CalMask=31\r\n");
+                    USART2_BufPrint(" D=");
+                    USART2_BufPrintFloat(distance_mm);
+                    USART2_BufPrint("\r\n");
                     USART2_BufFlush();
                 }
             } else {
                 command_succeeded = 0U;
-                USART2_Print("[CAL] Команда 02: нет свежего стабильного измерения; подождите стабилизации\r\n");
+                USART2_Print("[CAL] 02 FAIL\r\n");
             }
             break;
         }
         case 1: {
             float tof_us;
             float distance_mm;
+
             if (GetStableCalibrationSample(&tof_us, &distance_mm) != 0U) {
-                ModBus_SetParameter_Float(MB_ADDR_CAL_C1, distance_mm);
-                ModBus_SetParameter_Float(MB_ADDR_SENSOR_CAL_LOW_TOF,
-                                          tof_us);
+                uint16_t mask =
+                    ModBus_GetParameter_Int(MB_ADDR_SENSOR_CAL_MASK);
+                float tof_260 =
+                    ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_260);
 
-                /*
-                 * Команда 01 начинает новый полный цикл 5P.
-                 * Старые промежуточные значения очищаются физически, а не
-                 * только маской. Поэтому после внезапного отключения питания
-                 * RestoreThreePointCalibrationState() не сможет принять
-                 * незавершённый новый цикл за готовую старую таблицу.
-                 */
-                ModBus_SetParameter_Float(MB_ADDR_SENSOR_CAL_260, 0.0f);
-                ModBus_SetParameter_Float(MB_ADDR_SENSOR_CAL_520, 0.0f);
-                ModBus_SetParameter_Float(MB_ADDR_SENSOR_CAL_780, 0.0f);
-                ModBus_SetParameter_Float(MB_ADDR_SENSOR_CAL_HIGH_TOF, 0.0f);
-                ModBus_SetParameter_Int(
-                    MB_ADDR_SENSOR_CAL_MASK,
-                    (uint16_t)(SENSOR_CAL_STORAGE_TAG |
-                               SENSOR_CAL_POINT_LOW_BIT));
-                requires_eeprom_commit = 1U;
+                if ((mask & SENSOR_CAL_STORAGE_TAG_MASK) !=
+                    SENSOR_CAL_STORAGE_TAG) {
+                    mask = (uint16_t)(SENSOR_CAL_STORAGE_TAG |
+                                      (mask & SENSOR_CAL_FULL_MASK));
+                }
 
-                USART2_BufInit();
-                USART2_BufPrint("[CAL] Команда 01: сохранена точка 0 %, ToFraw=");
-                USART2_BufPrintFloat(tof_us);
-                USART2_BufPrint(" мкс. Новый цикл, CalMask=1\r\n");
-                USART2_BufFlush();
+                /* Команда 01 задаёт только нижнюю границу анализа.
+                 * Она не меняет C1 и не очищает точки 11/12/13. */
+                if ((mask & SENSOR_CAL_POINT_260_BIT) != 0U &&
+                    (!isfinite(tof_260) || tof_us <= tof_260)) {
+                    command_succeeded = 0U;
+                    USART2_Print("[CAL] 01 BND\r\n");
+                } else {
+                    ModBus_SetParameter_Float(
+                        MB_ADDR_SENSOR_CAL_LOW_TOF, tof_us);
+                    ModBus_SetParameter_Int(
+                        MB_ADDR_SENSOR_CAL_MASK,
+                        (uint16_t)(mask | SENSOR_CAL_POINT_LOW_BIT));
+                    requires_eeprom_commit = 1U;
+
+                    USART2_BufInit();
+                    USART2_BufPrint("[CAL] 01 T=");
+                    USART2_BufPrintFloat(tof_us);
+                    USART2_BufPrint(" D=");
+                    USART2_BufPrintFloat(distance_mm);
+                    USART2_BufPrint("\r\n");
+                    USART2_BufFlush();
+                }
             } else {
                 command_succeeded = 0U;
-                USART2_Print("[CAL] Команда 01: нет свежего стабильного измерения; подождите стабилизации\r\n");
+                USART2_Print("[CAL] 01 FAIL\r\n");
             }
             break;
         }
@@ -896,39 +1194,27 @@ void Process_Calibration_Command(uint16_t cmd)
                     reference_level_mm = SENSOR_CAL_LEVEL_260_MM;
 
                     /*
-                     * Команда 11 начинает новый набор промежуточных точек.
-                     *
-                     * Если непосредственно перед ней была выполнена команда
-                     * 01 (маска содержит только бит LOW), сохраняем этот бит:
-                     * так последовательность 01->11->12->13->02 действительно
-                     * формирует полноценную таблицу 5P.
-                     *
-                     * Во всех остальных случаях команда 11 начинает отдельный
-                     * цикл CAL=3P и отбрасывает старые крайние точки.
+                     * Команда 11 начинает новый цикл промежуточной
+                     * калибровки, но не удаляет границы 01/02. Эти границы
+                     * не участвуют в наклоне формулы и могут быть заданы до
+                     * либо после команд 11/12/13.
                      */
-                    if ((mask & SENSOR_CAL_STORAGE_TAG_MASK) ==
-                            SENSOR_CAL_STORAGE_TAG &&
-                        (mask & SENSOR_CAL_FULL_MASK) ==
-                            SENSOR_CAL_POINT_LOW_BIT) {
+                    if ((mask & SENSOR_CAL_STORAGE_TAG_MASK) !=
+                        SENSOR_CAL_STORAGE_TAG) {
                         mask = (uint16_t)(SENSOR_CAL_STORAGE_TAG |
-                                          SENSOR_CAL_POINT_LOW_BIT);
-                    } else {
-                        mask = SENSOR_CAL_STORAGE_TAG;
-                        ModBus_SetParameter_Float(
-                            MB_ADDR_SENSOR_CAL_LOW_TOF, 0.0f);
+                                          (mask & SENSOR_CAL_FULL_MASK));
                     }
 
-                    /*
-                     * Последующие точки старого цикла очищаются физически.
-                     * Это исключает восстановление неполной таблицы после
-                     * отключения питания между командами 11, 12 и 13.
-                     */
+                    mask = (uint16_t)(SENSOR_CAL_STORAGE_TAG |
+                        (mask & (SENSOR_CAL_POINT_LOW_BIT |
+                                 SENSOR_CAL_POINT_HIGH_BIT)));
+
+                    /* Старые точки 520/780 удаляются, чтобы незавершённый
+                     * новый цикл не был принят за готовую таблицу. */
                     ModBus_SetParameter_Float(
                         MB_ADDR_SENSOR_CAL_520, 0.0f);
                     ModBus_SetParameter_Float(
                         MB_ADDR_SENSOR_CAL_780, 0.0f);
-                    ModBus_SetParameter_Float(
-                        MB_ADDR_SENSOR_CAL_HIGH_TOF, 0.0f);
                 } else if (cmd == 12U) {
                     address = MB_ADDR_SENSOR_CAL_520;
                     bit = SENSOR_CAL_POINT_520_BIT;
@@ -961,7 +1247,7 @@ void Process_Calibration_Command(uint16_t cmd)
                 if (required_previous_bit != 0U &&
                     (mask & required_previous_bit) == 0U) {
                     command_succeeded = 0U;
-                    USART2_Print("[CAL] Нарушен порядок команд 11 -> 12 -> 13\r\n");
+                    USART2_Print("[CAL] ORDER\r\n");
                     break;
                 }
 
@@ -969,37 +1255,66 @@ void Process_Calibration_Command(uint16_t cmd)
                     (!isfinite(previous_tof_us) || tof_us >= previous_tof_us)) {
                     command_succeeded = 0U;
                     USART2_BufInit();
-                    USART2_BufPrint("[CAL] ОШИБКА монотонности: новый ToFraw=");
+                    USART2_BufPrint("[CAL] MONO T=");
                     USART2_BufPrintFloat(tof_us);
-                    USART2_BufPrint(" мкс должен быть меньше предыдущего ");
+                    USART2_BufPrint(">=");
                     USART2_BufPrintFloat(previous_tof_us);
-                    USART2_BufPrint(" мкс\r\n");
+                    USART2_BufPrint("\r\n");
                     USART2_BufFlush();
                     break;
                 }
 
+                /*
+                 * Команды 12 и 13 должны соответствовать соседним точкам,
+                 * разнесённым ровно на 260 мм. Ранее код проверял только
+                 * монотонность, поэтому команда 12, случайно выполненная в
+                 * положении 780 мм, принималась и записывала T520≈111 мкс.
+                 */
+                if (required_previous_bit != 0U &&
+                    CalibrationSegmentIsPlausible(previous_tof_us, tof_us) == 0U) {
+                    command_succeeded = 0U;
+                    USART2_Print("[CAL] SPD\r\n");
+                    break;
+                }
+
                 ModBus_SetParameter_Float(address, tof_us);
-                ModBus_SetParameter_Int(MB_ADDR_SENSOR_CAL_MASK,
-                                        (uint16_t)(mask | bit));
+
+                /*
+                 * После команды 13 принудительно формируем полную маску 3P.
+                 * Это исключает ситуацию, когда T260/T520/T780 записаны, но
+                 * один из служебных битов потерян и расчёт остаётся FALLBACK.
+                 */
+                if (cmd == 13U) {
+                    mask = (uint16_t)(SENSOR_CAL_STORAGE_TAG |
+                        (mask & (SENSOR_CAL_POINT_LOW_BIT |
+                                 SENSOR_CAL_POINT_HIGH_BIT)) |
+                        SENSOR_CAL_POINT_260_BIT |
+                        SENSOR_CAL_POINT_520_BIT |
+                        SENSOR_CAL_POINT_780_BIT);
+                } else {
+                    mask = (uint16_t)(mask | bit);
+                }
+
+                ModBus_SetParameter_Int(MB_ADDR_SENSOR_CAL_MASK, mask);
                 requires_eeprom_commit = 1U;
 
                 USART2_BufInit();
-                USART2_BufPrint("[CAL] Команда ");
+                USART2_BufPrint("[CAL] ");
                 USART2_BufPrintInt(cmd);
-                USART2_BufPrint(": уровень ");
+                USART2_BufPrint(" L=");
                 USART2_BufPrintFloat(reference_level_mm);
-                USART2_BufPrint(" мм, сохранён ToFraw = ");
+                USART2_BufPrint(" T=");
                 USART2_BufPrintFloat(tof_us);
-                USART2_BufPrint(" мкс (DistRaw = ");
+                USART2_BufPrint(" D=");
                 USART2_BufPrintFloat(distance_mm);
-                USART2_BufPrint(" мм), CalMask=");
-                USART2_BufPrintInt((uint16_t)((mask | bit) &
+                USART2_BufPrint(" M=");
+                USART2_BufPrintInt((uint16_t)(mask &
                                               SENSOR_CAL_FULL_MASK));
                 USART2_BufPrint("\r\n");
                 USART2_BufFlush();
             } else {
                 command_succeeded = 0U;
-                USART2_Print("[CAL] Промежуточная точка: нет свежего стабильного измерения; подождите стабилизации\r\n");
+                USART2_Print("[CAL] CAP FAIL\r\n");
             }
             break;
         }
@@ -1013,7 +1328,7 @@ void Process_Calibration_Command(uint16_t cmd)
              */
             ModBus_SetParameter_Int(MB_ADDR_COMMAND, 90U);
             USART2_Print(
-                "[SYS] Команда 224: программный перезапуск STM32 через 500 мс\r\n");
+                "[SYS] RESET\r\n");
             software_reset_requested_ms = HAL_GetTick();
             software_reset_pending = 1U;
             return;
@@ -1025,11 +1340,11 @@ void Process_Calibration_Command(uint16_t cmd)
              * а итог 90/0 формируется после ответа фонового драйвера AT24C64.
              */
             requires_eeprom_commit = 1U;
-            USART2_Print("[CFG] Команда 223: сохранение пользовательских настроек\r\n");
+            USART2_Print("[CFG] SAVE\r\n");
             break;
 
         case 4:
-            USART2_Print("[CAL] Команда 04: Разность высот магнитов\r\n");
+            USART2_Print("[CAL] CMD04\r\n");
             break;
         default:
             command_succeeded = 0U;
@@ -1037,7 +1352,7 @@ void Process_Calibration_Command(uint16_t cmd)
     }
 
     /*
-     * Для 01/11/12/13/02 и 223 код 90 нельзя выдавать до подтверждения EEPROM:
+     * Для 01/02, 11/12/13 и 223 код 90 нельзя выдавать до подтверждения EEPROM:
      * питание может исчезнуть во время фоновой постраничной записи. Поэтому
      * команда остается в состоянии 85 и завершается только в
      * ProcessCommandSaveResult().
@@ -1064,7 +1379,7 @@ static void Check_Voltage_Change(const char *name, float new_val, float old_val,
         USART2_Print(name);
         USART2_Print(": ");
         USART2_PrintFloat(new_val);
-        USART2_Print(" В (изм: ");
+        USART2_Print(" V (d=");
         if (old_val > 0.0f) { USART2_PrintFloat(diff); }
         else { USART2_Print("init"); }
         USART2_Print(")\r\n");
@@ -1275,37 +1590,37 @@ void Process_Measurement_Results(float tof_us,
         USART2_BufPrintFloat(published_percent);
         USART2_BufPrint(" % | DistTopCal=");
         USART2_BufPrintFloat(distance_from_top_cal_mm);
-        USART2_BufPrint(" mm | DistRaw=");
+        USART2_BufPrint(" | DR=");
         USART2_BufPrintFloat(distance_from_top_raw_mm);
-        USART2_BufPrint(" mm | CalMask=");
+        USART2_BufPrint(" | M=");
         USART2_BufPrintInt((uint16_t)(sensor_cal_mask & SENSOR_CAL_FULL_MASK));
-        if (sensor_cal_mode == 5U) {
-            USART2_BufPrint(" CAL=5P");
+        if (sensor_cal_mode == 4U) {
+            USART2_BufPrint(" C=3P+B");
         } else if (sensor_cal_mode == 3U) {
-            USART2_BufPrint(" CAL=3P");
+            USART2_BufPrint(" C=3P");
         } else {
-            USART2_BufPrint(" CAL=FALLBACK");
+            USART2_BufPrint(" C=RAW");
         }
         USART2_BufPrint(" | ToFraw=");
         USART2_BufPrintFloat(tof_us);
-        USART2_BufPrint(" us | ToF=");
+        USART2_BufPrint(" | T=");
         USART2_BufPrintFloat(corrected_tof_us);
-        USART2_BufPrint(" us | T=");
+        USART2_BufPrint(" | Tc=");
         USART2_BufPrintFloat(current_temperature);
-        USART2_BufPrint(" C | cCalc3P=");
+        USART2_BufPrint(" | c3=");
         if (calculated_wave_speed_valid != 0U) {
             USART2_BufPrintFloat(calculated_wave_speed);
-            USART2_BufPrint(" m/s");
+            USART2_BufPrint("");
         } else {
             USART2_BufPrint("N/A");
         }
-        USART2_BufPrint(" | cCfg=");
+        USART2_BufPrint(" | cc=");
         USART2_BufPrintFloat(wave_speed);
-        USART2_BufPrint(" m/s");
+        USART2_BufPrint("");
         if (capture_coil_fault_active != 0U) {
-            USART2_BufPrint(" | MODE=1P COIL_FAULT");
+            USART2_BufPrint(" | 1P CF");
         } else {
-            USART2_BufPrint(" | MODE=PAIR");
+            USART2_BufPrint(" | PAIR");
         }
         USART2_BufPrint("\r\n");
         USART2_BufFlush();
@@ -1326,23 +1641,23 @@ int main(void)
     MX_ADC2_Init();
 
     if (MX_I2C2_Init() == HAL_OK) {
-        USART2_Print("[I2C2] Инициализирована (PB10=SCL, PB11=SDA)\r\n");
+        USART2_Print("[I2C] OK\r\n");
         current_temperature = 0.0f;
     } else {
-        USART2_Print("[I2C2] ОШИБКА инициализации!\r\n");
+        USART2_Print("[I2C] ERR\r\n");
     }
 
     TIM3_InputCapture_Init();
 
-    USART2_Print("[ИНИЦ] Калибровка АЦП...\r\n");
+    USART2_Print("[ADC] INIT\r\n");
     if (HAL_ADCEx_Calibration_Start(&hadc1) == HAL_OK)
-        USART2_Print("[ИНИЦ] АЦП1 OK\r\n");
+        USART2_Print("[ADC1] OK\r\n");
     else {
         v24_error = 1; v12_error = 1; v5_error = 1; vdda_error = 1;
     }
 
     if (HAL_ADCEx_Calibration_Start(&hadc2) == HAL_OK)
-        USART2_Print("[ИНИЦ] АЦП2 OK\r\n");
+        USART2_Print("[ADC2] OK\r\n");
     else {
         v12_error = 1; v5_error = 1;
     }
@@ -1357,7 +1672,7 @@ int main(void)
     {
         uint8_t cal_mask_recovered = RestoreThreePointCalibrationState();
         if (cal_mask_recovered != 0U) {
-            USART2_Print("[CAL] Маска 3P нормализована по ToFraw из EEPROM\r\n");
+            USART2_Print("[CAL] MASK OK\r\n");
         }
     }
 
@@ -1388,27 +1703,25 @@ int main(void)
     Update_Poll_Period_From_Modbus();
 
     USART2_BufInit();
-    USART2_BufPrint("Modbus: Addr=");
+    USART2_BufPrint("MB A=");
     USART2_BufPrintInt(ModBus_GetDeviceAddress());
     USART2_BufPrint(", Baud=");
     USART2_BufPrintInt(ModBus_GetParameter_Int(MB_ADDR_MB_BAUD_SET));
     USART2_BufPrint("\r\n");
-    USART2_BufPrint("[DBG] Период: ");
+    USART2_BufPrint("[DBG] P=");
     if (current_poll_period_ms >= 1000) {
         USART2_BufPrintInt(current_poll_period_ms / 1000);
-        USART2_BufPrint(" сек\r\n");
+        USART2_BufPrint(" s\r\n");
     } else {
         USART2_BufPrintInt(current_poll_period_ms);
-        USART2_BufPrint(" мс\r\n");
+        USART2_BufPrint(" ms\r\n");
     }
-    USART2_BufPrint("[DBG] Скорость волны в материале: ");
+    USART2_BufPrint("[DBG] c=");
     USART2_BufPrintFloat(ModBus_GetMaterialWaveSpeed());
-    USART2_BufPrint(" м/с (регистры 2094-2095)\r\n");
+    USART2_BufPrint(" m/s\r\n");
 
     {
         uint16_t cal_mask = ModBus_GetParameter_Int(MB_ADDR_SENSOR_CAL_MASK);
-        float C1 = ModBus_GetParameter_Float(MB_ADDR_CAL_C1);
-        float C2 = ModBus_GetParameter_Float(MB_ADDR_CAL_C2);
         float tof_260 = ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_260);
         float tof_520 = ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_520);
         float tof_780 = ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_780);
@@ -1422,7 +1735,7 @@ int main(void)
 
         (void)InterpolateCalibratedLevel(tof_probe);
 
-        USART2_BufPrint("[CAL] EEPROM: mask=");
+        USART2_BufPrint("[CAL] EE m=");
         USART2_BufPrintInt(cal_mask);
         USART2_BufPrint(", bits=");
         USART2_BufPrintInt((uint16_t)(cal_mask & SENSOR_CAL_FULL_MASK));
@@ -1432,22 +1745,16 @@ int main(void)
         USART2_BufPrintFloat(tof_520);
         USART2_BufPrint(", T780=");
         USART2_BufPrintFloat(tof_780);
-        USART2_BufPrint(" мкс\r\n");
+        USART2_BufPrint("\r\n");
 
-        if (last_sensor_cal_mode == 5U) {
-            USART2_BufPrint("[CAL] Активна калибровка 5P по ToFraw: 0%/260/520/780/100%\r\n");
+        if (last_sensor_cal_mode == 4U) {
+            USART2_BufPrint("[CAL] MODE=3P+B\r\n");
         } else if (last_sensor_cal_mode == 3U &&
                    (cal_mask & SENSOR_CAL_STORAGE_TAG_MASK) == SENSOR_CAL_STORAGE_TAG &&
                    (cal_mask & three_point_mask) == three_point_mask) {
-            USART2_BufPrint("[CAL] Активна калибровка 3P по ToFraw: 260/520/780 мм\r\n");
-        } else if (C1 > 0.0f && C2 > 0.0f && C1 > C2) {
-            USART2_BufPrint("[CAL] Активна резервная калибровка 0/100%: C1=");
-            USART2_BufPrintFloat(C1);
-            USART2_BufPrint(" мм, C2=");
-            USART2_BufPrintFloat(C2);
-            USART2_BufPrint(" мм\r\n");
+            USART2_BufPrint("[CAL] MODE=3P\r\n");
         } else {
-            USART2_BufPrint("[CAL] Калибровка не завершена: используется расчёт по скорости\r\n");
+            USART2_BufPrint("[CAL] MODE=RAW\r\n");
         }
     }
     USART2_BufFlush();
@@ -1471,7 +1778,7 @@ int main(void)
         /* Modbus-кадры обрабатываются быстро; EEPROM здесь не пишется. */
         ModBus_Process();
 
-        /* Проверяем обязательную запись 01/02/223. Функция не блокирует
+        /* Проверяем обязательную запись 01/02/11/12/13/223. Функция не блокирует
          * цикл и только переносит результат EEPROM в адрес 3000. */
         ProcessCommandSaveResult();
 
@@ -1502,7 +1809,7 @@ int main(void)
             /* 0/85/90/99 являются кодами результата, а не номерами команд. */
             if (command_save_pending == 0U &&
                 cmd != 0U && cmd != 85U && cmd != 90U && cmd != 99U) {
-                USART2_Print("[CAL] Получена команда: ");
+                USART2_Print("[CAL] CMD=");
                 USART2_PrintInt(cmd);
                 USART2_Print("\r\n");
                 ModBus_SetParameter_Int(MB_ADDR_COMMAND, 85U);
@@ -1525,20 +1832,24 @@ int main(void)
             measurement = measure_time_of_flight();
             if (measurement > 0U && !tof_timeout) {
                 /* measure_time_of_flight() выполняет один физический запуск.
-                 * После заполнения скользящего окна возвращается среднее 11->9;
+                 * После заполнения скользящего окна возвращается робастное
+                 * среднее 11->5;
                  * при первоначальном заполнении возвращается текущий t1.
                  * Дополнительный EMA намеренно не применяется. */
                 raw_tof_us = (float)measurement * TOF_TICK_US;
 
-                /* Запоминаем именно стабильный результат штатного цикла.
-                 * Команды 01/02/11/12/13 сохранят этот же ToF без отдельного
-                 * импульса и без расхождения с отображаемым значением. */
-                last_stable_tof_ticks = measurement;
-                last_stable_tof_time_ms = HAL_GetTick();
-                last_stable_tof_valid = 1U;
+                /* Отдельный калибровочный ToF обновляется внутри
+                 * measure_time_of_flight() только по устойчивому MEAN. */
 
                 raw_position_mm = Calculate_Position(raw_tof_us);
-                position_mm = raw_position_mm;
+
+                /*
+                 * Калибровка и геометрия формируют кандидат уровня.
+                 * Перед публикацией одиночные скачки подтверждаются тремя
+                 * последовательными результатами. Сырой ToF для команд
+                 * 11/12/13 остаётся неизменным и хранится до этого фильтра.
+                 */
+                position_mm = ConfirmMeasuredLevel(raw_position_mm);
 
                 if (position_mm >= 0.0f && isfinite(position_mm)) {
                     signal_captured = 1U;
@@ -1554,7 +1865,7 @@ int main(void)
                 }
             } else if ((uint32_t)(now - last_measure_error_time) >= 1000U) {
                 last_measure_error_time = now;
-                USART2_Print("[MEAS] Нет валидного импульса\r\n");
+                USART2_Print("[MEAS] NOPULSE\r\n");
             }
         }
 
@@ -1581,7 +1892,7 @@ int main(void)
         /*
          * EEPROM запускается только без активного Modbus-кадра и вдали от
          * следующего 10-Гц измерения. Обычная отложенная запись дополнительно
-         * ждет освобождения USART2. Для обязательной фиксации C1/C2 отладочный
+         * ждет освобождения USART2. Для обязательной фиксации калибровочных точек отладочный
          * вывод не имеет права бесконечно откладывать запись, поэтому состояния
          * PENDING/BUSY получают приоритет над USART2.
          */
@@ -1643,7 +1954,7 @@ void TIM3_InputCapture_Init(void)
 
     TIM3->CR1 = 0;
     TIM3->CR2 = 0;
-    TIM3->PSC = 6;
+    TIM3->PSC = 0U;
     TIM3->ARR = 0xFFFF;
     TIM3->CNT = 0;
     TIM3->EGR = TIM_EGR_UG;
@@ -1685,7 +1996,7 @@ void generate_pulse_and_measure(void)
     HAL_GPIO_WritePin(SWITCH_PORT, SWITCH_PIN, GPIO_PIN_RESET);
 
     /* Счетчик обнуляется непосредственно перед импульсом PB5. Благодаря этому
-     * BLANKING_WINDOW_TICKS отсчитывает именно первые 100 мкс после отправки,
+     * BLANKING_WINDOW_TICKS отсчитывает именно первые 80 мкс после отправки,
      * а не время выполнения подготовительного кода. */
     TIM3->CR1 &= ~TIM_CR1_CEN;
     TIM3->SR = 0U;
@@ -1819,28 +2130,25 @@ static void UpdateCaptureCoilFault(uint8_t fault_active)
                                 MEASUREMENT_ERROR_CAPTURE_COIL);
         if (!ModBus_CommunicationIsBusy()) {
             USART2_Print(
-                "[ALARM] Неисправна катушка фиксации: второй импульс "
-                "отсутствует/неверен. Измерение продолжается по первому "
-                "импульсу.\r\n");
+                "[COIL] ERR\r\n");
         }
     } else {
         ModBus_SetParameter_Int(MB_ADDR_ERROR_CODE,
                                 MEASUREMENT_ERROR_NONE);
         if (!ModBus_CommunicationIsBusy()) {
             USART2_Print(
-                "[ALARM] Катушка фиксации восстановлена: получены 11 "
-                "последовательных корректных пар.\r\n");
+                "[COIL] OK\r\n");
         }
     }
 }
 
 /**
- * @brief Добавляет новый ToF в скользящее окно из 11 запусков.
+ * @brief Добавляет новый ToF в скользящее окно из 20 запусков.
  *
  * После заполнения окна самый старый элемент заменяется новым. Одновременно
  * ведется количество запусков, где использовался только первый импульс.
- * Пока хотя бы один такой запуск остается в последних 11 измерениях, авария
- * катушки остается активной. Для снятия аварии нужны 11 корректных пар подряд.
+ * Пока хотя бы один такой запуск остается в последних 20 измерениях, авария
+ * катушки остается активной. Для снятия аварии нужно полное окно корректных пар подряд.
  */
 static void AddMeasurementToWindow(uint32_t tof_ticks,
                                    uint8_t used_single_pulse)
@@ -1971,15 +2279,12 @@ static LaunchResult_t MeasureSingleLaunch(void)
 /**
  * @brief Обновляет скользящую статистику уровня одним запуском на каждый вызов.
  *
- * В предыдущих версиях 11...22 импульса отправлялись одной быстрой пачкой,
- * что давало фактическую частоту около 100 Гц. Теперь каждый вызов формирует
- * ровно один импульс, а глобальный ограничитель выдерживает минимум 100 мс.
+ * Каждый вызов формирует один импульс. Глобальный ограничитель выдерживает
+ * не менее 50 мс, поэтому частота возбуждения не превышает 20 Гц.
  *
- * Первые десять запусков заполняют окно и возвращают текущий t1 без задержки.
- * Начиная с одиннадцатого запуска результат обновляется каждые 100 мс:
- *  - сортируются последние 11 значений;
- *  - удаляются один минимум и один максимум;
- *  - усредняются оставшиеся девять.
+ * После заполнения окна из 20 запусков выполняются медианный MAD-фильтр и
+ * адаптивная линейная аппроксимация. При неподвижном уровне используется
+ * робастное среднее, при движении — оценка на конце временного окна.
  */
 uint32_t measure_time_of_flight(void)
 {
@@ -2001,37 +2306,56 @@ uint32_t measure_time_of_flight(void)
         (launch.quality == LAUNCH_VALID_PAIR) ? 0U : 1U;
     AddMeasurementToWindow(launch.tof_ticks, used_single_pulse);
 
-    /* Во время заполнения окна не задерживаем появление уровня на 1,1 секунды.
-     * Публикуется текущее значение первого импульса; после заполнения автоматически
-     * включается требуемая статистика 11 -> убрать min/max -> среднее 9. */
+    /*
+     * При 20 Гц окно заполняется примерно за одну секунду. До заполнения
+     * публикуется текущий t1, чтобы после включения уровень появился сразу.
+     */
     if (measurement_window_count < MEASUREMENT_REQUIRED_SAMPLES) {
         tof_timeout = 0U;
         return launch.tof_ticks;
     }
 
-    /* Кольцевой порядок не важен для сортировки, поэтому достаточно скопировать
-     * все 11 элементов окна в локальный массив. */
+    /*
+     * Для линейной аппроксимации порядок отсчётов принципиален.
+     * measurement_window_index указывает на ячейку, которая будет заменена
+     * следующей, то есть на самый старый элемент полного кольцевого окна.
+     */
     for (i = 0U; i < MEASUREMENT_REQUIRED_SAMPLES; ++i) {
-        ordered_samples[i] = measurement_window[i];
+        uint8_t source_index = (uint8_t)(measurement_window_index + i);
+        if (source_index >= MEASUREMENT_REQUIRED_SAMPLES) {
+            source_index =
+                (uint8_t)(source_index - MEASUREMENT_REQUIRED_SAMPLES);
+        }
+        ordered_samples[i] = measurement_window[source_index];
     }
 
     if (!MeasurementStatistics_Calculate(
             ordered_samples,
             MEASUREMENT_REQUIRED_SAMPLES,
             MEASUREMENT_MAX_SPREAD_TICKS,
+            MEASUREMENT_OUTLIER_MIN_GATE_TICKS,
+            MEASUREMENT_APPROX_SLOPE_LOW_MILLI_TICKS,
+            MEASUREMENT_APPROX_SLOPE_HIGH_MILLI_TICKS,
             &statistics)) {
         tof_timeout = 1U;
 
         if (!ModBus_CommunicationIsBusy()) {
             USART2_BufInit();
-            USART2_BufPrint("[STAT] rejected: spread=");
+            USART2_BufPrint("[STAT] REJ u=");
+            USART2_BufPrintInt(statistics.used_samples);
+            USART2_BufPrint("/");
+            USART2_BufPrintInt(MEASUREMENT_REQUIRED_SAMPLES);
+            USART2_BufPrint(" m=");
+            USART2_BufPrintFloat(
+                (float)statistics.mad_ticks * TIM3_CAPTURE_TICK_US);
+            USART2_BufPrint(" s=");
             USART2_BufPrintFloat(
                 (float)statistics.spread_ticks * TIM3_CAPTURE_TICK_US);
-            USART2_BufPrint(" us, limit=");
-            USART2_BufPrintInt(MEASUREMENT_MAX_SPREAD_US);
-            USART2_BufPrint(" us, single=");
+            USART2_BufPrint(" 1p=");
             USART2_BufPrintInt(measurement_fallback_count);
-            USART2_BufPrint("/11\r\n");
+            USART2_BufPrint("/");
+            USART2_BufPrintInt(MEASUREMENT_REQUIRED_SAMPLES);
+            USART2_BufPrint("\r\n");
             USART2_BufFlush();
         }
         return 0U;
@@ -2040,16 +2364,34 @@ uint32_t measure_time_of_flight(void)
     tof_timeout = 0U;
 
     if (!ModBus_CommunicationIsBusy()) {
+        float trend_us_per_second =
+            ((float)statistics.slope_milli_ticks_per_sample / 1000.0f) *
+            TIM3_CAPTURE_TICK_US *
+            (float)EXCITATION_FREQUENCY_HZ;
+
         USART2_BufInit();
-        USART2_BufPrint("[STAT] accepted: 11->9, spread=");
+        USART2_BufPrint("[STAT] OK 20>");
+        USART2_BufPrintInt(statistics.used_samples);
+        USART2_BufPrint(" m=");
+        USART2_BufPrintFloat(
+            (float)statistics.mad_ticks * TIM3_CAPTURE_TICK_US);
+        USART2_BufPrint(" s=");
         USART2_BufPrintFloat(
             (float)statistics.spread_ticks * TIM3_CAPTURE_TICK_US);
-        USART2_BufPrint(" us, pair=");
+        USART2_BufPrint(" tr=");
+        USART2_BufPrintFloat(trend_us_per_second);
+        USART2_BufPrint(" ap=");
+        USART2_BufPrint(statistics.regression_used != 0U ? "LIN" : "MEAN");
+        USART2_BufPrint(" p=");
         USART2_BufPrintInt(
             MEASUREMENT_REQUIRED_SAMPLES - measurement_fallback_count);
-        USART2_BufPrint("/11, single=");
+        USART2_BufPrint("/");
+        USART2_BufPrintInt(MEASUREMENT_REQUIRED_SAMPLES);
+        USART2_BufPrint(", single=");
         USART2_BufPrintInt(measurement_fallback_count);
-        USART2_BufPrint("/11\r\n");
+        USART2_BufPrint("/");
+        USART2_BufPrintInt(MEASUREMENT_REQUIRED_SAMPLES);
+        USART2_BufPrint("\r\n");
         USART2_BufFlush();
     }
 
