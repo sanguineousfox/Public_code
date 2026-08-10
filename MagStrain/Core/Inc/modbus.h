@@ -12,8 +12,9 @@
  *   address     = 0xD480;   // младшее слово
  *   address + 1 = 0x4634;   // старшее слово
  *
- * Дополнительные адреса 2088 и 2094 оставлены как расширение данной прошивки.
- * Они не входят в таблицу Е.4, но нужны для периода измерения и скорости волны.
+ * Дополнительные адреса 2088, 2094, 2112 и 2114 оставлены как расширение данной прошивки.
+ * Они не входят в таблицу Е.4: 2088/2094 нужны для периода измерения и скорости волны,
+ * 2112/2114 — для диагностического контроля линий питания +24 В и +12 В.
  */
 #ifndef MODBUS_H
 #define MODBUS_H
@@ -168,6 +169,11 @@ extern "C" {
 #define MB_ADDR_SENSOR_CAL_MASK     2106U /* Формат 0xA500 + маска точек 0x001F. */
 #define MB_ADDR_SENSOR_CAL_LOW_TOF  2108U /* ToFraw штатной точки 0 %, float32, мкс. */
 #define MB_ADDR_SENSOR_CAL_HIGH_TOF 2110U /* ToFraw штатной точки 100 %, float32, мкс. */
+
+/* Диагностические напряжения питания, только текущие значения RAM.
+ * Не сохраняются в EEPROM. Базовый адрес float32 содержит младшее слово. */
+#define MB_ADDR_SUPPLY_24V          2112U /* Фактическое напряжение линии +24 В, float32, В. */
+#define MB_ADDR_SUPPLY_12V          2114U /* Фактическое напряжение линии +12 В, float32, В. */
 #define MB_ADDR_LEVEL_CORR          2120U /* dh: поправка измерений уровня, м. */
 #define MB_ADDR_DENSITY_CORR        2148U /* dr: поправка измерений плотности, кг/м3. */
 #define MB_ADDR_MEDIUM_TYPE         2154U /* cE: тип среды: 0 произвольная, 1 нефтепродукт, 2 СУГ. */
@@ -336,7 +342,7 @@ void ModBus_PublishLiveMeasurements(float level_mm,
                                     uint16_t status);
 
 void ModBus_UpdateMeasurements(float level, float temperature, float waveguide);
-void ModBus_UpdateVoltages(float vdda, float v24, float v12, float v5);
+void ModBus_UpdateVoltages(float v24, float v12);
 void ModBus_UpdateFirmwareVersion(uint16_t version);
 
 /**

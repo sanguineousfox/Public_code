@@ -118,6 +118,8 @@ static const ModBus_Descriptor_t descriptors[] = {
     DESC_U16(MB_ADDR_SENSOR_CAL_MASK, PERSISTENT),
     DESC_F32(MB_ADDR_SENSOR_CAL_LOW_TOF, PERSISTENT),
     DESC_F32(MB_ADDR_SENSOR_CAL_HIGH_TOF, PERSISTENT),
+    DESC_F32(MB_ADDR_SUPPLY_24V, VOLATILE),
+    DESC_F32(MB_ADDR_SUPPLY_12V, VOLATILE),
     DESC_F32(MB_ADDR_WAVEGUIDE_DEV, PERSISTENT),
     DESC_F32(MB_ADDR_LEVEL_CORR, PERSISTENT),
     DESC_F32(MB_ADDR_DENSITY_CORR, PERSISTENT),
@@ -248,10 +250,6 @@ static uint16_t display_address_map[MB_DISPLAY_REGISTER_COUNT];
 /* Изменение rS/rP применяется только после передачи ответа на старой скорости. */
 static bool uart_reconfigure_pending = false;
 
-static float diagnostic_vdda;
-static float diagnostic_v24;
-static float diagnostic_v12;
-static float diagnostic_v5;
 
 extern UART_HandleTypeDef huart1;
 
@@ -2249,17 +2247,14 @@ void ModBus_UpdateMeasurements(float level,
                                    1U);
 }
 
-void ModBus_UpdateVoltages(float vdda, float v24, float v12, float v5)
+void ModBus_UpdateVoltages(float v24, float v12)
 {
-    /* В текущей зарезервированной карте для напряжений адресов нет. */
-    diagnostic_vdda = vdda;
-    diagnostic_v24 = v24;
-    diagnostic_v12 = v12;
-    diagnostic_v5 = v5;
-    (void)diagnostic_vdda;
-    (void)diagnostic_v24;
-    (void)diagnostic_v12;
-    (void)diagnostic_v5;
+    /* Пользовательское расширение карты Modbus:
+     * 2112-2113 = +24 В, float32, В;
+     * 2114-2115 = +12 В, float32, В.
+     * Значения являются текущей диагностикой и не сохраняются в EEPROM. */
+    WriteFloatDirect(MB_ADDR_SUPPLY_24V, v24);
+    WriteFloatDirect(MB_ADDR_SUPPLY_12V, v12);
 }
 
 void ModBus_UpdateFirmwareVersion(uint16_t version)

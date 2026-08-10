@@ -29,7 +29,6 @@
 #define MEAS_TIMEOUT_MARGIN_MS  2.0f
 #define DIV_24V_FACTOR          9.4f
 #define DIV_12V_FACTOR          4.0f
-#define DIV_5V_FACTOR           2.0f
 #define PULSE_PERIOD_MS_DEFAULT EXCITATION_PERIOD_MS
 #define LED_RED_PIN             GPIO_PIN_13
 #define LED_BLUE_PIN            GPIO_PIN_12
@@ -43,7 +42,7 @@
 #define SWITCH_HOLD_ITERATIONS  12000
 #define SWITCH_PIN              GPIO_PIN_7
 #define SWITCH_PORT             GPIOB
-#define FIRMWARE_VERSION        132
+#define FIRMWARE_VERSION        133
 #define CALIBRATION_SAMPLE_MAX_AGE_MS 500U
 #define CALIBRATION_STABLE_WINDOWS_REQUIRED 10U
 #define CALIBRATION_MIN_ACCEPTED_SAMPLES 16U
@@ -114,7 +113,6 @@ volatile uint32_t capture_max_tof_ticks = 0xFFFFU;
 static float current_vdda = 3.3f;
 static float current_24v = 24.0f;
 static float current_12v = 12.0f;
-static float current_5v = 5.0f;
 static float current_temperature = 0.0f;
 static uint32_t current_poll_period_ms = PULSE_PERIOD_MS_DEFAULT;
 static float prev_vdda = 0.0f;
@@ -122,7 +120,6 @@ static float prev_24v = 0.0f;
 static float prev_12v = 0.0f;
 static uint8_t v24_error = 0;
 static uint8_t v12_error = 0;
-static uint8_t v5_error = 0;
 static uint8_t vdda_error = 0;
 
 /*
@@ -1653,13 +1650,13 @@ int main(void)
     if (HAL_ADCEx_Calibration_Start(&hadc1) == HAL_OK)
         USART2_Print("[ADC1] OK\r\n");
     else {
-        v24_error = 1; v12_error = 1; v5_error = 1; vdda_error = 1;
+        v24_error = 1; v12_error = 1; vdda_error = 1;
     }
 
     if (HAL_ADCEx_Calibration_Start(&hadc2) == HAL_OK)
         USART2_Print("[ADC2] OK\r\n");
     else {
-        v12_error = 1; v5_error = 1;
+        v12_error = 1;
     }
 
     ModBus_Init();
@@ -1699,7 +1696,7 @@ int main(void)
 
     Read_All_Voltages();
     Read_Temperature();
-    ModBus_UpdateVoltages(current_vdda, current_24v, current_12v, current_5v);
+    ModBus_UpdateVoltages(current_24v, current_12v);
     Update_Poll_Period_From_Modbus();
 
     USART2_BufInit();
@@ -1874,10 +1871,8 @@ int main(void)
             !ModBus_CommunicationIsBusy()) {
             Read_All_Voltages();
             last_voltage_read_time = HAL_GetTick();
-            ModBus_UpdateVoltages(current_vdda,
-                                  current_24v,
-                                  current_12v,
-                                  current_5v);
+            ModBus_UpdateVoltages(current_24v,
+                                  current_12v);
         }
 
         /* Приоритет: измерение/вывод -> Modbus -> только затем одна операция
@@ -2427,7 +2422,7 @@ static void DelayWithModBusService(uint32_t delay_ms)
 
 void Read_All_Voltages(void)
 {
-    uint32_t adc_raw_vdda = 0, adc_raw_24v = 0, adc_raw_12v = 0, adc_raw_5v = 0;
+    uint32_t adc_raw_vdda = 0, adc_raw_24v = 0, adc_raw_12v = 0;
 
     ADC1->CR2 |= ADC_CR2_TSVREFE;
     DelayWithModBusService(10U);
@@ -2461,14 +2456,6 @@ void Read_All_Voltages(void)
         v12_error = 1;
     }
 
-    adc_raw_5v = Read_ADC_Average(&hadc2, ADC_CHANNEL_5, ADC_SAMPLETIME_239CYCLES_5, ADC_SAMPLES);
-    if (adc_raw_5v > 100 && adc_raw_5v < 4000) {
-        current_5v = ((float)adc_raw_5v * current_vdda / 4095.0f) * DIV_5V_FACTOR;
-        v5_error = 0;
-    } else {
-        current_5v = 5.0f;
-        v5_error = 1;
-    }
 
     Check_Voltage_Change("VDDA", current_vdda, prev_vdda, &prev_vdda);
     Check_Voltage_Change("+24V", current_24v, prev_24v, &prev_24v);
