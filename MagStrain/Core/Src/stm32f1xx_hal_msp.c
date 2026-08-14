@@ -80,6 +80,7 @@ void HAL_UART_MspInit(UART_HandleTypeDef *huart)
         gpio.Mode = GPIO_MODE_INPUT;
         gpio.Pull = GPIO_NOPULL;
         HAL_GPIO_Init(GPIOA, &gpio);
+#if (USART2_DEBUG_ENABLED != 0U)
     } else if (huart->Instance == USART2) {
         __HAL_RCC_USART2_CLK_ENABLE();
 
@@ -96,6 +97,7 @@ void HAL_UART_MspInit(UART_HandleTypeDef *huart)
         /* USART2 — только отладка; ниже TIM3 и Modbus. */
         HAL_NVIC_SetPriority(USART2_IRQn, 3U, 0U);
         HAL_NVIC_EnableIRQ(USART2_IRQn);
+#endif
     }
 }
 
@@ -108,9 +110,11 @@ void HAL_UART_MspDeInit(UART_HandleTypeDef *huart)
     if (huart->Instance == USART1) {
         __HAL_RCC_USART1_CLK_DISABLE();
         HAL_GPIO_DeInit(GPIOA, GPIO_PIN_9 | GPIO_PIN_10);
+#if (USART2_DEBUG_ENABLED != 0U)
     } else if (huart->Instance == USART2) {
         HAL_NVIC_DisableIRQ(USART2_IRQn);
         __HAL_RCC_USART2_CLK_DISABLE();
         HAL_GPIO_DeInit(GPIOA, GPIO_PIN_2 | GPIO_PIN_3);
+#endif
     }
 }

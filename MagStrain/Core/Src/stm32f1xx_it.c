@@ -63,6 +63,14 @@ void TIM3_IRQHandler(void)
 
         captured_pulses[0] = current_ticks;
         capture_count = 1U;
+#if (EMERGENCY_SINGLE_PULSE_DEBUG_MODE != 0U)
+        /*
+         * Аварийная отладка при отсутствующем втором канале: t1 достаточно.
+         * Завершаем захват прямо в ISR и вообще не открываем окно ожидания t2.
+         */
+        tof_measurement_done = 1U;
+        TIM3->DIER &= ~TIM_DIER_CC4IE;
+#endif
         return;
     }
 
@@ -83,7 +91,9 @@ void USART1_IRQHandler(void)
 
 void USART2_IRQHandler(void)
 {
+#if (USART2_DEBUG_ENABLED != 0U)
     HAL_UART_IRQHandler(&huart2);
+#endif
 }
 
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)

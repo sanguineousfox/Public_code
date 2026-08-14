@@ -19,33 +19,33 @@
 /* ==========================================================================
 КОНСТАНТЫ И МАКРОСЫ
 ========================================================================== */
-#define TIMER_CLOCK_HZ          72000000.0f
-#define TOF_TICK_US             TIM3_CAPTURE_TICK_US
-#define VREFINT_CAL_ADDR        0x1FFFF7BA
-#define VREFINT_CAL_VALUE       ((uint16_t *)VREFINT_CAL_ADDR)
-#define ADC_SAMPLES             16
-#define MEAS_TIMEOUT_MIN_MS     3U
-#define MEAS_TIMEOUT_MAX_MS     20U
-#define MEAS_TIMEOUT_MARGIN_MS  2.0f
-#define DIV_24V_FACTOR          9.4f
-#define DIV_12V_FACTOR          4.0f
-#define PULSE_PERIOD_MS_DEFAULT EXCITATION_PERIOD_MS
-#define LED_RED_PIN             GPIO_PIN_13
-#define LED_BLUE_PIN            GPIO_PIN_12
-#define LED_RED_ON_TIME_MS      1000
-#define LED_RED_ON              GPIO_PIN_SET
-#define LED_RED_OFF             GPIO_PIN_RESET
-#define LED_BLUE_ON             GPIO_PIN_SET
-#define LED_BLUE_OFF            GPIO_PIN_RESET
-#define PULSE_DELAY_ITERATIONS  10
-#define DELAY_AFTER_PULSE_ITER  97
-#define SWITCH_HOLD_ITERATIONS  12000
-#define SWITCH_PIN              GPIO_PIN_7
-#define SWITCH_PORT             GPIOB
-#define FIRMWARE_VERSION        133
-#define CALIBRATION_SAMPLE_MAX_AGE_MS 500U
-#define CALIBRATION_STABLE_WINDOWS_REQUIRED 10U
-#define CALIBRATION_MIN_ACCEPTED_SAMPLES 16U
+#define TIMER_CLOCK_HZ          72000000.0f /* Частота таймерной базы/ядра, используемая в расчетах времени. */
+#define TOF_TICK_US             TIM3_CAPTURE_TICK_US /* Длительность одного отсчета TIM3 в микросекундах. */
+#define VREFINT_CAL_ADDR        0x1FFFF7BA /* Адрес заводской калибровочной константы внутреннего VREF STM32F103. */
+#define VREFINT_CAL_VALUE       ((uint16_t *)VREFINT_CAL_ADDR) /* Указатель на заводское значение VREFINT. */
+#define ADC_SAMPLES             16 /* Число выборок ADC, усредняемых при контроле напряжений питания. */
+#define MEAS_TIMEOUT_MIN_MS     3U /* Минимальное время ожидания входного импульса после запуска, мс. */
+#define MEAS_TIMEOUT_MAX_MS     20U /* Максимальное время ожидания входного импульса, мс. */
+#define MEAS_TIMEOUT_MARGIN_MS  2.0f /* Дополнительный запас к расчетному времени пролета волны, мс. */
+#define DIV_24V_FACTOR          9.3f /* Коэффициент делителя ADC канала линии +24 В: Uвх = Uadc * 9,4. */
+#define DIV_12V_FACTOR          4.0f /* Коэффициент делителя ADC канала линии +12 В: Uвх = Uadc * 4,0. */
+#define PULSE_PERIOD_MS_DEFAULT EXCITATION_PERIOD_MS_DEFAULT /* Период возбуждения после сброса настроек: 100 мс = 10 Гц. */
+#define LED_RED_PIN             GPIO_PIN_13 /* Красный светодиод на PB13. */
+#define LED_BLUE_PIN            GPIO_PIN_12 /* Синий светодиод на PB12. */
+#define LED_RED_ON_TIME_MS      1000 /* Длительность включения красного LED после события, мс. */
+#define LED_RED_ON              GPIO_PIN_SET /* Активный логический уровень красного светодиода. */
+#define LED_RED_OFF             GPIO_PIN_RESET /* Неактивный логический уровень красного светодиода. */
+#define LED_BLUE_ON             GPIO_PIN_SET /* Активный логический уровень синего светодиода. */
+#define LED_BLUE_OFF            GPIO_PIN_RESET /* Неактивный логический уровень синего светодиода. */
+/* PULSE_DELAY_ITERATIONS удален в v135: ширина PB5 теперь задается точно через TIM3 и Modbus 2116...2117. */
+#define DELAY_AFTER_PULSE_ITER  97 /* Короткая NOP-задержка между спадом PB5 и переключением аналогового ключа. */
+#define SWITCH_HOLD_ITERATIONS  12000 /* NOP-задержка удержания приемного ключа перед возвратом в исходное состояние. */
+#define SWITCH_PIN              GPIO_PIN_7 /* Управляющий вывод аналогового ключа приемного тракта. */
+#define SWITCH_PORT             GPIOB /* GPIO-порт управляющего вывода аналогового ключа. */
+#define FIRMWARE_VERSION        136 /* Номер версии ПО, публикуемый через информационный регистр Modbus. */
+#define CALIBRATION_SAMPLE_MAX_AGE_MS 500U /* Резерв старой оконной калибровки: максимальный возраст выборки; fresh-capture сейчас не использует. */
+#define CALIBRATION_STABLE_WINDOWS_REQUIRED 10U /* Резерв старой оконной калибровки: требуемые устойчивые окна; fresh-capture сейчас не использует. */
+#define CALIBRATION_MIN_ACCEPTED_SAMPLES 16U /* Резерв старой оконной калибровки: минимум отсчетов; fresh-capture сейчас не использует. */
 
 /*
  * Для записи калибровочной координаты используются только запуски PAIR,
@@ -74,8 +74,8 @@
 #define CALIBRATION_MAX_SPREAD_TICKS \
     ((uint32_t)(((uint64_t)TIM3_CAPTURE_FREQUENCY_HZ + 1999999ULL) / \
                 2000000ULL))
-#define MIN_POLL_PERIOD_MS      EXCITATION_PERIOD_MS
-#define MAX_POLL_PERIOD_MS      60000
+#define MIN_POLL_PERIOD_MS      50U /* Максимальная разрешенная частота 20 Гц. */
+#define MAX_POLL_PERIOD_MS      60000U /* Минимальная частота примерно 0,0167 Гц. */
 #define EEPROM_MEASUREMENT_GUARD_MS 5U
 
 /*
@@ -124,7 +124,7 @@ static uint8_t vdda_error = 0;
 
 /*
  * Состояние генератора и скользящего статистического окна.
- * last_excitation_time_ms гарантирует не более 10 задающих импульсов в секунду.
+ * last_excitation_time_ms выдерживает текущий период возбуждения из Modbus между импульсами.
  * measurement_pair_fallback[] хранит признак работы по одному импульсу для
  * каждого элемента окна. Авария снимается только после полного окна последовательных
  * запусков с полноценной парой, поэтому сообщение не мигает при единичных сбоях.
@@ -629,12 +629,12 @@ static float InterpolateCalibratedLevel(float raw_tof_us)
  */
 static uint8_t GetStableCalibrationSample(float *tof_us, float *distance_mm)
 {
-    uint32_t pair_samples[CALIBRATION_PAIR_SAMPLE_TARGET];
+    uint32_t cal_samples[CALIBRATION_PAIR_SAMPLE_TARGET];
     uint64_t sum_ticks = 0ULL;
     uint32_t mean_ticks;
     uint32_t spread_ticks;
     uint32_t key;
-    uint8_t pair_count = 0U;
+    uint8_t sample_count = 0U;
     uint8_t single_count = 0U;
     uint8_t no_input_count = 0U;
     uint16_t attempts = 0U;
@@ -649,7 +649,7 @@ static uint8_t GetStableCalibrationSample(float *tof_us, float *distance_mm)
 
     USART2_Print("[CAL] CAP\r\n");
 
-    while (pair_count < CALIBRATION_PAIR_SAMPLE_TARGET &&
+    while (sample_count < CALIBRATION_PAIR_SAMPLE_TARGET &&
            attempts < CALIBRATION_CAPTURE_MAX_ATTEMPTS) {
         LaunchResult_t launch;
 
@@ -662,23 +662,42 @@ static uint8_t GetStableCalibrationSample(float *tof_us, float *distance_mm)
             continue;
         }
 
+#if (EMERGENCY_SINGLE_PULSE_DEBUG_MODE != 0U)
         /*
-         * Важное отличие от версии 128: запуск 1P не сбрасывает ранее
-         * накопленные PAIR. Он только исключается из калибровочной выборки.
+         * АВАРИЙНАЯ СТЕНДОВАЯ ОТЛАДКА.
+         * При физически отсутствующем втором входном импульсе калибровка
+         * набирает только свежие t1 после получения команды. Никакой проверки
+         * PAIR и никакого смешивания со старым рабочим окном здесь нет.
+         */
+        if (launch.quality != LAUNCH_VALID_PAIR) {
+            ++single_count;
+        }
+        cal_samples[sample_count] = launch.tof_ticks;
+        ++sample_count;
+#else
+        /*
+         * ШТАТНЫЙ РЕЖИМ.
+         * В калибровку допускается только t1, аппаратно подтвержденный
+         * корректным вторым импульсом пары.
          */
         if (launch.quality != LAUNCH_VALID_PAIR) {
             ++single_count;
             continue;
         }
 
-        pair_samples[pair_count] = launch.tof_ticks;
-        ++pair_count;
+        cal_samples[sample_count] = launch.tof_ticks;
+        ++sample_count;
+#endif
     }
 
-    if (pair_count < CALIBRATION_PAIR_SAMPLE_TARGET) {
+    if (sample_count < CALIBRATION_PAIR_SAMPLE_TARGET) {
         USART2_BufInit();
+#if (EMERGENCY_SINGLE_PULSE_DEBUG_MODE != 0U)
+        USART2_BufPrint("[CAL] 1P ");
+#else
         USART2_BufPrint("[CAL] PAIR ");
-        USART2_BufPrintInt(pair_count);
+#endif
+        USART2_BufPrintInt(sample_count);
         USART2_BufPrint("/8 A=");
         USART2_BufPrintInt(attempts);
         USART2_BufPrint(" 1P=");
@@ -692,24 +711,21 @@ static uint8_t GetStableCalibrationSample(float *tof_us, float *distance_mm)
 
     /* Сортировка восьми значений по возрастанию методом вставок. */
     for (i = 1U; i < CALIBRATION_PAIR_SAMPLE_TARGET; ++i) {
-        key = pair_samples[i];
+        key = cal_samples[i];
         j = i;
 
-        while (j > 0U && pair_samples[j - 1U] > key) {
-            pair_samples[j] = pair_samples[j - 1U];
+        while (j > 0U && cal_samples[j - 1U] > key) {
+            cal_samples[j] = cal_samples[j - 1U];
             --j;
         }
-        pair_samples[j] = key;
+        cal_samples[j] = key;
     }
 
-    /*
-     * Отбрасываем один минимум и один максимум. Разброс оценивается уже по
-     * шести значениям, которые реально участвуют в среднем.
-     */
+    /* Отбрасываем один минимум и один максимум. */
     spread_ticks =
-        pair_samples[CALIBRATION_PAIR_SAMPLE_TARGET -
-                     CALIBRATION_PAIR_TRIM_COUNT - 1U] -
-        pair_samples[CALIBRATION_PAIR_TRIM_COUNT];
+        cal_samples[CALIBRATION_PAIR_SAMPLE_TARGET -
+                    CALIBRATION_PAIR_TRIM_COUNT - 1U] -
+        cal_samples[CALIBRATION_PAIR_TRIM_COUNT];
 
     if (spread_ticks > CALIBRATION_MAX_SPREAD_TICKS) {
         USART2_BufInit();
@@ -725,7 +741,7 @@ static uint8_t GetStableCalibrationSample(float *tof_us, float *distance_mm)
          i < (CALIBRATION_PAIR_SAMPLE_TARGET -
               CALIBRATION_PAIR_TRIM_COUNT);
          ++i) {
-        sum_ticks += pair_samples[i];
+        sum_ticks += cal_samples[i];
     }
 
     mean_ticks = (uint32_t)(
@@ -751,6 +767,7 @@ static uint8_t GetStableCalibrationSample(float *tof_us, float *distance_mm)
     measurement_window_count = 0U;
     measurement_window_index = 0U;
     measurement_fallback_count = 0U;
+    UpdateCaptureCoilFault(0U);
 
     *tof_us = local_tof_us;
     *distance_mm = local_distance_mm;
@@ -760,8 +777,12 @@ static uint8_t GetStableCalibrationSample(float *tof_us, float *distance_mm)
     USART2_BufPrintFloat(local_tof_us);
     USART2_BufPrint(" A=");
     USART2_BufPrintInt(attempts);
+#if (EMERGENCY_SINGLE_PULSE_DEBUG_MODE != 0U)
+    USART2_BufPrint(" EMG1P");
+#else
     USART2_BufPrint(" 1P=");
     USART2_BufPrintInt(single_count);
+#endif
     USART2_BufPrint(" s=");
     USART2_BufPrintFloat(
         (float)spread_ticks * TIM3_CAPTURE_TICK_US);
@@ -1386,8 +1407,21 @@ static void Check_Voltage_Change(const char *name, float new_val, float old_val,
 
 static void Update_Poll_Period_From_Modbus(void)
 {
+    static uint8_t rate_sync_initialized = 0U;
+    static float last_period_ms = 0.0f;
+    static float last_frequency_hz = 0.0f;
     float period_value = ModBus_GetParameter_Float(MB_ADDR_POLL_PERIOD);
+    float frequency_value =
+        ModBus_GetParameter_Float(MB_ADDR_EXCITATION_FREQUENCY);
+    uint8_t period_changed;
+    uint8_t frequency_changed;
 
+    /*
+     * 2088...2089 хранит совместимый период в мс и сохраняется в EEPROM.
+     * 2118...2119 — удобное оперативное представление того же параметра в Гц.
+     * После загрузки EEPROM период имеет приоритет, поэтому старые настройки
+     * автоматически продолжают работать и пересчитываются в частоту.
+     */
     if (!isfinite(period_value)) {
         period_value = (float)PULSE_PERIOD_MS_DEFAULT;
     }
@@ -1398,9 +1432,55 @@ static void Update_Poll_Period_From_Modbus(void)
         period_value = (float)MAX_POLL_PERIOD_MS;
     }
 
+    if (rate_sync_initialized == 0U) {
+        current_poll_period_ms = (uint32_t)(period_value + 0.5f);
+        frequency_value = 1000.0f / (float)current_poll_period_ms;
+        ModBus_SetParameter_Float(MB_ADDR_POLL_PERIOD,
+                                  (float)current_poll_period_ms);
+        ModBus_SetParameter_Float(MB_ADDR_EXCITATION_FREQUENCY,
+                                  frequency_value);
+        last_period_ms = (float)current_poll_period_ms;
+        last_frequency_hz = frequency_value;
+        rate_sync_initialized = 1U;
+        return;
+    }
+
+    period_changed =
+        (fabsf(period_value - last_period_ms) > 0.01f) ? 1U : 0U;
+    frequency_changed =
+        (isfinite(frequency_value) &&
+         fabsf(frequency_value - last_frequency_hz) > 0.0001f) ? 1U : 0U;
+
+    if (frequency_changed != 0U && period_changed == 0U) {
+        /* Запись по 2118: прямое задание частоты в Гц. */
+        if (frequency_value < MODBUS_MIN_EXCITATION_FREQUENCY_HZ) {
+            frequency_value = MODBUS_MIN_EXCITATION_FREQUENCY_HZ;
+        }
+        if (frequency_value > MODBUS_MAX_EXCITATION_FREQUENCY_HZ) {
+            frequency_value = MODBUS_MAX_EXCITATION_FREQUENCY_HZ;
+        }
+        period_value = 1000.0f / frequency_value;
+    }
+
+    /* Если изменены оба значения одновременно, совместимый адрес 2088 имеет
+     * приоритет. Это сохраняет поведение существующего внешнего ПО. */
+    if (period_value < (float)MIN_POLL_PERIOD_MS) {
+        period_value = (float)MIN_POLL_PERIOD_MS;
+    }
+    if (period_value > (float)MAX_POLL_PERIOD_MS) {
+        period_value = (float)MAX_POLL_PERIOD_MS;
+    }
+
     current_poll_period_ms = (uint32_t)(period_value + 0.5f);
+    frequency_value = 1000.0f / (float)current_poll_period_ms;
+
     ModBus_SetParameter_Float(MB_ADDR_POLL_PERIOD,
                               (float)current_poll_period_ms);
+    ModBus_SetParameter_Float(MB_ADDR_EXCITATION_FREQUENCY,
+                              frequency_value);
+
+    last_period_ms = (float)current_poll_period_ms;
+    last_frequency_hz = frequency_value;
 }
 
 static uint32_t GetMeasurementTimeoutMs(void)
@@ -1614,11 +1694,15 @@ void Process_Measurement_Results(float tof_us,
         USART2_BufPrint(" | cc=");
         USART2_BufPrintFloat(wave_speed);
         USART2_BufPrint("");
+#if (EMERGENCY_SINGLE_PULSE_DEBUG_MODE != 0U)
+        USART2_BufPrint(" | EMG1P");
+#else
         if (capture_coil_fault_active != 0U) {
             USART2_BufPrint(" | 1P CF");
         } else {
             USART2_BufPrint(" | PAIR");
         }
+#endif
         USART2_BufPrint("\r\n");
         USART2_BufFlush();
     }
@@ -1633,7 +1717,9 @@ int main(void)
     SystemClock_Config();
     MX_GPIO_Init();
     MX_USART1_UART_Init();
+#if (USART2_DEBUG_ENABLED != 0U)
     MX_USART2_UART_Init();
+#endif
     MX_ADC1_Init();
     MX_ADC2_Init();
 
@@ -1679,6 +1765,9 @@ int main(void)
     current_measurement_status = MEASUREMENT_STATUS_VALID;
 
     ModBus_UpdateFirmwareVersion(FIRMWARE_VERSION);
+#if (EMERGENCY_SINGLE_PULSE_DEBUG_MODE != 0U)
+    USART2_Print("[DBG] EMERGENCY 1P MODE\r\n");
+#endif
     TempSensors_Init();
     Grad_Init();
 
@@ -1690,8 +1779,10 @@ int main(void)
     HAL_NVIC_EnableIRQ(TIM3_IRQn);
     HAL_NVIC_SetPriority(USART1_IRQn, 1, 0);
     HAL_NVIC_EnableIRQ(USART1_IRQn);
+#if (USART2_DEBUG_ENABLED != 0U)
     HAL_NVIC_SetPriority(USART2_IRQn, 3, 0);
     HAL_NVIC_EnableIRQ(USART2_IRQn);
+#endif
     __enable_irq();
 
     Read_All_Voltages();
@@ -1886,7 +1977,7 @@ int main(void)
 
         /*
          * EEPROM запускается только без активного Modbus-кадра и вдали от
-         * следующего 10-Гц измерения. Обычная отложенная запись дополнительно
+         * следующего измерения. Обычная отложенная запись дополнительно
          * ждет освобождения USART2. Для обязательной фиксации калибровочных точек отладочный
          * вывод не имеет права бесконечно откладывать запись, поэтому состояния
          * PENDING/BUSY получают приоритет над USART2.
@@ -1978,6 +2069,30 @@ void TIM3_InputCapture_Init(void)
 void generate_pulse_and_measure(void)
 {
     uint8_t i;
+    float pulse_width_us;
+    uint16_t pulse_start_tick;
+    uint16_t pulse_width_ticks;
+    uint32_t saved_primask;
+
+    /*
+     * 2116...2117: длительность задающего импульса PB5, float32, мкс.
+     * Параметр читается перед каждым запуском, поэтому новое значение Modbus
+     * начинает действовать со следующего импульса без перезапуска.
+     *
+     * Ширина формируется непосредственно по TIM3 (72 МГц), а не программным
+     * NOP-циклом. Поэтому оптимизация -O0/-Og/-Os больше не меняет длительность.
+     */
+    pulse_width_us = ModBus_GetParameter_Float(MB_ADDR_EXCITATION_PULSE_WIDTH);
+    if (!isfinite(pulse_width_us) ||
+        pulse_width_us < MODBUS_MIN_EXCITATION_PULSE_WIDTH_US ||
+        pulse_width_us > MODBUS_MAX_EXCITATION_PULSE_WIDTH_US) {
+        pulse_width_us = MODBUS_DEFAULT_EXCITATION_PULSE_WIDTH_US;
+    }
+    pulse_width_ticks = (uint16_t)(pulse_width_us *
+        ((float)TIM3_CAPTURE_FREQUENCY_HZ / 1000000.0f) + 0.5f);
+    if (pulse_width_ticks == 0U) {
+        pulse_width_ticks = 1U;
+    }
 
     tof_measurement_done = 0U;
     tof_timeout = 0U;
@@ -2000,15 +2115,24 @@ void generate_pulse_and_measure(void)
     TIM3->CR1 |= TIM_CR1_CEN;
     __DSB();
 
-    /* Задающий импульс. Прямая запись BSRR/BRR используется вместо HAL,
-     * чтобы длительность импульсов была минимальной и повторяемой. */
+    /*
+     * Задающий импульс PB5. На время высокого уровня запрещаем IRQ максимум
+     * на 30 мкс: это исключает растяжение импульса обработчиком USART/SysTick.
+     * Сам TIM3 при запрещенных IRQ продолжает считать, поэтому длительность
+     * задается аппаратной временной базой 72 МГц. Исходный PRIMASK сохраняется.
+     */
+    saved_primask = __get_PRIMASK();
+    __disable_irq();
     GPIOB->BSRR = Gen_Impuls_Pin;
-    for (volatile uint32_t delay = 0U;
-         delay < (PULSE_DELAY_ITERATIONS * 5U);
-         ++delay) {
+    pulse_start_tick = (uint16_t)TIM3->CNT;
+    while ((uint16_t)((uint16_t)TIM3->CNT - pulse_start_tick) <
+           pulse_width_ticks) {
         __NOP();
     }
     GPIOB->BRR = Gen_Impuls_Pin;
+    if (saved_primask == 0U) {
+        __enable_irq();
+    }
 
     /* Небольшая аппаратная задержка до переключения приемного тракта. */
     for (volatile uint32_t delay = 0U;
@@ -2022,7 +2146,7 @@ void generate_pulse_and_measure(void)
 /**
  * @brief Рассчитывает физически допустимое окно прихода первого сформированного импульса.
  *
- * Нижняя граница фиксирована: первые 100 мкс подавлены как наводка.
+ * Нижняя граница фиксирована: первые 80 мкс подавлены как наводка.
  * Верхняя граница получается из длины волновода и скорости волны:
  *
  *     t_max = L / c + задержка электроники + запас.
@@ -2073,7 +2197,7 @@ static void PrepareCaptureWindow(void)
 /**
  * @brief Ожидает разрешенный момент следующего задающего импульса.
  *
- * Генерация ограничена 10 Гц независимо от того, кто вызвал измерение:
+ * Генерация ограничена текущей частотой из Modbus независимо от того, кто вызвал измерение:
  * основной цикл, команда калибровки или повторный запуск. Во время ожидания
  * рабочий Modbus и неблокирующий USART2 продолжают обслуживаться.
  */
@@ -2081,7 +2205,7 @@ static void WaitForNextExcitationSlot(void)
 {
     if (excitation_time_initialized != 0U) {
         while ((uint32_t)(HAL_GetTick() - last_excitation_time_ms) <
-               EXCITATION_PERIOD_MS) {
+               current_poll_period_ms) {
             ModBus_Process();
             USART2_TxProcess();
             __NOP();
@@ -2105,7 +2229,12 @@ static void WaitForNextExcitationSlot(void)
  */
 static void UpdateCaptureCoilFault(uint8_t fault_active)
 {
+#if (EMERGENCY_SINGLE_PULSE_DEBUG_MODE != 0U)
+    /* В аварийной стендовой сборке отсутствие второго импульса ожидаемо. */
+    fault_active = 0U;
+#else
     fault_active = (fault_active != 0U) ? 1U : 0U;
+#endif
 
     current_measurement_status = MEASUREMENT_STATUS_VALID;
     if (fault_active != 0U) {
@@ -2148,7 +2277,12 @@ static void UpdateCaptureCoilFault(uint8_t fault_active)
 static void AddMeasurementToWindow(uint32_t tof_ticks,
                                    uint8_t used_single_pulse)
 {
+#if (EMERGENCY_SINGLE_PULSE_DEBUG_MODE != 0U)
+    /* PAIR/1P не участвует в аварийной отладке: окно содержит только t1. */
+    used_single_pulse = 0U;
+#else
     used_single_pulse = (used_single_pulse != 0U) ? 1U : 0U;
+#endif
 
     if (measurement_window_count == MEASUREMENT_REQUIRED_SAMPLES) {
         if (measurement_pair_fallback[measurement_window_index] != 0U &&
@@ -2178,7 +2312,7 @@ static void AddMeasurementToWindow(uint32_t tof_ticks,
  * @brief Выполняет один физический запуск измерительного тракта.
  *
  * Штатный режим:
- *  - после защитного окна 100 мкс фиксируется первый импульс t1;
+ *  - после защитного окна 80 мкс фиксируется первый импульс t1;
  *  - второй импульс t2 подтверждает пару, если t2-t1 = 14...26 мкс;
  *  - для расчета ToF всегда используется t1.
  *
@@ -2251,6 +2385,15 @@ static LaunchResult_t MeasureSingleLaunch(void)
     result.tof_ticks = captured_pulses[0];
     tof_timeout = 0U;
 
+#if (EMERGENCY_SINGLE_PULSE_DEBUG_MODE != 0U)
+    /*
+     * Аварийная отладка: первый валидный t1 является достаточным результатом.
+     * quality оставляем SINGLE только как диагностический факт; рабочее окно
+     * и калибровка при этом не требуют PAIR.
+     */
+    result.quality = LAUNCH_SINGLE_PULSE_NO_SECOND;
+    return result;
+#else
     if (capture_count >= 2U) {
         uint32_t interval_ticks =
             captured_pulses[1] - captured_pulses[0];
@@ -2267,6 +2410,7 @@ static LaunchResult_t MeasureSingleLaunch(void)
         /* Второй импульс физически не появился. Продолжаем по одному t1. */
         result.quality = LAUNCH_SINGLE_PULSE_NO_SECOND;
     }
+#endif
 
     return result;
 }
@@ -2274,8 +2418,8 @@ static LaunchResult_t MeasureSingleLaunch(void)
 /**
  * @brief Обновляет скользящую статистику уровня одним запуском на каждый вызов.
  *
- * Каждый вызов формирует один импульс. Глобальный ограничитель выдерживает
- * не менее 50 мс, поэтому частота возбуждения не превышает 20 Гц.
+ * Каждый вызов формирует один импульс. Глобальный ограничитель использует
+ * текущий период 2088 / частоту 2118; аппаратный максимум ограничен 20 Гц.
  *
  * После заполнения окна из 20 запусков выполняются медианный MAD-фильтр и
  * адаптивная линейная аппроксимация. При неподвижном уровне используется
@@ -2297,13 +2441,17 @@ uint32_t measure_time_of_flight(void)
         return 0U;
     }
 
+#if (EMERGENCY_SINGLE_PULSE_DEBUG_MODE != 0U)
+    used_single_pulse = 0U;
+#else
     used_single_pulse =
         (launch.quality == LAUNCH_VALID_PAIR) ? 0U : 1U;
+#endif
     AddMeasurementToWindow(launch.tof_ticks, used_single_pulse);
 
     /*
-     * При 20 Гц окно заполняется примерно за одну секунду. До заполнения
-     * публикуется текущий t1, чтобы после включения уровень появился сразу.
+     * При частоте по умолчанию 10 Гц окно заполняется примерно за две секунды.
+     * До заполнения публикуется текущий t1, чтобы после включения уровень появился сразу.
      */
     if (measurement_window_count < MEASUREMENT_REQUIRED_SAMPLES) {
         tof_timeout = 0U;
@@ -2362,7 +2510,7 @@ uint32_t measure_time_of_flight(void)
         float trend_us_per_second =
             ((float)statistics.slope_milli_ticks_per_sample / 1000.0f) *
             TIM3_CAPTURE_TICK_US *
-            (float)EXCITATION_FREQUENCY_HZ;
+            (1000.0f / (float)current_poll_period_ms);
 
         USART2_BufInit();
         USART2_BufPrint("[STAT] OK 20>");

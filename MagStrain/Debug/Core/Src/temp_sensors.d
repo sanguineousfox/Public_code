@@ -29,7 +29,7 @@ Core/Src/temp_sensors.o: ../Core/Src/temp_sensors.c \
  ../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_tim_ex.h \
  ../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_uart.h \
  ../Core/Inc/i2c_config.h ../Core/Inc/lm75b.h ../Core/Inc/modbus.h \
- ../Core/Inc/utils.h
+ ../Core/Inc/utils.h ../Core/Inc/build_options.h
 ../Core/Inc/temp_sensors.h:
 ../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal.h:
 ../Core/Inc/stm32f1xx_hal_conf.h:
@@ -63,3 +63,4 @@ Core/Src/temp_sensors.o: ../Core/Src/temp_sensors.c \
 ../Core/Inc/lm75b.h:
 ../Core/Inc/modbus.h:
 ../Core/Inc/utils.h:
+../Core/Inc/build_options.h:

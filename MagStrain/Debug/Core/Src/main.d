@@ -27,8 +27,9 @@ Core/Src/main.o: ../Core/Src/main.c ../Core/Inc/main.h \
  ../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_tim.h \
  ../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_tim_ex.h \
  ../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_uart.h \
- ../Core/Inc/stm32f1xx_it.h ../Core/Inc/utils.h ../Core/Inc/i2c_config.h \
- ../Core/Inc/modbus.h ../Core/Inc/temp_sensors.h ../Core/Inc/graduation.h \
+ ../Core/Inc/build_options.h ../Core/Inc/stm32f1xx_it.h \
+ ../Core/Inc/utils.h ../Core/Inc/i2c_config.h ../Core/Inc/modbus.h \
+ ../Core/Inc/temp_sensors.h ../Core/Inc/graduation.h \
  ../Core/Inc/measurement_statistics.h ../Core/Inc/measurement_snapshot.h \
  ../Core/Inc/params_storage.h
 ../Core/Inc/main.h:
@@ -60,6 +61,7 @@ Core/Src/main.o: ../Core/Src/main.c ../Core/Inc/main.h \
 ../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_tim.h:
 ../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_tim_ex.h:
 ../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_uart.h:
+../Core/Inc/build_options.h:
 ../Core/Inc/stm32f1xx_it.h:
 ../Core/Inc/utils.h:
 ../Core/Inc/i2c_config.h:

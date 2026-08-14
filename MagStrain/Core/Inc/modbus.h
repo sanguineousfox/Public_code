@@ -12,9 +12,11 @@
  *   address     = 0xD480;   // младшее слово
  *   address + 1 = 0x4634;   // старшее слово
  *
- * Дополнительные адреса 2088, 2094, 2112 и 2114 оставлены как расширение данной прошивки.
+ * Дополнительные адреса 2088, 2094, 2112, 2114, 2116 и 2118 оставлены как расширение данной прошивки.
  * Они не входят в таблицу Е.4: 2088/2094 нужны для периода измерения и скорости волны,
- * 2112/2114 — для диагностического контроля линий питания +24 В и +12 В.
+ * 2112/2114 — для диагностического контроля линий питания +24 В и +12 В,
+ * 2116 — для задания длительности задающего импульса, 2118 — для прямого задания
+ * частоты возбуждения. 2088 и 2118 синхронизированы между собой.
  */
 #ifndef MODBUS_H
 #define MODBUS_H
@@ -45,6 +47,21 @@ extern "C" {
  * по адресам 2094 и 2096 имеют приоритет и сохраняются в AT24C64. */
 #define MODBUS_DEFAULT_MATERIAL_WAVE_SPEED_MPS  2841.37f
 #define MODBUS_DEFAULT_WAVEGUIDE_LENGTH_M        1.04f
+
+/* Пользовательская настройка задающего импульса PB5.
+ * Значение хранится как float32 в микросекундах и применяется уже к
+ * следующему циклу измерения без перезапуска контроллера. */
+#define MODBUS_DEFAULT_EXCITATION_PULSE_WIDTH_US  10.0f
+#define MODBUS_MIN_EXCITATION_PULSE_WIDTH_US       1.0f
+#define MODBUS_MAX_EXCITATION_PULSE_WIDTH_US      30.0f
+
+/* Частота запуска задающего импульса PB5.
+ * Диапазон соответствует старому параметру периода 2088: 50...60000 мс.
+ * Значение 2118 является оперативным представлением частоты; в EEPROM
+ * сохраняется совместимый период 2088, поэтому старые настройки не теряются. */
+#define MODBUS_DEFAULT_EXCITATION_FREQUENCY_HZ     10.0f
+#define MODBUS_MIN_EXCITATION_FREQUENCY_HZ         (1000.0f / 60000.0f)
+#define MODBUS_MAX_EXCITATION_FREQUENCY_HZ         20.0f
 
 /* ========================================================================== */
 /* Таблица Е.4: измеряемые параметры int16                                    */
@@ -145,7 +162,7 @@ extern "C" {
 #define MB_ADDR_DAMPING_TIME        2086U /* dt: демпфирование уровня, 0 или 5..120 с. */
 
 /* Расширение прошивки, отсутствует в таблице Е.4. */
-#define MB_ADDR_POLL_PERIOD         2088U /* Период запуска измерения, мс; минимум 100 мс. */
+#define MB_ADDR_POLL_PERIOD         2088U /* Период запуска измерения, float32, мс; 50...60000 мс. */
 
 #define MB_ADDR_VOLUME_15C          2090U /* UF: объем, приведенный к 15 °C. */
 #define MB_ADDR_DENSITY_15C         2092U /* rF: плотность, приведенная к 15 °C. */
@@ -174,6 +191,11 @@ extern "C" {
  * Не сохраняются в EEPROM. Базовый адрес float32 содержит младшее слово. */
 #define MB_ADDR_SUPPLY_24V          2112U /* Фактическое напряжение линии +24 В, float32, В. */
 #define MB_ADDR_SUPPLY_12V          2114U /* Фактическое напряжение линии +12 В, float32, В. */
+
+/* Пользовательское расширение: длительность задающего импульса PB5.
+ * Параметр сохраняется в AT24C64. Базовый адрес содержит младшее слово. */
+#define MB_ADDR_EXCITATION_PULSE_WIDTH 2116U /* Длительность импульса, float32, мкс; 1...30 мкс. */
+#define MB_ADDR_EXCITATION_FREQUENCY   2118U /* Частота возбуждения PB5, float32, Гц; связана с 2088. */
 #define MB_ADDR_LEVEL_CORR          2120U /* dh: поправка измерений уровня, м. */
 #define MB_ADDR_DENSITY_CORR        2148U /* dr: поправка измерений плотности, кг/м3. */
 #define MB_ADDR_MEDIUM_TYPE         2154U /* cE: тип среды: 0 произвольная, 1 нефтепродукт, 2 СУГ. */
@@ -333,7 +355,6 @@ float ModBus_GetMaterialWaveSpeed(void);
 void ModBus_SetMaterialWaveSpeed(float speed_mps);
 void ModBus_SetTemperature(float temperature);
 float ModBus_GetTemperature(void);
-uint32_t ModBus_GetPulseWidthIterations(void);
 
 void ModBus_PublishLiveMeasurements(float level_mm,
                                     float temperature_c,

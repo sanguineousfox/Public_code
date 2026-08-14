@@ -1,3 +1,2 @@
-../Core/Src/rs485.c:8:13:DelayCycles	16	static,ignoring_inline_asm
-../Core/Src/rs485.c:15:6:RS485_Init	8	static
-../Core/Src/rs485.c:22:19:RS485_Transmit	32	static
+../Core/Src/rs485.c:15:6:RS485_Init	0	static
+../Core/Src/rs485.c:22:19:RS485_Transmit	24	static,ignoring_inline_asm
