@@ -20,8 +20,9 @@
 #define DEBUG_PARITY               UART_PARITY_NONE
 #define DEBUG_STOP_BITS            UART_STOPBITS_1
 
-// Адреса в энергонезависимой памяти (Flash)
-#define CONFIG_FLASH_ADDRESS       0x0801FC00  // Адрес для хранения конфигурации
+// First reserved config page after application, valid for 64KB STM32F103C8.
+// Keep synchronized with Bootloader/bootloader.c and application linker script.
+#define CONFIG_FLASH_ADDRESS       0x0800F800  // Адрес для хранения конфигурации
 
 // Структура конфигурации
 #pragma pack(push, 1)
