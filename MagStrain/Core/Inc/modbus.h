@@ -10,8 +10,6 @@
 #define MODBUS_BAUDRATE          9600
 #define MODBUS_BUFFER_SIZE       256
 #define MODBUS_CRC_INIT          0xFFFF
-#define MODBUS_ENTER_BOOTLOADER_REGISTER 6200u
-#define MODBUS_ENTER_BOOTLOADER_MAGIC    0xB007u
 
 /* Увеличенные таймауты для стабильной работы */
 #define MODBUS_RESPONSE_TIMEOUT_MS  200
