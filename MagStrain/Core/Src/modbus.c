@@ -137,7 +137,12 @@ static void ModBus_SendException(uint8_t function, uint8_t exception_code)
     response[4] = (crc >> 8) & 0xFF;
 
     USART2_PrintModBusResponse(response, 5);
-    ModBus_TransmitFrame(response, 5);
+
+    if (!modbus_tx_active) {
+        ModBus_PrepareForTransmit();
+    }
+
+    HAL_UART_Transmit(&huart1, response, 5, 200);
 }
 
 /* Чтение holding регистров (функция 0x03) --------------------------------*/
@@ -177,7 +182,12 @@ static void ModBus_ReadHoldingRegisters(uint16_t start_addr, uint16_t reg_count)
     response[index++] = (crc >> 8) & 0xFF;
 
     USART2_PrintModBusResponse(response, index);
-    ModBus_TransmitFrame(response, index);
+
+    if (!modbus_tx_active) {
+        ModBus_PrepareForTransmit();
+    }
+
+    HAL_UART_Transmit(&huart1, response, index, 200);
 }
 
 /* Чтение input регистров (функция 0x04) ---------------------------------*/
@@ -217,38 +227,17 @@ static void ModBus_ReadInputRegisters(uint16_t start_addr, uint16_t reg_count)
     response[index++] = (crc >> 8) & 0xFF;
 
     USART2_PrintModBusResponse(response, index);
-    ModBus_TransmitFrame(response, index);
+
+    if (!modbus_tx_active) {
+        ModBus_PrepareForTransmit();
+    }
+
+    HAL_UART_Transmit(&huart1, response, index, 200);
 }
 
 /* Запись одного регистра (функция 0x06) ----------------------------------*/
 static void ModBus_WriteSingleRegister(uint16_t reg_addr, uint16_t value)
 {
-    /* Local extension 6200: enter immutable Modbus update bootloader.
-     * ACK is transmitted before the reset; bootloader always listens at ID 1.
-     * Do not reuse PMP-201E's existing register range. */
-    if (reg_addr == 6200u) {
-        if (value != 0xB007u || modbus.device_address == 0u) {
-            ModBus_SendException(0x06, MODBUS_EXCEPTION_ILLEGAL_DATA_VALUE);
-            return;
-        }
-        uint8_t response[8] = {
-            modbus.device_address, 0x06u, 0x18u, 0x38u,
-            0xB0u, 0x07u, 0u, 0u
-        };
-        uint16_t crc = ModBus_CRC16(response, 6);
-        response[6] = (uint8_t)crc;
-        response[7] = (uint8_t)(crc >> 8);
-        ModBus_TransmitFrame(response, sizeof(response));
-        /* Preserve response and RS485 turnaround before software reset. */
-        __HAL_RCC_PWR_CLK_ENABLE();
-        __HAL_RCC_BKP_CLK_ENABLE();
-        HAL_PWR_EnableBkUpAccess();
-        BKP->DR1 = 0xB007u;
-        __DSB();
-        HAL_Delay(10u);
-        NVIC_SystemReset();
-        return;
-    }
     if (reg_addr >= HOLD_HOLDING_REG_COUNT) {
         ModBus_SendException(0x06, MODBUS_EXCEPTION_ILLEGAL_DATA_ADDRESS);
         return;
@@ -283,7 +272,12 @@ static void ModBus_WriteSingleRegister(uint16_t reg_addr, uint16_t value)
     response[index++] = (crc >> 8) & 0xFF;
 
     USART2_PrintModBusResponse(response, index);
-    ModBus_TransmitFrame(response, index);
+
+    if (!modbus_tx_active) {
+        ModBus_PrepareForTransmit();
+    }
+
+    HAL_UART_Transmit(&huart1, response, index, 200);
 }
 
 /* Запись нескольких регистров (функция 0x10) -----------------------------*/
@@ -336,7 +330,12 @@ static void ModBus_WriteMultipleRegisters(uint16_t start_addr, uint16_t reg_coun
     response[index++] = (crc >> 8) & 0xFF;
 
     USART2_PrintModBusResponse(response, index);
-    ModBus_TransmitFrame(response, index);
+
+    if (!modbus_tx_active) {
+        ModBus_PrepareForTransmit();
+    }
+
+    HAL_UART_Transmit(&huart1, response, index, 200);
 }
 
 /* Обработка принятого фрейма ---------------------------------------------*/
