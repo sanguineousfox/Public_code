@@ -301,7 +301,6 @@ int main(void)
         v5_error = 1;
     }
 
-    /* Modbus bootloader entry is handled in modbus.c via register 6200. */
     /* Инициализация ModBus */
     ModBus_Init();
 
