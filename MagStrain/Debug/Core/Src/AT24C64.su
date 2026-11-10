@@ -1,11 +1,10 @@
-../Core/Src/AT24C64.c:20:13:AT24C64_SetWriteProtect	16	static
-../Core/Src/AT24C64.c:25:16:AT24C64_RangeIsValid	24	static
-../Core/Src/AT24C64.c:37:19:AT24C64_IsReady	16	static
-../Core/Src/AT24C64.c:45:19:AT24C64_PollReady	24	static
+../Core/Src/AT24C64.c:20:13:AT24C64_SetWriteProtect	0	static
+../Core/Src/AT24C64.c:37:19:AT24C64_IsReady	0	static
+../Core/Src/AT24C64.c:45:19:AT24C64_PollReady	16	static
 ../Core/Src/AT24C64.c:62:19:AT24C64_WritePageBegin	48	static
 ../Core/Src/AT24C64.c:104:6:AT24C64_AbortWriteCycle	8	static
 ../Core/Src/AT24C64.c:110:19:AT24C64_Init	40	static
-../Core/Src/AT24C64.c:127:19:AT24C64_ReadByte	16	static
-../Core/Src/AT24C64.c:134:19:AT24C64_ReadBytes	40	static
+../Core/Src/AT24C64.c:134:19:AT24C64_ReadBytes	24	static
+../Core/Src/AT24C64.c:127:19:AT24C64_ReadByte	0	static
+../Core/Src/AT24C64.c:159:19:AT24C64_WriteBytes	64	static
 ../Core/Src/AT24C64.c:152:19:AT24C64_WriteByte	16	static
-../Core/Src/AT24C64.c:159:19:AT24C64_WriteBytes	56	static

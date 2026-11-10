@@ -1,8 +1,7 @@
-../Core/Src/measurement_snapshot.c:16:13:FloatToDocumentWords	32	static
-../Core/Src/measurement_snapshot.c:30:6:MeasurementSnapshot_Init	8	static
-../Core/Src/measurement_snapshot.c:35:6:MeasurementSnapshot_Publish	48	static
-../Core/Src/measurement_snapshot.c:64:6:MeasurementSnapshot_ReadRange	32	static
-../Core/Src/measurement_snapshot.c:105:6:MeasurementSnapshot_ReadWord	16	static
-../Core/Src/measurement_snapshot.c:110:6:MeasurementSnapshot_IsValid	4	static
-../Core/Src/measurement_snapshot.c:115:10:MeasurementSnapshot_GetTimestamp	4	static
-../Core/Src/measurement_snapshot.c:120:10:MeasurementSnapshot_GetStatus	4	static
+../Core/Src/measurement_snapshot.c:30:6:MeasurementSnapshot_Init	0	static
+../Core/Src/measurement_snapshot.c:35:6:MeasurementSnapshot_Publish	24	static
+../Core/Src/measurement_snapshot.c:64:6:MeasurementSnapshot_ReadRange	20	static
+../Core/Src/measurement_snapshot.c:105:6:MeasurementSnapshot_ReadWord	0	static
+../Core/Src/measurement_snapshot.c:110:6:MeasurementSnapshot_IsValid	0	static
+../Core/Src/measurement_snapshot.c:115:10:MeasurementSnapshot_GetTimestamp	0	static
+../Core/Src/measurement_snapshot.c:120:10:MeasurementSnapshot_GetStatus	0	static

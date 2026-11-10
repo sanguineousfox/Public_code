@@ -1,5 +1,2 @@
-../Core/Src/measurement_filter.c:8:14:AbsoluteFloat	16	static
-../Core/Src/measurement_filter.c:13:13:ResetToValue	24	static
-../Core/Src/measurement_filter.c:27:14:MedianOfSamples	48	static
-../Core/Src/measurement_filter.c:63:6:MeasurementFilter_Init	16	static
-../Core/Src/measurement_filter.c:72:7:MeasurementFilter_Update	40	static
+../Core/Src/measurement_filter.c:63:6:MeasurementFilter_Init	0	static
+../Core/Src/measurement_filter.c:72:7:MeasurementFilter_Update	72	static

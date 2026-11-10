@@ -120,6 +120,8 @@ static const ModBus_Descriptor_t descriptors[] = {
     DESC_F32(MB_ADDR_SENSOR_CAL_HIGH_TOF, PERSISTENT),
     DESC_F32(MB_ADDR_SUPPLY_24V, VOLATILE),
     DESC_F32(MB_ADDR_SUPPLY_12V, VOLATILE),
+    DESC_F32(MB_ADDR_EXCITATION_PULSE_WIDTH, PERSISTENT),
+    DESC_F32(MB_ADDR_EXCITATION_FREQUENCY, VOLATILE),
     DESC_F32(MB_ADDR_WAVEGUIDE_DEV, PERSISTENT),
     DESC_F32(MB_ADDR_LEVEL_CORR, PERSISTENT),
     DESC_F32(MB_ADDR_DENSITY_CORR, PERSISTENT),
@@ -271,9 +273,11 @@ static const FloatDefault_t float_defaults[] = {
     {MB_ADDR_TANK_HEIGHT, 0.95f},
     {MB_ADDR_TANK_VOLUME, 0.0f},
     {MB_ADDR_DAMPING_TIME, 10.0f},
-    {MB_ADDR_POLL_PERIOD, 50.0f},
+    {MB_ADDR_POLL_PERIOD, 100.0f},
     {MB_ADDR_MATERIAL_WAVE_SPEED, MODBUS_DEFAULT_MATERIAL_WAVE_SPEED_MPS},
     {MB_ADDR_WAVEGUIDE_LEN, MODBUS_DEFAULT_WAVEGUIDE_LENGTH_M},
+    {MB_ADDR_EXCITATION_PULSE_WIDTH, MODBUS_DEFAULT_EXCITATION_PULSE_WIDTH_US},
+    {MB_ADDR_EXCITATION_FREQUENCY, MODBUS_DEFAULT_EXCITATION_FREQUENCY_HZ},
     {MB_ADDR_SENSOR_CAL_260, 0.0f},
     {MB_ADDR_SENSOR_CAL_520, 0.0f},
     {MB_ADDR_SENSOR_CAL_780, 0.0f},
@@ -723,6 +727,12 @@ static bool FloatValueIsValid(uint16_t address, float value)
             return value >= 50.0f && value <= 60000.0f;
         case MB_ADDR_MATERIAL_WAVE_SPEED:
             return value >= 1000.0f && value <= 10000.0f;
+        case MB_ADDR_EXCITATION_PULSE_WIDTH:
+            return value >= MODBUS_MIN_EXCITATION_PULSE_WIDTH_US &&
+                   value <= MODBUS_MAX_EXCITATION_PULSE_WIDTH_US;
+        case MB_ADDR_EXCITATION_FREQUENCY:
+            return value >= MODBUS_MIN_EXCITATION_FREQUENCY_HZ &&
+                   value <= MODBUS_MAX_EXCITATION_FREQUENCY_HZ;
         case MB_ADDR_WAVEGUIDE_LEN:
             return value >= 0.1f && value <= 50.0f;
         case MB_ADDR_SENSOR_CAL_260:
@@ -2188,11 +2198,6 @@ void ModBus_SetTemperature(float temperature)
 float ModBus_GetTemperature(void)
 {
     return ModBus_GetParameter_Float(MB_ADDR_TEMP);
-}
-
-uint32_t ModBus_GetPulseWidthIterations(void)
-{
-    return 10U;
 }
 
 void ModBus_PublishLiveMeasurements(float level_mm,

@@ -1,6 +1,6 @@
-../Core/Src/config.c:5:6:Config_Init	4	static
-../Core/Src/config.c:10:9:Config_GetAddress	8	static
-../Core/Src/config.c:15:6:Config_SetAddress	16	static
-../Core/Src/config.c:23:6:Config_SaveToFlash	8	static
-../Core/Src/config.c:28:6:Config_LoadFromFlash	4	static
+../Core/Src/config.c:5:6:Config_Init	0	static
+../Core/Src/config.c:10:9:Config_GetAddress	0	static
+../Core/Src/config.c:15:6:Config_SetAddress	8	static
+../Core/Src/config.c:23:6:Config_SaveToFlash	0	static
+../Core/Src/config.c:28:6:Config_LoadFromFlash	0	static
 ../Core/Src/config.c:33:6:Config_FactoryReset	8	static

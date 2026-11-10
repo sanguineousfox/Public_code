@@ -1,4 +1,2 @@
-../Core/Src/measurement_statistics.c:11:13:SortAscending	24	static
-../Core/Src/measurement_statistics.c:28:17:MedianOfTwenty	48	static
-../Core/Src/measurement_statistics.c:38:16:DivideRoundedSigned	80	static
-../Core/Src/measurement_statistics.c:51:6:MeasurementStatistics_Calculate	680	static
+../Core/Src/measurement_statistics.c:11:13:SortAscending.constprop	16	static
+../Core/Src/measurement_statistics.c:51:6:MeasurementStatistics_Calculate	232	static

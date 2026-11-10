@@ -15,6 +15,7 @@ extern "C" {
 #endif
 
 #include "stm32f1xx_hal.h"
+#include "build_options.h"
 #include <stdint.h>
 
 /* ADC */
@@ -153,7 +154,7 @@ extern "C" {
  * из-за чего точка 780 мм сохранялась неверно и участок 520...780 мм
  * получал ошибочный наклон.
  */
-#define CAPTURE_BLANKING_TIME_US       80U
+#define CAPTURE_BLANKING_TIME_US       70U
 #define BLANKING_WINDOW_TICKS          \
     CAPTURE_US_TO_TICKS_CEIL(CAPTURE_BLANKING_TIME_US)
 
@@ -179,14 +180,15 @@ extern "C" {
 #define CAPTURE_MAX_TOF_MARGIN_US      60U
 
 /*
- * Частота возбуждения волновода установлена 20 Гц.
- * Период между фронтами PB5 не может быть меньше 50 мс.
- * При появлении звона или роста ошибок пары период можно увеличить через
- * Modbus-регистр 2088 без перекомпиляции.
+ * Частота возбуждения по умолчанию снижена до 10 Гц (период 100 мс).
+ * Во время работы частота может изменяться без перекомпиляции:
+ *   2118...2119 — частота, float32, Гц;
+ *   2088...2089 — совместимый параметр периода, float32, мс.
+ * Оба параметра связаны: изменение одного пересчитывает второй.
  */
-#define EXCITATION_FREQUENCY_HZ        20U
-#define EXCITATION_PERIOD_MS           \
-    (1000U / EXCITATION_FREQUENCY_HZ)
+#define EXCITATION_FREQUENCY_HZ_DEFAULT  10U
+#define EXCITATION_PERIOD_MS_DEFAULT     \
+    (1000U / EXCITATION_FREQUENCY_HZ_DEFAULT)
 
 /*
  * После первого импульса второй должен появиться не позднее верхней границы
@@ -198,8 +200,8 @@ extern "C" {
                              CAPTURE_SECOND_PULSE_GRACE_US)
 
 /*
- * Фильтр использует 20 последовательных запусков. При частоте 20 Гц
- * длительность окна равна примерно одной секунде: шум уменьшается, а
+ * Фильтр использует 20 последовательных запусков. При частоте по умолчанию
+ * 10 Гц длительность окна равна примерно двум секундам: шум уменьшается, а
  * запаздывание при движении компенсируется линейной аппроксимацией.
  */
 #define MEASUREMENT_REQUIRED_SAMPLES   20U

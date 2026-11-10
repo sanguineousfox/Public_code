@@ -1,5 +1,5 @@
-../Core/Src/lm75b.c:10:19:LM75B_Init	40	static
-../Core/Src/lm75b.c:23:19:LM75B_ReadRawTemperature	40	static
+../Core/Src/lm75b.c:10:19:LM75B_Init	32	static
+../Core/Src/lm75b.c:23:19:LM75B_ReadRawTemperature	32	static
 ../Core/Src/lm75b.c:47:19:LM75B_ReadTemperature	24	static
-../Core/Src/lm75b.c:67:19:LM75B_ReadConfig	32	static
+../Core/Src/lm75b.c:67:19:LM75B_ReadConfig	24	static
 ../Core/Src/lm75b.c:82:19:LM75B_WriteConfig	32	static
