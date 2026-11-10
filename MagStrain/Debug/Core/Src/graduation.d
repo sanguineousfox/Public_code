@@ -27,8 +27,7 @@ Core/Src/graduation.o: ../Core/Src/graduation.c ../Core/Inc/graduation.h \
  ../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_tim.h \
  ../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_tim_ex.h \
  ../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_uart.h \
- ../Core/Inc/at24c64.h ../Core/Inc/modbus.h ../Core/Inc/utils.h \
- ../Core/Inc/build_options.h
+ ../Core/Inc/at24c64.h ../Core/Inc/modbus.h ../Core/Inc/utils.h
 ../Core/Inc/graduation.h:
 ../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal.h:
 ../Core/Inc/stm32f1xx_hal_conf.h:
@@ -61,4 +60,3 @@ Core/Src/graduation.o: ../Core/Src/graduation.c ../Core/Inc/graduation.h \
 ../Core/Inc/at24c64.h:
 ../Core/Inc/modbus.h:
 ../Core/Inc/utils.h:
-../Core/Inc/build_options.h:

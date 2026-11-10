@@ -1,5 +1,4 @@
 /** @file utils.c @brief Строковые утилиты и неблокирующий вывод USART2. */
-#define UTILS_IMPLEMENTATION 1
 #include "utils.h"
 #include "main.h"
 

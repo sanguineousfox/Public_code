@@ -28,8 +28,7 @@ Core/Src/modbus.o: ../Core/Src/modbus.c ../Core/Inc/modbus.h \
  ../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_tim_ex.h \
  ../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_uart.h \
  ../Core/Inc/measurement_snapshot.h ../Core/Inc/graduation.h \
- ../Core/Inc/params_storage.h ../Core/Inc/rs485.h ../Core/Inc/utils.h \
- ../Core/Inc/build_options.h
+ ../Core/Inc/params_storage.h ../Core/Inc/rs485.h ../Core/Inc/utils.h
 ../Core/Inc/modbus.h:
 ../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal.h:
 ../Core/Inc/stm32f1xx_hal_conf.h:
@@ -64,4 +63,3 @@ Core/Src/modbus.o: ../Core/Src/modbus.c ../Core/Inc/modbus.h \
 ../Core/Inc/params_storage.h:
 ../Core/Inc/rs485.h:
 ../Core/Inc/utils.h:
-../Core/Inc/build_options.h:
