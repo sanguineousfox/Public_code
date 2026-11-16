@@ -4,7 +4,7 @@
 ../Core/Src/AT24C64.c:62:19:AT24C64_WritePageBegin	48	static
 ../Core/Src/AT24C64.c:104:6:AT24C64_AbortWriteCycle	8	static
 ../Core/Src/AT24C64.c:110:19:AT24C64_Init	40	static
-../Core/Src/AT24C64.c:134:19:AT24C64_ReadBytes	24	static
-../Core/Src/AT24C64.c:127:19:AT24C64_ReadByte	0	static
-../Core/Src/AT24C64.c:159:19:AT24C64_WriteBytes	64	static
-../Core/Src/AT24C64.c:152:19:AT24C64_WriteByte	16	static
+../Core/Src/AT24C64.c:135:19:AT24C64_ReadBytes	24	static
+../Core/Src/AT24C64.c:128:19:AT24C64_ReadByte	0	static
+../Core/Src/AT24C64.c:160:19:AT24C64_WriteBytes	64	static
+../Core/Src/AT24C64.c:153:19:AT24C64_WriteByte	16	static

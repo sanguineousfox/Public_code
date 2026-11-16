@@ -16,6 +16,7 @@ extern "C" {
 
 #include "stm32f1xx_hal.h"
 #include "build_options.h"
+#include <stdbool.h>
 #include <stdint.h>
 
 /* ADC */
@@ -82,11 +83,11 @@ extern "C" {
  */
 #define ELECTRONICS_DELAY_US        18.00f
 
-/*
- * Верхняя невалидная зона звукопровода около электронной головки.
- * Значение должно соответствовать фактической конструкции звукопровода.
- */
-#define UPPER_INVALID_ZONE_MM       220.00f
+/* Слепые зоны от концов кожуха до границ рабочего хода магнита. */
+#define LOWER_INVALID_ZONE_MM       150.0f
+#define UPPER_INVALID_ZONE_MM       200.0f
+#define LEVEL_OVERRUN_LIMIT_MM       20.0f
+#define LEVEL_OVERRUN_ALARM_MM        1.0f
 
 /*
  * Калибровка измерительного канала по пяти опорным положениям.
@@ -205,15 +206,17 @@ extern "C" {
  * запаздывание при движении компенсируется линейной аппроксимацией.
  */
 #define MEASUREMENT_REQUIRED_SAMPLES   20U
+#define MEASUREMENT_STATISTICS_HOLD_MS  300U
 
 /* Статус быстрого снимка измерений */
-#define MEASUREMENT_STATUS_VALID         0x0001U
 #define MEASUREMENT_STATUS_SINGLE_PULSE  0x0002U
 #define MEASUREMENT_STATUS_COIL_FAULT    0x0004U
+#define MEASUREMENT_STATUS_OVERFLOW      0x0008U
 
 /* Коды ошибок Modbus-регистра 2416 */
 #define MEASUREMENT_ERROR_NONE           0x0000U
 #define MEASUREMENT_ERROR_CAPTURE_COIL   0x0101U
+#define MEASUREMENT_ERROR_OVERFLOW       0x0102U
 
 /*
  * Грубая защита от переключения на другой импульс. Точный отбор выбросов
@@ -268,8 +271,11 @@ extern ADC_HandleTypeDef hadc2;
 
 extern volatile uint32_t captured_pulses[MAX_CAPTURED_PULSES];
 extern volatile uint8_t capture_count;
+extern volatile bool capture_overrun;
 extern volatile uint8_t tof_measurement_done;
 extern volatile uint8_t tof_timeout;
+
+uint16_t ReadPulseTraceWord(uint16_t offset);
 
 /*
  * Верхняя допустимая граница времени первого сформированного импульса.
@@ -292,7 +298,7 @@ HAL_StatusTypeDef MX_I2C2_Init(void);
 
 void TIM3_InputCapture_Init(void);
 void generate_pulse_and_measure(void);
-uint32_t measure_time_of_flight(void);
+float measure_time_of_flight(void);
 uint32_t measure_time_of_flight_test(void);
 
 void Read_All_Voltages(void);

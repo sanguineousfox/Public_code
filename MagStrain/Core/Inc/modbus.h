@@ -42,16 +42,17 @@ extern "C" {
  * получены по двум контрольным точкам реального звукопровода:
  *   240 мм -> 102,47 мкс;
  *   940 мм -> 348,83 мкс.
- * Длина звукопровода по умолчанию — 1,040 м. Эти значения используются
+ * Полная длина звукопровода по умолчанию — 1,050 м. Эти значения используются
  * только при пустой/невалидной EEPROM; записанные пользователем параметры
  * по адресам 2094 и 2096 имеют приоритет и сохраняются в AT24C64. */
 #define MODBUS_DEFAULT_MATERIAL_WAVE_SPEED_MPS  2841.37f
-#define MODBUS_DEFAULT_WAVEGUIDE_LENGTH_M        1.04f
+#define MODBUS_DEFAULT_WAVEGUIDE_LENGTH_M        1.05f
+#define MODBUS_DEFAULT_WORKING_HEIGHT_M         0.70f
 
 /* Пользовательская настройка задающего импульса PB5.
  * Значение хранится как float32 в микросекундах и применяется уже к
  * следующему циклу измерения без перезапуска контроллера. */
-#define MODBUS_DEFAULT_EXCITATION_PULSE_WIDTH_US  10.0f
+#define MODBUS_DEFAULT_EXCITATION_PULSE_WIDTH_US   5.0f
 #define MODBUS_MIN_EXCITATION_PULSE_WIDTH_US       1.0f
 #define MODBUS_MAX_EXCITATION_PULSE_WIDTH_US      30.0f
 
@@ -132,7 +133,7 @@ extern "C" {
 /* Таблица Е.4: основные настроечные параметры float32                        */
 /* ========================================================================== */
 #define MB_ADDR_CAL_LOW_LVL         2000U /* h_: нижняя точка уровня, м; по умолчанию 0 м (пустой бак, магнит максимально удалён). */
-#define MB_ADDR_CAL_HIGH_LVL        2002U /* h-: верхняя точка уровня, м; по умолчанию 0,80 м при звукопроводе 1,04 м и верхней невалидной зоне 240 мм. */
+#define MB_ADDR_CAL_HIGH_LVL        2002U /* h-: верхняя точка уровня, м. */
 #define MB_ADDR_PROBE_DEPTH         2004U /* d1: глубина погружения поплавка уровня, м. */
 #define MB_ADDR_LEVEL_OFFSET        2006U /* d0: отступ от дна резервуара, м. */
 #define MB_ADDR_TANK_GEOM           2008U /* Gr: способ расчета объема, код 0..3. */
@@ -180,6 +181,30 @@ extern "C" {
  * уровни 260/520/780 мм. При полной маске 0x001F расчёт не использует
  * предполагаемую скорость волны Nispan.
  */
+/* Configurable level calibration, separate from the reservoir volume table. */
+#define MB_ADDR_SENSOR_GRID_LOW       6000U
+#define MB_ADDR_SENSOR_GRID_HIGH      6002U
+#define MB_ADDR_SENSOR_GRID_DISTANCE  6004U
+#define MB_ADDR_SENSOR_GRID_STEP      6006U
+#define MB_ADDR_SENSOR_GRID_INTERIOR  6008U
+#define MB_ADDR_SENSOR_GRID_ENABLED   6009U
+#define MB_ADDR_SENSOR_GRID_LAST_STEP 6010U
+#define MB_ADDR_CAL_COMMAND_RESULT    6012U /* Причина отказа команды калибровки, uint16. */
+#define MB_ADDR_CAL_COMMAND_DETAIL    6013U /* Детали отказа, uint16. */
+#define MB_ADDR_CAL_CAPTURE_SAMPLES   6014U /* Число принятых запусков, uint16. */
+#define MB_ADDR_CAL_CAPTURE_ATTEMPTS  6015U /* Общее число запусков, uint16. */
+#define MB_ADDR_SENSOR_GRID_TOF(i)    ((uint16_t)(6020U + 2U * (i)))
+#define MB_ADDR_SENSOR_GRID_TOF_LAST  6043U
+#define MB_ADDR_PULSE_MODE            6044U /* uint16: 0 = t1, 1 = пара, 2 = авто. */
+#define MB_ADDR_PULSE_STATE           6045U /* uint16: 0 = t1, 1 = пара, 2 = движение. */
+#define MB_ADDR_PULSE_VALID_PAIRS     6046U /* Число корректных пар среди 10 запусков. */
+#define MB_ADDR_PULSE_SEQUENCE        6047U /* Счётчик запусков, uint16. */
+#define MB_ADDR_PULSE_TRACE_FIRST     6048U /* Десять пар слов t1, t2 в тиках TIM3. */
+#define MB_ADDR_PULSE_TRACE_LAST      6067U
+#define MB_ADDR_LEVEL_STATUS         6068U /* Флаги текущего снимка. */
+#define MB_ADDR_LEVEL_HISTORY_FIRST   6070U /* Номер, количество, 30 секундных отсчетов. */
+#define MB_ADDR_LEVEL_HISTORY_LAST    6162U
+
 #define MB_ADDR_SENSOR_CAL_260      2100U /* ToFraw при уровне 260 мм, float32, мкс. */
 #define MB_ADDR_SENSOR_CAL_520      2102U /* ToFraw при уровне 520 мм, float32, мкс. */
 #define MB_ADDR_SENSOR_CAL_780      2104U /* ToFraw при уровне 780 мм, float32, мкс. */
@@ -224,6 +249,7 @@ extern "C" {
 #define MB_ADDR_ERROR_CODE          2416U /* Er: текущий код ошибки преобразователя, int16. */
 #define MB_ADDR_SENS_ADDR           2418U /* Ad: адрес преобразователя в линии СЕНС, int16. */
 #define MB_ADDR_FW_VERSION          2420U /* Pn: номер версии программы, int16. */
+#define MB_ADDR_FW_VERSION_MINOR    2421U /* Дробная часть версии для сервисной проверки. */
 #define MB_ADDR_ADMIN_PASS          2426U /* P1: пароль администратора, float32. */
 #define MB_ADDR_ERROR_DELAY         2438U /* F: задержка реакции на ошибку, с, float32. */
 

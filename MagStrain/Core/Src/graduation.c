@@ -1,6 +1,6 @@
 /** @file graduation.c @brief Градуировочные таблицы резервуара. */
 #include "graduation.h"
-#include "at24c64.h"
+#include "AT24C64.h"
 #include "modbus.h"
 #include "utils.h"
 
@@ -8,6 +8,8 @@
 #include <string.h>
 
 #define STORAGE_HEADER_CRC_OFFSET 28U
+#define GRAD_READ_CHUNK_BYTES 256U
+#define GRAD_OIL_DRUM_INTERVALS 82U
 
 typedef struct {
     uint32_t magic;
@@ -135,6 +137,26 @@ static float CalculateHorizontalElliptic(float level,
     return cylindrical + volume * 0.1f * fraction;
 }
 
+static void LoadOilDrumTable(void)
+{
+    state.header = (GradHeader_t){
+        .magic = GRAD_MAGIC,
+        .points_count = GRAD_OIL_DRUM_INTERVALS + 1U,
+        .start_height_m = 0.0f,
+        .step_height_m = GRAD_OIL_DRUM_HEIGHT_M / (float)GRAD_OIL_DRUM_INTERVALS,
+        .tank_height_m = GRAD_OIL_DRUM_HEIGHT_M,
+        .tank_volume_m3 = GRAD_OIL_DRUM_VOLUME_M3
+    };
+    for (uint16_t i = 0U; i <= GRAD_OIL_DRUM_INTERVALS; ++i) {
+        state.volumes[i] = GRAD_OIL_DRUM_VOLUME_M3 *
+            ((float)i / (float)GRAD_OIL_DRUM_INTERVALS);
+    }
+    state.actual_points = state.header.points_count;
+    state.loaded = true;
+    state.valid = true;
+    Grad_UpdateModbusRegisters();
+}
+
 void Grad_Init(void)
 {
     memset(&state, 0, sizeof(state));
@@ -144,6 +166,11 @@ void Grad_Init(void)
         USART2_BufPrintInt(state.actual_points);
         USART2_BufPrint(" точек\r\n");
         USART2_BufFlush();
+    } else if (ModBus_GetParameter_Float(MB_ADDR_TANK_GEOM) == (float)GRAD_TYPE_BY_TABLE &&
+               ModBus_GetParameter_Float(MB_ADDR_TANK_HEIGHT) == GRAD_OIL_DRUM_HEIGHT_M &&
+               ModBus_GetParameter_Float(MB_ADDR_TANK_VOLUME) == GRAD_OIL_DRUM_VOLUME_M3) {
+        LoadOilDrumTable();
+        USART2_Print("[GRAD] Oil drum 209 L\r\n");
     } else {
         USART2_Print("[GRAD] Валидная таблица не найдена\r\n");
     }
@@ -171,14 +198,20 @@ HAL_StatusTypeDef Grad_LoadFromEEPROM(void)
     }
 
     data_size = (uint32_t)storage_header.points_count * sizeof(float);
-    if (data_size > 0U &&
-        AT24C64_ReadBytes(AT24C64_DEFAULT_ADDRESS,
-                          GRAD_DATA_START,
-                          (uint8_t *)state.volumes,
-                          (uint16_t)data_size) != HAL_OK) {
-        state.loaded = false;
-        state.valid = false;
-        return HAL_ERROR;
+    /* HAL uses a single timeout for the whole I2C transfer. */
+    for (uint32_t offset = 0U; offset < data_size;) {
+        uint32_t remaining = data_size - offset;
+        uint16_t chunk = (uint16_t)(remaining < GRAD_READ_CHUNK_BYTES
+                                   ? remaining : GRAD_READ_CHUNK_BYTES);
+        if (AT24C64_ReadBytes(AT24C64_DEFAULT_ADDRESS,
+                            (uint16_t)(GRAD_DATA_START + offset),
+                            (uint8_t *)state.volumes + offset,
+                            chunk) != HAL_OK) {
+            state.loaded = false;
+            state.valid = false;
+            return HAL_ERROR;
+        }
+        offset += chunk;
     }
 
     calculated_crc = CRC32_Calculate((const uint8_t *)state.volumes, data_size);
@@ -203,7 +236,8 @@ HAL_StatusTypeDef Grad_SaveToEEPROM(void)
     uint32_t data_size;
     uint32_t data_crc;
 
-    if (!state.loaded || state.actual_points > GRAD_MAX_POINTS) {
+    if (!state.loaded || state.actual_points < 2U ||
+        state.actual_points > GRAD_MAX_POINTS) {
         return HAL_ERROR;
     }
 
@@ -213,6 +247,9 @@ HAL_StatusTypeDef Grad_SaveToEEPROM(void)
                     &storage_header,
                     state.actual_points,
                     data_crc);
+    if (!HeaderValuesAreValid(&storage_header)) {
+        return HAL_ERROR;
+    }
 
     if (data_size > 0U &&
         AT24C64_WriteBytes(AT24C64_DEFAULT_ADDRESS,
@@ -311,18 +348,18 @@ float Grad_InterpolateVolume(float level_m)
     uint16_t index;
     float fraction;
 
-    if (!Grad_IsValid() || state.actual_points < 2U ||
-        state.header.step_height_m <= 0.0f) return NAN;
+    if (!Grad_IsValid() || state.actual_points < 2U || !isfinite(level_m) ||
+        !(state.header.step_height_m > 0.0f)) return NAN;
 
     if (level_m <= state.header.start_height_m) return state.volumes[0];
 
     relative = (level_m - state.header.start_height_m) /
                state.header.step_height_m;
-    index = (uint16_t)relative;
-    if (index >= state.actual_points - 1U) {
+    if (relative >= (float)(state.actual_points - 1U)) {
         return state.volumes[state.actual_points - 1U];
     }
 
+    index = (uint16_t)relative;
     fraction = relative - (float)index;
     return state.volumes[index] +
            (state.volumes[index + 1U] - state.volumes[index]) * fraction;

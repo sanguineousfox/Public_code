@@ -3,8 +3,13 @@
  * @brief   Modbus RTU с типизированной картой и атомарной записью float32.
  */
 #include "modbus.h"
+#include "main.h"
+#include "fw_update.h"
 #include "measurement_snapshot.h"
+#include "measurement_statistics.h"
+#include "liquid_properties.h"
 #include "graduation.h"
+#include "sensor_calibration_grid.h"
 #include "params_storage.h"
 #include "rs485.h"
 #include "utils.h"
@@ -16,10 +21,20 @@
 #define MODBUS_MAX_WRITE_REGISTERS      123U
 #define MODBUS_FRAME_END_TIMEOUT_MS     2U
 #define MODBUS_INTERBYTE_RESET_MS       4U
-#define MODBUS_TX_TIMEOUT_MS            100U
+#define MODBUS_TX_TIMEOUT_MARGIN_MS     10U
 #define MODBUS_EEPROM_WRITE_DELAY_MS    5000U
 #define MODBUS_SERVER_ID_TEXT            "PMP-201E"
 #define MODBUS_SERVER_RUN_STATUS          0xFFU
+#define SENSOR_GRID_DEFAULT_INTERIOR      4U
+#define SENSOR_GRID_DEFAULT_STEP_M        0.15f
+#define MODBUS_VOLUME_DECALITERS          39U
+#define MODBUS_VOLUME_LITERS              40U
+#define MODBUS_VOLUME_CUBIC_METERS        41U
+
+_Static_assert(MB_ADDR_LEVEL_HISTORY_LAST - MB_ADDR_LEVEL_HISTORY_FIRST + 1U ==
+               MEASUREMENT_HISTORY_WORDS, "Level history register range");
+_Static_assert(MEASUREMENT_HISTORY_WORDS <= MODBUS_MAX_READ_REGISTERS,
+               "Level history must fit in one read");
 
 #define PARAM_FLAG_PERSISTENT           0x01U
 
@@ -172,8 +187,37 @@ static const ModBus_Descriptor_t descriptors[] = {
     DESC_F32(MB_ADDR_DENS_SENS_7, VOLATILE),
     DESC_F32(MB_ADDR_DENS_SENS_8, VOLATILE),
 
+    DESC_F32(MB_ADDR_SENSOR_GRID_LOW, PERSISTENT),
+    DESC_F32(MB_ADDR_SENSOR_GRID_HIGH, PERSISTENT),
+    DESC_F32(MB_ADDR_SENSOR_GRID_DISTANCE, VOLATILE),
+    DESC_F32(MB_ADDR_SENSOR_GRID_STEP, PERSISTENT),
+    DESC_U16(MB_ADDR_SENSOR_GRID_INTERIOR, PERSISTENT),
+    DESC_U16(MB_ADDR_SENSOR_GRID_ENABLED, PERSISTENT),
+    DESC_F32(MB_ADDR_SENSOR_GRID_LAST_STEP, VOLATILE),
+    DESC_U16(MB_ADDR_CAL_COMMAND_RESULT, VOLATILE),
+    DESC_U16(MB_ADDR_CAL_COMMAND_DETAIL, VOLATILE),
+    DESC_U16(MB_ADDR_CAL_CAPTURE_SAMPLES, VOLATILE),
+    DESC_U16(MB_ADDR_CAL_CAPTURE_ATTEMPTS, VOLATILE),
+    DESC_F32(MB_ADDR_SENSOR_GRID_TOF(0U), PERSISTENT),
+    DESC_F32(MB_ADDR_SENSOR_GRID_TOF(1U), PERSISTENT),
+    DESC_F32(MB_ADDR_SENSOR_GRID_TOF(2U), PERSISTENT),
+    DESC_F32(MB_ADDR_SENSOR_GRID_TOF(3U), PERSISTENT),
+    DESC_F32(MB_ADDR_SENSOR_GRID_TOF(4U), PERSISTENT),
+    DESC_F32(MB_ADDR_SENSOR_GRID_TOF(5U), PERSISTENT),
+    DESC_F32(MB_ADDR_SENSOR_GRID_TOF(6U), PERSISTENT),
+    DESC_F32(MB_ADDR_SENSOR_GRID_TOF(7U), PERSISTENT),
+    DESC_F32(MB_ADDR_SENSOR_GRID_TOF(8U), PERSISTENT),
+    DESC_F32(MB_ADDR_SENSOR_GRID_TOF(9U), PERSISTENT),
+    DESC_F32(MB_ADDR_SENSOR_GRID_TOF(10U), PERSISTENT),
+    DESC_F32(MB_ADDR_SENSOR_GRID_TOF(11U), PERSISTENT),
+    DESC_U16(MB_ADDR_PULSE_MODE, PERSISTENT),
+    DESC_U16(MB_ADDR_PULSE_STATE, VOLATILE),
+    DESC_U16(MB_ADDR_PULSE_VALID_PAIRS, VOLATILE),
+    DESC_U16(MB_ADDR_PULSE_SEQUENCE, VOLATILE),
+
     DESC_U16(MB_ADDR_COMMAND, VOLATILE),
-    DESC_F32(MB_ADDR_COMMAND_PARAM, VOLATILE)
+    DESC_F32(MB_ADDR_COMMAND_PARAM, VOLATILE),
+    DESC_U16(MB_ADDR_FW_VERSION_MINOR, VOLATILE)
 };
 
 #define DESCRIPTOR_COUNT ((uint16_t)(sizeof(descriptors) / sizeof(descriptors[0])))
@@ -266,12 +310,14 @@ static float WordsToFloat(uint16_t high_word, uint16_t low_word);
 
 static const FloatDefault_t float_defaults[] = {
     {MB_ADDR_CAL_LOW_LVL, 0.0f},
-    {MB_ADDR_CAL_HIGH_LVL, 0.80f},
+    {MB_ADDR_CAL_HIGH_LVL, MODBUS_DEFAULT_WORKING_HEIGHT_M},
+    {MB_ADDR_SENSOR_GRID_HIGH, MODBUS_DEFAULT_WORKING_HEIGHT_M},
     {MB_ADDR_PROBE_DEPTH, 0.0f},
     {MB_ADDR_LEVEL_OFFSET, 0.0f},
-    {MB_ADDR_TANK_GEOM, 0.0f},
-    {MB_ADDR_TANK_HEIGHT, 0.95f},
-    {MB_ADDR_TANK_VOLUME, 0.0f},
+    {MB_ADDR_TANK_GEOM, (float)GRAD_TYPE_BY_TABLE},
+    {MB_ADDR_TANK_HEIGHT, GRAD_OIL_DRUM_HEIGHT_M},
+    {MB_ADDR_TANK_VOLUME, GRAD_OIL_DRUM_VOLUME_M3},
+    {MB_ADDR_TEMP_STD, 20.0f},
     {MB_ADDR_DAMPING_TIME, 10.0f},
     {MB_ADDR_POLL_PERIOD, 100.0f},
     {MB_ADDR_MATERIAL_WAVE_SPEED, MODBUS_DEFAULT_MATERIAL_WAVE_SPEED_MPS},
@@ -294,16 +340,32 @@ static const FloatDefault_t float_defaults[] = {
 };
 
 static const U16Default_t u16_defaults[] = {
+    {MB_ADDR_PULSE_MODE, MEASUREMENT_PULSE_MODE_SINGLE},
     {MB_ADDR_MB_ADDR_SET, MODBUS_DEFAULT_ADDRESS},
     {MB_ADDR_MB_BAUD_SET, MODBUS_DEFAULT_BAUD_CODE},
     {MB_ADDR_MB_PARITY_SET, MODBUS_DEFAULT_PARITY_CODE},
     {MB_ADDR_UNIT_LEVEL, 8U},
     {MB_ADDR_UNIT_TEMP, 24U},
-    {MB_ADDR_UNIT_VOLUME, 41U},
+    {MB_ADDR_UNIT_VOLUME, MODBUS_VOLUME_LITERS},
     {MB_ADDR_UNIT_MASS, 56U},
     {MB_ADDR_UNIT_DENSITY, 73U},
-    {MB_ADDR_SENSOR_CAL_MASK, 0U}
+    {MB_ADDR_SENSOR_CAL_MASK, 0U},
+    {MB_ADDR_SENSOR_GRID_INTERIOR, SENSOR_GRID_DEFAULT_INTERIOR}
 };
+
+/* ToF на отметках 150, 300, 450, 600, 750 и 850 мм от низа.
+ * Дамп стенда 150.3 с импульсом 5 мкс, float32 в микросекундах. */
+static const float default_grid_tof_us[] = {
+    285.2986145019531f,
+    243.01158142089844f,
+    199.1273193359375f,
+    157.10879516601562f,
+    112.8657455444336f,
+    84.1388931274414f
+};
+
+_Static_assert(sizeof(default_grid_tof_us) / sizeof(default_grid_tof_us[0]) ==
+               SENSOR_GRID_DEFAULT_INTERIOR + 2U, "Default calibration point count");
 
 static const ModBus_Descriptor_t *FindDescriptorByStart(uint16_t address,
                                                         uint16_t *descriptor_index)
@@ -433,6 +495,9 @@ static bool IsDocumentReservedReadAddress(uint16_t address)
 static bool ReadAddressIsAccessible(uint16_t address)
 {
     return FindDescriptorByWord(address, NULL, NULL) != NULL ||
+           AddressInRange(address, MB_ADDR_PULSE_TRACE_FIRST, MB_ADDR_PULSE_TRACE_LAST) ||
+           address == MB_ADDR_LEVEL_STATUS ||
+           AddressInRange(address, MB_ADDR_LEVEL_HISTORY_FIRST, MB_ADDR_LEVEL_HISTORY_LAST) ||
            IsDisplayDataAddress(address) ||
            IsDisplayMapAddress(address) ||
            IsGraduationAddress(address) ||
@@ -448,6 +513,10 @@ static bool ReadAddressIsAccessible(uint16_t address)
  */
 static bool WriteAddressIsAccessible(uint16_t address)
 {
+    if (address == MB_ADDR_FW_VERSION_MINOR ||
+        AddressInRange(address, MB_ADDR_PULSE_STATE, MB_ADDR_LEVEL_STATUS) ||
+        (address >= MB_ADDR_SENSOR_GRID_ENABLED &&
+         address <= MB_ADDR_SENSOR_GRID_TOF_LAST)) return false;
     return FindDescriptorByWord(address, NULL, NULL) != NULL ||
            IsDisplayDataAddress(address) ||
            IsDisplayMapAddress(address) ||
@@ -591,6 +660,27 @@ static bool WriteGraduationFloat(uint16_t base_address, float value)
     return true;
 }
 
+static bool ReadVolumeInSelectedUnit(uint16_t address, uint16_t *word)
+{
+    uint16_t base = (uint16_t)(address & 0xFFFEU);
+    if (base != MB_ADDR_VOLUME && base != MB_ADDR_VOLUME_MAIN &&
+        base != MB_ADDR_VOLUME_STD) {
+        return false;
+    }
+
+    uint16_t unit = ModBus_GetParameter_Int(MB_ADDR_UNIT_VOLUME);
+    if (unit != MODBUS_VOLUME_LITERS && unit != MODBUS_VOLUME_DECALITERS) {
+        return false;
+    }
+    /* Внутренние расчёты и таблица градуировки используют м³. */
+    float scale = unit == MODBUS_VOLUME_LITERS ? 1000.0f : 100.0f;
+    uint16_t high_word;
+    uint16_t low_word;
+    FloatToWords(ModBus_GetParameter_Float(base) * scale, &high_word, &low_word);
+    *word = address == base ? low_word : high_word;
+    return true;
+}
+
 static bool ReadRawRegisterInternal(uint16_t address,
                                     uint16_t *value,
                                     bool allow_display_proxy)
@@ -600,10 +690,23 @@ static bool ReadRawRegisterInternal(uint16_t address,
     if (value == NULL) {
         return false;
     }
+    if (address == MB_ADDR_LEVEL_STATUS) {
+        *value = MeasurementSnapshot_GetStatus();
+        return true;
+    }
+    if (AddressInRange(address, MB_ADDR_LEVEL_HISTORY_FIRST, MB_ADDR_LEVEL_HISTORY_LAST)) {
+        *value = MeasurementSnapshot_ReadHistoryWord(address - MB_ADDR_LEVEL_HISTORY_FIRST);
+        return true;
+    }
+    if (AddressInRange(address, MB_ADDR_PULSE_TRACE_FIRST, MB_ADDR_PULSE_TRACE_LAST)) {
+        *value = ReadPulseTraceWord(address - MB_ADDR_PULSE_TRACE_FIRST);
+        return true;
+    }
 
-    /* 1000..1007 читаются из атомарного снимка RAM в документированном
+    /* 1000..1013 читаются из атомарного снимка RAM в документированном
      * порядке слов: младшее слово по базовому адресу. */
-    if (MeasurementSnapshot_ReadWord(address, value)) {
+    if (ReadVolumeInSelectedUnit(address, value) ||
+        MeasurementSnapshot_ReadWord(address, value)) {
         return true;
     }
 
@@ -639,6 +742,15 @@ static bool ReadRawRegisterInternal(uint16_t address,
             return false;
         }
         FloatToWords(float_value, &high_word, &low_word);
+        *value = ((address & 1U) == 0U) ? low_word : high_word;
+        return true;
+    }
+
+    if ((address & 0xFFFEU) == MB_ADDR_SENSOR_GRID_STEP) {
+        uint16_t high_word;
+        uint16_t low_word;
+        FloatToWords(SensorCalGrid_EffectiveStep(SensorCalGrid_Read()),
+                     &high_word, &low_word);
         *value = ((address & 1U) == 0U) ? low_word : high_word;
         return true;
     }
@@ -682,6 +794,12 @@ static bool WriteRawRegister(uint16_t address, uint16_t value)
         return WriteRawRegister(target, value);
     }
 
+    if (address == MB_ADDR_FW_VERSION_MINOR ||
+        AddressInRange(address, MB_ADDR_PULSE_STATE, MB_ADDR_LEVEL_STATUS) ||
+        (address == MB_ADDR_PULSE_MODE && value > MEASUREMENT_PULSE_MODE_AUTO) ||
+        (address >= MB_ADDR_SENSOR_GRID_LOW &&
+         address <= MB_ADDR_SENSOR_GRID_TOF_LAST)) return false;
+
     index = ModBus_AddressToIndex_External(address);
     if (index == MODBUS_INVALID_INDEX || index >= REGISTER_STORAGE_WORDS) {
         return false;
@@ -722,7 +840,16 @@ static bool FloatValueIsValid(uint16_t address, float value)
         return false;
     }
 
+    if (address >= MB_ADDR_SENSOR_GRID_TOF(0U) &&
+        address <= MB_ADDR_SENSOR_GRID_TOF_LAST) {
+        return value >= 0.0f && value <= 50000.0f;
+    }
     switch (address) {
+        case MB_ADDR_SENSOR_GRID_LOW:
+        case MB_ADDR_SENSOR_GRID_HIGH:
+        case MB_ADDR_SENSOR_GRID_DISTANCE:
+        case MB_ADDR_SENSOR_GRID_STEP:
+            return value >= 0.0f && value <= 50.0f;
         case MB_ADDR_POLL_PERIOD:
             return value >= 50.0f && value <= 60000.0f;
         case MB_ADDR_MATERIAL_WAVE_SPEED:
@@ -749,6 +876,8 @@ static bool FloatValueIsValid(uint16_t address, float value)
             return value >= 0.0f && value <= 3.0f;
         case MB_ADDR_TANK_GEOM:
             return value >= 0.0f && value <= 3.0f;
+        case MB_ADDR_TEMP_STD:
+            return value == 15.0f || value == 20.0f;
         case MB_ADDR_DAMPING_TIME:
             return value >= 0.0f && value <= 60000.0f;
         default:
@@ -759,12 +888,20 @@ static bool FloatValueIsValid(uint16_t address, float value)
 static bool U16ValueIsValid(uint16_t address, uint16_t value)
 {
     switch (address) {
+        case MB_ADDR_PULSE_MODE:
+            return value <= MEASUREMENT_PULSE_MODE_AUTO;
+        case MB_ADDR_SENSOR_GRID_INTERIOR:
+            return value <= SENSOR_GRID_MAX_INTERIOR;
+        case MB_ADDR_SENSOR_GRID_ENABLED:
+            return value <= 1U;
         case MB_ADDR_MB_ADDR_SET:
             return value >= 1U && value <= 247U;
         case MB_ADDR_MB_BAUD_SET:
             return value <= 9U;
         case MB_ADDR_MB_PARITY_SET:
             return value <= 3U;
+        case MB_ADDR_UNIT_VOLUME:
+            return value >= MODBUS_VOLUME_DECALITERS && value <= MODBUS_VOLUME_CUBIC_METERS;
         default:
             return true;
     }
@@ -886,7 +1023,9 @@ static uint16_t SerializePersistent(uint8_t *buffer, uint16_t capacity)
         uint8_t words;
         uint8_t word;
 
-        if (!DescriptorIsPersistent(descriptor)) continue;
+        /* При старте адрес 2068 восстанавливается по сохранённому адресу 35. */
+        if (!DescriptorIsPersistent(descriptor) ||
+            descriptor->address == MB_ADDR_DEVICE_ADDR) continue;
 
         words = (descriptor->type == MODBUS_REGISTER_FLOAT32) ? 2U : 1U;
         if ((uint32_t)offset + 2U + (uint32_t)words * 2U > capacity) {
@@ -1017,6 +1156,10 @@ static void StorageStartSave(void)
  */
 void ModBus_StorageProcess(bool allow_write)
 {
+    if (FW_Active()) {
+        if (allow_write) FW_Process();
+        return;
+    }
     ParamsStorageSaveState_t state = ParamsStorage_GetSaveState();
 
     if (state == PARAMS_SAVE_COMPLETE) {
@@ -1393,13 +1536,23 @@ uint16_t ModBus_CRC16(const uint8_t *data, uint16_t length)
     return crc;
 }
 
-static void SendFrame(uint8_t *frame, uint16_t payload_length)
+static uint32_t ResponseTimeoutMs(uint16_t frame_length)
+{
+    const uint32_t baud = huart1.Init.BaudRate;
+    const uint32_t bits_per_char =
+        10U + (huart1.Init.Parity != UART_PARITY_NONE ? 1U : 0U) +
+        (huart1.Init.StopBits == UART_STOPBITS_2 ? 1U : 0U);
+    const uint32_t wire_time = (uint32_t)frame_length * bits_per_char * 1000U;
+    return (wire_time + baud - 1U) / baud + MODBUS_TX_TIMEOUT_MARGIN_MS;
+}
+
+static HAL_StatusTypeDef SendFrame(uint8_t *frame, uint16_t payload_length)
 {
     uint16_t crc;
 
     if (request_is_broadcast || frame == NULL ||
         payload_length > (MODBUS_BUFFER_SIZE - 2U)) {
-        return;
+        return HAL_ERROR;
     }
 
     crc = ModBus_CRC16(frame, payload_length);
@@ -1413,16 +1566,24 @@ static void SendFrame(uint8_t *frame, uint16_t payload_length)
     modbus.rx_length = 0U;
     __enable_irq();
 
-    (void)RS485_Transmit(&huart1,
+    const uint16_t frame_length = (uint16_t)(payload_length + 2U);
+    HAL_StatusTypeDef result = RS485_Transmit(&huart1,
                          frame,
-                         (uint16_t)(payload_length + 2U),
-                         MODBUS_TX_TIMEOUT_MS);
+                         frame_length,
+                         ResponseTimeoutMs(frame_length));
 
     __disable_irq();
     modbus.rx_length = 0U;
     modbus.last_byte_tick = HAL_GetTick();
     modbus.tx_busy = 0U;
+    if (result == HAL_TIMEOUT) {
+        /* HAL_UART_Transmit на таймауте отключает RXNEIE/PEIE/EIE.
+         * Восстанавливаем прием следующего запроса без перезапуска прибора. */
+        __HAL_UART_CLEAR_OREFLAG(&huart1);
+        ModBus_RestartRx();
+    }
     __enable_irq();
+    return result;
 }
 
 static void SendException(uint8_t function, uint8_t exception_code)
@@ -1589,6 +1750,14 @@ static bool ValidateWriteValues(uint16_t start_address,
     return true;
 }
 
+/* Updates require the application slot and its separate reset loader. */
+extern const uint32_t g_pfnVectors[];
+
+static bool FirmwareUpdateAvailable(void)
+{
+    return (uintptr_t)g_pfnVectors == FW_APP_BASE;
+}
+
 static void ProcessRead(uint8_t function,
                         uint16_t start_address,
                         uint16_t register_count)
@@ -1603,6 +1772,25 @@ static void ProcessRead(uint8_t function,
         register_count > MODBUS_MAX_READ_REGISTERS) {
         SendException(function, 0x03U);
         return;
+    }
+
+    if (start_address >= FW_MB_FIRST && start_address <= FW_MB_LAST) {
+        if (!FirmwareUpdateAvailable()) {
+            SendException(function, 0x02U);
+            return;
+        }
+        if ((uint32_t)start_address + register_count > FW_MB_FIRST + 10U) {
+            SendException(function, 0x02U); return;
+        }
+        response[index++] = modbus.device_address;
+        response[index++] = function;
+        response[index++] = (uint8_t)(register_count * 2U);
+        for (i = 0; i < register_count; ++i) {
+            uint16_t value = FW_Read(start_address + i);
+            response[index++] = (uint8_t)(value >> 8);
+            response[index++] = (uint8_t)value;
+        }
+        SendFrame(response, index); return;
     }
 
     /* Быстрый путь проверяется раньше общей карты, поэтому чтение уровня
@@ -1625,6 +1813,7 @@ static void ProcessRead(uint8_t function,
         uint16_t value = 0U;
         if (fast_snapshot) {
             value = live_words[i];
+            (void)ReadVolumeInSelectedUnit((uint16_t)(start_address + i), &value);
         } else {
             (void)ModBus_ReadRawRegister((uint16_t)(start_address + i),
                                          &value);
@@ -1664,12 +1853,83 @@ static void MarkWrittenAddressEffects(uint16_t address)
     }
 }
 
+static void ProcessFirmwareWrite(uint8_t function, uint16_t address,
+                                 uint16_t count, const uint8_t *data)
+{
+    uint8_t response[8];
+    if (request_is_broadcast) return;
+    if (!FirmwareUpdateAvailable()) {
+        SendException(function, 0x02U);
+        return;
+    }
+    if (ModBus_StorageIsBusy()) { SendException(function, 0x06U); return; }
+    if (address == FW_MB_FIRST && data[0] == 0U && data[1] == 1U &&
+        ModBus_GetParameter_Int(MB_ADDR_COMMAND) == 85U) {
+        SendException(function, 0x06U); return;
+    }
+    if (address == FW_MB_FIRST && data[0] == 0U && data[1] == 1U && storage_dirty) {
+        ModBus_ForceSaveToEEPROM(); SendException(function, 0x06U); return;
+    }
+    uint8_t exception = FW_Write(address, count, data);
+    if (exception) { SendException(function, exception); return; }
+    response[0] = modbus.device_address; response[1] = function;
+    response[2] = (uint8_t)(address >> 8); response[3] = (uint8_t)address;
+    response[4] = function == 0x06U ? data[0] : (uint8_t)(count >> 8);
+    response[5] = function == 0x06U ? data[1] : (uint8_t)count;
+    /* RS485_Transmit waits for TC and releases DE before returning. */
+    if (SendFrame(response, 6U) == HAL_OK && FW_Read(FW_MB_FIRST) == FW_READY)
+        NVIC_SystemReset();
+}
+
+/* Apply all fields in the request together. Distances may be supplied
+ * instead of the upper point, or checked against an explicit upper point. */
+static bool ProcessSensorGridWrite(uint16_t start, uint16_t count, const uint8_t *data)
+{
+    SensorCalibrationGrid grid = SensorCalGrid_Read();
+    float distance = NAN;
+    bool has_high = false;
+
+    for (uint16_t i = 0U; i < count;) {
+        uint16_t address = start + i;
+        uint16_t word = (uint16_t)(((uint16_t)data[2U * i] << 8) | data[2U * i + 1U]);
+        ++i;
+        if (address == MB_ADDR_SENSOR_GRID_INTERIOR) {
+            grid.interior = word;
+            continue;
+        }
+        uint16_t high_word = (uint16_t)(((uint16_t)data[2U * i] << 8) | data[2U * i + 1U]);
+        ++i;
+        float value = WordsToFloat(high_word, word);
+        switch (address) {
+            case MB_ADDR_SENSOR_GRID_LOW: grid.low_m = value; break;
+            case MB_ADDR_SENSOR_GRID_HIGH: grid.high_m = value; has_high = true; break;
+            case MB_ADDR_SENSOR_GRID_DISTANCE: distance = value; break;
+            case MB_ADDR_SENSOR_GRID_STEP: grid.step_m = value; break;
+            default: return false;
+        }
+    }
+
+    if (!has_high && isfinite(distance)) grid.high_m = grid.low_m + distance;
+    float span = grid.high_m - grid.low_m;
+    float tolerance = fmaxf(0.000001f, fabsf(span) * 0.00001f);
+    if (isfinite(distance) && (distance <= 0.0f || fabsf(distance - span) > tolerance)) {
+        return false;
+    }
+    return SensorCalGrid_Configure(grid);
+}
+
 static void ProcessWriteSingle(uint16_t address, uint16_t value)
 {
     const ModBus_Descriptor_t *descriptor =
         FindDescriptorByWord(address, NULL, NULL);
     uint8_t response[8];
     uint8_t old_address = modbus.device_address;
+
+    if (address >= FW_MB_FIRST && address <= FW_MB_LAST) {
+        uint8_t data[2] = { (uint8_t)(value >> 8), (uint8_t)value };
+        ProcessFirmwareWrite(0x06U, address, 1U, data); return;
+    }
+    if (FW_Active()) { SendException(0x06U, 0x06U); return; }
 
     if (!WriteAddressIsAccessible(address)) {
         SendException(0x06U, 0x02U);
@@ -1689,7 +1949,13 @@ static void ProcessWriteSingle(uint16_t address, uint16_t value)
         return;
     }
 
-    if (!WriteRawRegister(address, value)) {
+    if (address == MB_ADDR_SENSOR_GRID_INTERIOR) {
+        uint8_t data[2] = { (uint8_t)(value >> 8), (uint8_t)value };
+        if (!ProcessSensorGridWrite(address, 1U, data)) {
+            SendException(0x06U, 0x03U);
+            return;
+        }
+    } else if (!WriteRawRegister(address, value)) {
         SendException(0x06U, 0x04U);
         return;
     }
@@ -1747,6 +2013,11 @@ static void ProcessWriteMultiple(uint16_t start_address,
         return;
     }
 
+    if (start_address >= FW_MB_FIRST && start_address <= FW_MB_LAST) {
+        ProcessFirmwareWrite(0x10U, start_address, register_count, data); return;
+    }
+    if (FW_Active()) { SendException(0x10U, 0x06U); return; }
+
     if (!WriteRangeIsAtomic(start_address, register_count)) {
         SendException(0x10U, 0x02U);
         return;
@@ -1757,7 +2028,13 @@ static void ProcessWriteMultiple(uint16_t start_address,
         return;
     }
 
-    if (IsGraduationAddress(start_address)) {
+    if (start_address >= MB_ADDR_SENSOR_GRID_LOW &&
+        start_address <= MB_ADDR_SENSOR_GRID_INTERIOR) {
+        if (!ProcessSensorGridWrite(start_address, register_count, data)) {
+            SendException(0x10U, 0x03U);
+            return;
+        }
+    } else if (IsGraduationAddress(start_address)) {
         if (!ProcessGraduationWrite(start_address, register_count, data)) {
             SendException(0x10U, 0x04U);
             return;
@@ -1928,6 +2205,7 @@ void ModBus_Init(void)
     memset(&modbus, 0, sizeof(modbus));
     memset(display_address_map, 0, sizeof(display_address_map));
     MeasurementSnapshot_Init();
+    MeasurementSnapshot_StartHistory(HAL_GetTick());
     modbus.device_address = MODBUS_DEFAULT_ADDRESS;
     modbus.last_byte_tick = HAL_GetTick();
 
@@ -1965,6 +2243,50 @@ void ModBus_Init(void)
         loaded = DeserializePersistent(persistence_buffer, payload_size);
     }
     storage_image_valid = loaded;
+    if (loaded) {
+        /* Переносим прежние заводские значения на новый профиль. */
+        if (ModBus_GetParameter_Float(MB_ADDR_TANK_GEOM) == (float)GRAD_TYPE_VERTICAL &&
+            ModBus_GetParameter_Float(MB_ADDR_TANK_HEIGHT) == 0.95f &&
+            ModBus_GetParameter_Float(MB_ADDR_TANK_VOLUME) == 0.0f) {
+            ModBus_SetParameter_Float(MB_ADDR_TANK_GEOM, (float)GRAD_TYPE_BY_TABLE);
+            ModBus_SetParameter_Float(MB_ADDR_TANK_HEIGHT, GRAD_OIL_DRUM_HEIGHT_M);
+            ModBus_SetParameter_Float(MB_ADDR_TANK_VOLUME, GRAD_OIL_DRUM_VOLUME_M3);
+            if (ModBus_GetParameter_Float(MB_ADDR_EXCITATION_PULSE_WIDTH) == 10.0f) {
+                ModBus_SetParameter_Float(MB_ADDR_EXCITATION_PULSE_WIDTH,
+                                          MODBUS_DEFAULT_EXCITATION_PULSE_WIDTH_US);
+            }
+        }
+        SensorCalibrationGrid grid = SensorCalGrid_Read();
+        float length_m = ModBus_GetWaveguideLength();
+        bool grid_enabled = SensorCalGrid_Enabled();
+        bool old_length = length_m == 1.10f || length_m == 1.04f;
+        /* Обновляем геометрию прежнего стенда 750 мм. Времена пролёта
+         * от него сбрасывает SensorCalGrid_Configure при смене геометрии. */
+        bool old_fixture = old_length && grid.low_m == 0.0f && grid.high_m == 0.75f &&
+                           grid.interior == SENSOR_GRID_DEFAULT_INTERIOR &&
+                           (grid.step_m == 0.0f || grid.step_m == SENSOR_GRID_DEFAULT_STEP_M);
+        if (old_fixture || !grid_enabled) {
+            (void)SensorCalGrid_Configure((SensorCalibrationGrid){
+                .high_m = MODBUS_DEFAULT_WORKING_HEIGHT_M,
+                .step_m = SENSOR_GRID_DEFAULT_STEP_M,
+                .interior = SENSOR_GRID_DEFAULT_INTERIOR
+            });
+            if (old_length) {
+                ModBus_SetWaveguideLength(MODBUS_DEFAULT_WAVEGUIDE_LENGTH_M);
+                ModBus_SetParameter_Float(MB_ADDR_CAL_HIGH_LVL,
+                                          MODBUS_DEFAULT_WORKING_HEIGHT_M);
+            }
+        }
+    } else {
+        WriteFloatDirect(MB_ADDR_SENSOR_GRID_STEP, SENSOR_GRID_DEFAULT_STEP_M);
+        WriteU16Direct(MB_ADDR_SENSOR_GRID_ENABLED, 1U);
+        if (storage_state == PARAMS_STORAGE_EMPTY) {
+            for (uint16_t i = 0U; i < SENSOR_GRID_DEFAULT_INTERIOR + 2U; ++i) {
+                WriteFloatDirect(MB_ADDR_SENSOR_GRID_TOF(i), default_grid_tof_us[i]);
+            }
+        }
+    }
+    SensorCalGrid_UpdateDerived();
 
     /*
      * Автоматически создаём новый блок только для действительно пустой EEPROM.
@@ -2120,6 +2442,7 @@ void ModBus_Process(void)
     bool complete_by_length;
     bool complete_by_silence;
 
+    MeasurementSnapshot_RecordDue(HAL_GetTick());
     current_length = modbus.rx_length;
     expected_length = ExpectedRequestLength(modbus.rx_buffer, current_length);
     complete_by_length = expected_length > 0U &&
@@ -2200,18 +2523,40 @@ float ModBus_GetTemperature(void)
     return ModBus_GetParameter_Float(MB_ADDR_TEMP);
 }
 
+static uint16_t EncodeNonnegativeMeasurement(float value, float scale)
+{
+    float code = roundf(value * scale);
+    return code >= 0.0f && code <= INT16_MAX ? (uint16_t)code : 0x8000U;
+}
+
 void ModBus_PublishLiveMeasurements(float level_mm,
                                     float temperature_c,
                                     float percent,
                                     float volume_m3,
                                     uint16_t status)
 {
+    float reference_density = ModBus_GetParameter_Float(MB_ADDR_DENSITY_ORIG);
+    float reference_temperature = ModBus_GetParameter_Float(MB_ADDR_TEMP_ORIG);
+    float expansion = ModBus_GetParameter_Float(MB_ADDR_EXPANSION_COEF);
+    float density_kg_m3 = isfinite(level_mm) ? Liquid_CalculateDensity(
+        temperature_c, reference_density, reference_temperature, expansion) : NAN;
+    if (!isfinite(level_mm) || !isfinite(volume_m3) || volume_m3 < 0.0f) {
+        volume_m3 = NAN;
+    }
+    float mass_kg = Liquid_CalculateMass(volume_m3, density_kg_m3);
+    float standard_temperature = ModBus_GetParameter_Float(MB_ADDR_TEMP_STD);
+    float standard_density = isfinite(density_kg_m3) ? Liquid_CalculateDensity(
+        standard_temperature, reference_density, reference_temperature, expansion) : NAN;
+    float standard_volume = Liquid_CalculateVolume(mass_kg, standard_density);
+
     /* Публикация снимка выполняется первой: Modbus уже может вернуть новые
      * данные, даже если дальнейшее обновление общей карты ещё не закончено. */
     MeasurementSnapshot_Publish(level_mm,
                                 temperature_c,
                                 percent,
                                 volume_m3,
+                                mass_kg,
+                                density_kg_m3,
                                 status,
                                 HAL_GetTick());
 
@@ -2219,16 +2564,25 @@ void ModBus_PublishLiveMeasurements(float level_mm,
     WriteFloatDirect(MB_ADDR_TEMP, temperature_c);
     WriteFloatDirect(MB_ADDR_PERCENT, percent);
     WriteFloatDirect(MB_ADDR_VOLUME, volume_m3);
+    WriteFloatDirect(MB_ADDR_MASS, mass_kg);
+    WriteFloatDirect(MB_ADDR_DENSITY, density_kg_m3);
+    WriteFloatDirect(MB_ADDR_VOLUME_MAIN, volume_m3);
+    WriteFloatDirect(MB_ADDR_VOLUME_STD, standard_volume);
+    WriteFloatDirect(MB_ADDR_DENSITY_STD, standard_density);
 
-    /* Дублирующие int16-параметры 1..4 из той же таблицы Е.4. */
+    /* Масштабы int16 из таблицы Е.4 фиксированы. */
     WriteU16Direct(MB_ADDR_LEVEL_INT,
-                   (uint16_t)(int16_t)lroundf(level_mm));
+                   isfinite(level_mm) ? (uint16_t)(int16_t)lroundf(level_mm) : 0x8000U);
     WriteU16Direct(MB_ADDR_TEMP_INT,
-                   (uint16_t)(int16_t)lroundf(temperature_c * 100.0f));
-    WriteU16Direct(MB_ADDR_PERCENT_INT,
-                   (uint16_t)(int16_t)lroundf(percent * 100.0f));
-    WriteU16Direct(MB_ADDR_VOLUME_INT,
-                   (uint16_t)(int16_t)lroundf(volume_m3 * 100.0f));
+                   isfinite(temperature_c) ? (uint16_t)(int16_t)lroundf(temperature_c * 100.0f) : 0x8000U);
+    WriteU16Direct(MB_ADDR_PERCENT_INT, EncodeNonnegativeMeasurement(percent, 100.0f));
+    uint16_t volume_code = EncodeNonnegativeMeasurement(volume_m3, 100.0f);
+    WriteU16Direct(MB_ADDR_VOLUME_INT, volume_code);
+    WriteU16Direct(MB_ADDR_VOLUME_MAIN_INT, volume_code);
+    WriteU16Direct(MB_ADDR_MASS_INT, EncodeNonnegativeMeasurement(mass_kg, 0.1f));
+    WriteU16Direct(MB_ADDR_DENSITY_INT, EncodeNonnegativeMeasurement(density_kg_m3, 10.0f));
+    WriteU16Direct(MB_ADDR_VOLUME_STD_INT, EncodeNonnegativeMeasurement(standard_volume, 100.0f));
+    WriteU16Direct(MB_ADDR_DENSITY_STD_INT, EncodeNonnegativeMeasurement(standard_density, 10.0f));
 }
 
 void ModBus_UpdateMeasurements(float level,
@@ -2241,10 +2595,6 @@ void ModBus_UpdateMeasurements(float level,
     if (isfinite(waveguide) && waveguide > 0.0f) {
         percent = level / waveguide * 100.0f;
     }
-    if (!isfinite(volume)) {
-        volume = 0.0f;
-    }
-
     ModBus_PublishLiveMeasurements(level,
                                    temperature,
                                    percent,

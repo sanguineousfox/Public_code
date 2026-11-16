@@ -9,6 +9,7 @@
 #include "modbus.h"
 #include "temp_sensors.h"
 #include "graduation.h"
+#include "sensor_calibration_grid.h"
 #include "measurement_statistics.h"
 #include "measurement_snapshot.h"
 #include "params_storage.h"
@@ -24,9 +25,6 @@
 #define VREFINT_CAL_ADDR        0x1FFFF7BA /* Адрес заводской калибровочной константы внутреннего VREF STM32F103. */
 #define VREFINT_CAL_VALUE       ((uint16_t *)VREFINT_CAL_ADDR) /* Указатель на заводское значение VREFINT. */
 #define ADC_SAMPLES             16 /* Число выборок ADC, усредняемых при контроле напряжений питания. */
-#define MEAS_TIMEOUT_MIN_MS     3U /* Минимальное время ожидания входного импульса после запуска, мс. */
-#define MEAS_TIMEOUT_MAX_MS     20U /* Максимальное время ожидания входного импульса, мс. */
-#define MEAS_TIMEOUT_MARGIN_MS  2.0f /* Дополнительный запас к расчетному времени пролета волны, мс. */
 #define DIV_24V_FACTOR          9.3f /* Коэффициент делителя ADC канала линии +24 В: Uвх = Uadc * 9,4. */
 #define DIV_12V_FACTOR          4.0f /* Коэффициент делителя ADC канала линии +12 В: Uвх = Uadc * 4,0. */
 #define PULSE_PERIOD_MS_DEFAULT EXCITATION_PERIOD_MS_DEFAULT /* Период возбуждения после сброса настроек: 100 мс = 10 Гц. */
@@ -42,7 +40,10 @@
 #define SWITCH_HOLD_ITERATIONS  12000 /* NOP-задержка удержания приемного ключа перед возвратом в исходное состояние. */
 #define SWITCH_PIN              GPIO_PIN_7 /* Управляющий вывод аналогового ключа приемного тракта. */
 #define SWITCH_PORT             GPIOB /* GPIO-порт управляющего вывода аналогового ключа. */
-#define FIRMWARE_VERSION        136 /* Номер версии ПО, публикуемый через информационный регистр Modbus. */
+#define FIRMWARE_VERSION        151 /* Номер версии ПО, публикуемый через информационный регистр Modbus. */
+#ifndef FIRMWARE_VERSION_MINOR
+#define FIRMWARE_VERSION_MINOR  0
+#endif
 #define CALIBRATION_SAMPLE_MAX_AGE_MS 500U /* Резерв старой оконной калибровки: максимальный возраст выборки; fresh-capture сейчас не использует. */
 #define CALIBRATION_STABLE_WINDOWS_REQUIRED 10U /* Резерв старой оконной калибровки: требуемые устойчивые окна; fresh-capture сейчас не использует. */
 #define CALIBRATION_MIN_ACCEPTED_SAMPLES 16U /* Резерв старой оконной калибровки: минимум отсчетов; fresh-capture сейчас не использует. */
@@ -60,6 +61,16 @@
 #define CALIBRATION_PAIR_SAMPLE_TARGET   8U
 #define CALIBRATION_PAIR_TRIM_COUNT      1U
 #define CALIBRATION_CAPTURE_MAX_ATTEMPTS 160U
+
+typedef enum {
+    CAL_RESULT_NO_ERROR = 0,
+    CAL_RESULT_GEOMETRY = 1,
+    CAL_RESULT_TOO_FEW_SAMPLES = 2,
+    CAL_RESULT_SPREAD = 3,
+    CAL_RESULT_INVALID_TOF = 4,
+    CAL_RESULT_POINT_REJECTED = 5,
+    CAL_RESULT_STORAGE = 6
+} CalibrationResult_t;
 
 /*
  * Допустимый диапазон расчётной скорости между соседними контрольными
@@ -93,6 +104,7 @@ typedef enum {
 typedef struct {
     uint32_t tof_ticks;
     LaunchQuality_t quality;
+    uint16_t second_ticks;
 } LaunchResult_t;
 
 /* ==========================================================================
@@ -107,13 +119,14 @@ volatile uint8_t tof_timeout = 0;
 volatile uint8_t signal_captured = 0;
 volatile uint32_t captured_pulses[MAX_CAPTURED_PULSES];
 volatile uint8_t capture_count = 0;
+volatile bool capture_overrun = false;
 /* Динамическая верхняя граница первого сформированного импульса. ISR использует ее для
  * немедленного отсечения физически невозможных поздних импульсов. */
 volatile uint32_t capture_max_tof_ticks = 0xFFFFU;
 static float current_vdda = 3.3f;
 static float current_24v = 24.0f;
 static float current_12v = 12.0f;
-static float current_temperature = 0.0f;
+static float current_temperature = NAN;
 static uint32_t current_poll_period_ms = PULSE_PERIOD_MS_DEFAULT;
 static float prev_vdda = 0.0f;
 static float prev_24v = 0.0f;
@@ -125,9 +138,7 @@ static uint8_t vdda_error = 0;
 /*
  * Состояние генератора и скользящего статистического окна.
  * last_excitation_time_ms выдерживает текущий период возбуждения из Modbus между импульсами.
- * measurement_pair_fallback[] хранит признак работы по одному импульсу для
- * каждого элемента окна. Авария снимается только после полного окна последовательных
- * запусков с полноценной парой, поэтому сообщение не мигает при единичных сбоях.
+ * measurement_pair_fallback[] отмечает отсчёты без подтверждения пары.
  */
 static uint32_t last_excitation_time_ms = 0U;
 static uint8_t excitation_time_initialized = 0U;
@@ -136,7 +147,13 @@ static uint8_t measurement_pair_fallback[MEASUREMENT_REQUIRED_SAMPLES] = {0U};
 static uint8_t measurement_window_count = 0U;
 static uint8_t measurement_window_index = 0U;
 static uint8_t measurement_fallback_count = 0U;
+static MeasurementPulseWindow_t pulse_window;
+static MeasurementT1Filter_t t1_filter;
+static bool t1_filter_pending;
+static uint16_t pulse_mode;
+static float filtered_tof_ticks = NAN;
 static uint8_t capture_coil_fault_active = 0U;
+static bool level_overflow_active = false;
 static uint16_t current_measurement_status = MEASUREMENT_STATUS_VALID;
 
 /*
@@ -168,6 +185,7 @@ static uint8_t last_sensor_cal_mode = 0U;
  * 300 мс при частоте измерения 10 Гц, а одиночный выброс отбрасывается.
  */
 static float published_filtered_level_mm = 0.0f;
+static float edge_filtered_level_mm = NAN;
 static float pending_level_mm = 0.0f;
 static uint8_t published_level_initialized = 0U;
 static uint8_t pending_level_count = 0U;
@@ -195,12 +213,12 @@ static uint32_t software_reset_requested_ms = 0U;
 ========================================================================== */
 static void Check_Voltage_Change(const char *name, float new_val, float old_val, float *store_val);
 static void Update_Poll_Period_From_Modbus(void);
-static uint32_t GetMeasurementTimeoutMs(void);
 static void PrepareCaptureWindow(void);
 static void WaitForNextExcitationSlot(void);
 static LaunchResult_t MeasureSingleLaunch(void);
 static void UpdateCaptureCoilFault(uint8_t fault_active);
-static void AddMeasurementToWindow(uint32_t tof_ticks, uint8_t used_single_pulse);
+static void PublishMeasurementError(void);
+static void AddMeasurementToWindow(uint32_t tof_ticks, bool unconfirmed);
 static void StartCommandSave(uint16_t command);
 static void ProcessCommandSaveResult(void);
 static float CorrectTofForElectronicsDelay(float raw_tof_us);
@@ -257,20 +275,20 @@ static float DistanceFromRawTofMm(float raw_tof_us)
 /**
  * @brief Возвращает полезную измеряемую высоту уровня от дна.
  *
- * Общая длина звукопровода включает верхнюю невалидную зону около
- * электронной головки. Эта зона не является частью рабочего диапазона:
- * магнит на её границе соответствует максимальному уровню, а не полной
- * геометрической длине звукопровода.
+ * Рабочий ход начинается выше нижней слепой зоны и заканчивается
+ * у нижней границы верхней слепой зоны.
  */
 static float GetUsableLevelHeightMm(void)
 {
     float waveguide_mm = ModBus_GetWaveguideLength() * 1000.0f;
 
-    if (!isfinite(waveguide_mm) || waveguide_mm <= UPPER_INVALID_ZONE_MM) {
-        return 0.0f;
-    }
+    return fmaxf(0.0f, waveguide_mm - LOWER_INVALID_ZONE_MM - UPPER_INVALID_ZONE_MM);
+}
 
-    return waveguide_mm - UPPER_INVALID_ZONE_MM;
+static float GetNominalUpperLevelMm(float usable_height_mm)
+{
+    return last_sensor_cal_mode == 5U ?
+        fminf(usable_height_mm, SensorCalGrid_Read().high_m * 1000.0f) : usable_height_mm;
 }
 
 /**
@@ -480,6 +498,14 @@ static float InterpolateCalibratedLevel(float raw_tof_us)
     uint8_t high_bound_valid = 0U;
 
     last_sensor_cal_mode = 0U;
+    float grid_level_m = SensorCalGrid_Interpolate(raw_tof_us);
+    if (isfinite(grid_level_m)) {
+        last_sensor_cal_mode = 5U;
+        return grid_level_m * 1000.0f;
+    }
+    if (SensorCalGrid_Enabled()) {
+        return -1.0f;
+    }
 
     /*
      * Сначала читаем сами калибровочные точки. Они являются источником
@@ -631,7 +657,6 @@ static uint8_t GetStableCalibrationSample(float *tof_us, float *distance_mm)
 {
     uint32_t cal_samples[CALIBRATION_PAIR_SAMPLE_TARGET];
     uint64_t sum_ticks = 0ULL;
-    uint32_t mean_ticks;
     uint32_t spread_ticks;
     uint32_t key;
     uint8_t sample_count = 0U;
@@ -642,6 +667,8 @@ static uint8_t GetStableCalibrationSample(float *tof_us, float *distance_mm)
     uint8_t j;
     float local_tof_us;
     float local_distance_mm;
+    bool require_pair = ModBus_GetParameter_Int(MB_ADDR_PULSE_MODE) !=
+        MEASUREMENT_PULSE_MODE_SINGLE;
 
     if (tof_us == NULL || distance_mm == NULL) {
         return 0U;
@@ -662,41 +689,23 @@ static uint8_t GetStableCalibrationSample(float *tof_us, float *distance_mm)
             continue;
         }
 
-#if (EMERGENCY_SINGLE_PULSE_DEBUG_MODE != 0U)
-        /*
-         * АВАРИЙНАЯ СТЕНДОВАЯ ОТЛАДКА.
-         * При физически отсутствующем втором входном импульсе калибровка
-         * набирает только свежие t1 после получения команды. Никакой проверки
-         * PAIR и никакого смешивания со старым рабочим окном здесь нет.
-         */
         if (launch.quality != LAUNCH_VALID_PAIR) {
             ++single_count;
-        }
-        cal_samples[sample_count] = launch.tof_ticks;
-        ++sample_count;
-#else
-        /*
-         * ШТАТНЫЙ РЕЖИМ.
-         * В калибровку допускается только t1, аппаратно подтвержденный
-         * корректным вторым импульсом пары.
-         */
-        if (launch.quality != LAUNCH_VALID_PAIR) {
-            ++single_count;
-            continue;
+            if (require_pair) continue;
         }
 
         cal_samples[sample_count] = launch.tof_ticks;
         ++sample_count;
-#endif
     }
 
+    ModBus_SetParameter_Int(MB_ADDR_CAL_CAPTURE_SAMPLES, sample_count);
+    ModBus_SetParameter_Int(MB_ADDR_CAL_CAPTURE_ATTEMPTS, attempts);
+
     if (sample_count < CALIBRATION_PAIR_SAMPLE_TARGET) {
+        ModBus_SetParameter_Int(MB_ADDR_CAL_COMMAND_RESULT, CAL_RESULT_TOO_FEW_SAMPLES);
+        ModBus_SetParameter_Int(MB_ADDR_CAL_COMMAND_DETAIL, no_input_count);
         USART2_BufInit();
-#if (EMERGENCY_SINGLE_PULSE_DEBUG_MODE != 0U)
-        USART2_BufPrint("[CAL] 1P ");
-#else
-        USART2_BufPrint("[CAL] PAIR ");
-#endif
+        USART2_BufPrint(require_pair ? "[CAL] PAIR " : "[CAL] 1P ");
         USART2_BufPrintInt(sample_count);
         USART2_BufPrint("/8 A=");
         USART2_BufPrintInt(attempts);
@@ -728,6 +737,8 @@ static uint8_t GetStableCalibrationSample(float *tof_us, float *distance_mm)
         cal_samples[CALIBRATION_PAIR_TRIM_COUNT];
 
     if (spread_ticks > CALIBRATION_MAX_SPREAD_TICKS) {
+        ModBus_SetParameter_Int(MB_ADDR_CAL_COMMAND_RESULT, CAL_RESULT_SPREAD);
+        ModBus_SetParameter_Int(MB_ADDR_CAL_COMMAND_DETAIL, (uint16_t)spread_ticks);
         USART2_BufInit();
         USART2_BufPrint("[CAL] S=");
         USART2_BufPrintFloat(
@@ -744,18 +755,14 @@ static uint8_t GetStableCalibrationSample(float *tof_us, float *distance_mm)
         sum_ticks += cal_samples[i];
     }
 
-    mean_ticks = (uint32_t)(
-        (sum_ticks +
-         ((CALIBRATION_PAIR_SAMPLE_TARGET -
-           2U * CALIBRATION_PAIR_TRIM_COUNT) / 2U)) /
-        (CALIBRATION_PAIR_SAMPLE_TARGET -
-         2U * CALIBRATION_PAIR_TRIM_COUNT));
-
-    local_tof_us = (float)mean_ticks * TIM3_CAPTURE_TICK_US;
+    local_tof_us = ((float)sum_ticks /
+        (float)(CALIBRATION_PAIR_SAMPLE_TARGET - 2U * CALIBRATION_PAIR_TRIM_COUNT)) *
+        TIM3_CAPTURE_TICK_US;
     local_distance_mm = DistanceFromRawTofMm(local_tof_us);
 
     if (!isfinite(local_tof_us) || !isfinite(local_distance_mm) ||
         local_tof_us <= 0.0f || local_distance_mm <= 0.0f) {
+        ModBus_SetParameter_Int(MB_ADDR_CAL_COMMAND_RESULT, CAL_RESULT_INVALID_TOF);
         USART2_Print("[CAL] VAL\r\n");
         return 0U;
     }
@@ -767,6 +774,11 @@ static uint8_t GetStableCalibrationSample(float *tof_us, float *distance_mm)
     measurement_window_count = 0U;
     measurement_window_index = 0U;
     measurement_fallback_count = 0U;
+    pulse_window = (MeasurementPulseWindow_t){.sequence = pulse_window.sequence};
+    t1_filter = (MeasurementT1Filter_t){0};
+    ModBus_SetParameter_Int(MB_ADDR_PULSE_VALID_PAIRS, 0U);
+    filtered_tof_ticks = NAN;
+    edge_filtered_level_mm = NAN;
     UpdateCaptureCoilFault(0U);
 
     *tof_us = local_tof_us;
@@ -777,12 +789,8 @@ static uint8_t GetStableCalibrationSample(float *tof_us, float *distance_mm)
     USART2_BufPrintFloat(local_tof_us);
     USART2_BufPrint(" A=");
     USART2_BufPrintInt(attempts);
-#if (EMERGENCY_SINGLE_PULSE_DEBUG_MODE != 0U)
-    USART2_BufPrint(" EMG1P");
-#else
     USART2_BufPrint(" 1P=");
     USART2_BufPrintInt(single_count);
-#endif
     USART2_BufPrint(" s=");
     USART2_BufPrintFloat(
         (float)spread_ticks * TIM3_CAPTURE_TICK_US);
@@ -916,9 +924,8 @@ static float ConfirmMeasuredLevel(float candidate_mm)
  * @brief Переводит время пролёта в уровень жидкости, отсчитанный от дна.
  *
  * Приоритет расчёта:
- * 1. Трёхточечная таблица ToFraw команд 11/12/13:
- *    260, 520 и 780 мм. Команды 01/02 задают только границы анализа.
- * 2. Геометрический аварийный расчёт по скорости волны и длине звукопровода.
+ * 1. Настраиваемая таблица ToFraw или прежняя трёхточечная калибровка.
+ * 2. Геометрический расчёт по скорости волны и расстоянию от головки.
  *
  * Параметры C1/C2 сохранены в карте Modbus для совместимости с ПМП-201Е,
  * но намеренно не участвуют в измерительном пересчёте. Ранее оставшийся
@@ -927,35 +934,34 @@ static float ConfirmMeasuredLevel(float candidate_mm)
  */
 static float Calculate_Position(float raw_tof_us)
 {
-    float measured_distance_mm = DistanceFromRawTofMm(raw_tof_us);
     float usable_height_mm = GetUsableLevelHeightMm();
-    float level_mm;
+    float level_mm = InterpolateCalibratedLevel(raw_tof_us);
 
-    /* Основной и единственный калиброванный режим — точки 11/12/13. */
-    level_mm = InterpolateCalibratedLevel(raw_tof_us);
-    if (isfinite(level_mm) && level_mm >= 0.0f) {
-        if (level_mm > usable_height_mm) {
-            level_mm = usable_height_mm;
-        }
-        return level_mm;
+    if (last_sensor_cal_mode == 5U) {
+        float nominal_upper_mm = GetNominalUpperLevelMm(usable_height_mm);
+        edge_filtered_level_mm = MeasurementStatistics_FilterRangeEdges(
+            edge_filtered_level_mm, level_mm, nominal_upper_mm,
+            LEVEL_OVERRUN_LIMIT_MM, current_poll_period_ms);
+        return isfinite(edge_filtered_level_mm) ?
+            fmaxf(0.0f, edge_filtered_level_mm) : NAN;
+    }
+    edge_filtered_level_mm = NAN;
+
+    /* Старая калибровка ограничивает свой результат. Поэтому для неё
+     * проверяем рабочий ход по геометрии, как и до захвата новых точек. */
+    float geometric_level_mm =
+        ModBus_GetWaveguideLength() * 1000.0f - LOWER_INVALID_ZONE_MM -
+        DistanceFromRawTofMm(raw_tof_us);
+    if (!(geometric_level_mm >= -MEASUREMENT_LEVEL_BELOW_ZERO_TOLERANCE_MM &&
+          geometric_level_mm <= usable_height_mm)) {
+        return NAN;
+    }
+    if (last_sensor_cal_mode == 0U) {
+        level_mm = fmaxf(0.0f, geometric_level_mm);
     }
 
-    /*
-     * Аварийный расчёт используется только при отсутствующей либо
-     * немонотонной таблице 11/12/13. C1/C2 здесь не применяются.
-     */
-    level_mm =
-        ModBus_GetWaveguideLength() * 1000.0f -
-        measured_distance_mm;
-
-    if (!isfinite(level_mm) || level_mm < 0.0f) {
-        level_mm = 0.0f;
-    }
-    if (level_mm > usable_height_mm) {
-        level_mm = usable_height_mm;
-    }
-
-    return level_mm;
+    return usable_height_mm > 0.0f &&
+           level_mm >= 0.0f && level_mm <= usable_height_mm ? level_mm : NAN;
 }
 
 
@@ -1004,6 +1010,9 @@ static void ProcessCommandSaveResult(void)
         command_save_code = 0U;
         ModBus_ClearStorageSaveStatus();
     } else if (state == MODBUS_STORAGE_SAVE_ERROR) {
+        ModBus_SetParameter_Int(MB_ADDR_CAL_COMMAND_RESULT, CAL_RESULT_STORAGE);
+        ModBus_SetParameter_Int(MB_ADDR_CAL_COMMAND_DETAIL,
+                                (uint16_t)ParamsStorage_GetLastError());
         ModBus_SetParameter_Int(MB_ADDR_COMMAND, 0U);
         USART2_BufInit();
         USART2_BufPrint("[CAL] ");
@@ -1087,6 +1096,11 @@ void Process_Calibration_Command(uint16_t cmd)
     uint8_t command_succeeded = 1U;
     uint8_t requires_eeprom_commit = 0U;
 
+    ModBus_SetParameter_Int(MB_ADDR_CAL_COMMAND_RESULT, CAL_RESULT_NO_ERROR);
+    ModBus_SetParameter_Int(MB_ADDR_CAL_COMMAND_DETAIL, 0U);
+    ModBus_SetParameter_Int(MB_ADDR_CAL_CAPTURE_SAMPLES, 0U);
+    ModBus_SetParameter_Int(MB_ADDR_CAL_CAPTURE_ATTEMPTS, 0U);
+
     if (cmd >= 300U && cmd <= 302U) {
         float param = ModBus_GetParameter_Float(MB_ADDR_COMMAND_PARAM);
         /* Grad_ProcessCommand() сам записывает итог 90 или 0 в адрес 3000. */
@@ -1094,7 +1108,28 @@ void Process_Calibration_Command(uint16_t cmd)
         return;
     }
 
-    switch (cmd) {
+    if (SensorCalGrid_Enabled() &&
+        (cmd == 1U || cmd == 2U || (cmd >= 11U && cmd <= 20U))) {
+        SensorCalibrationGrid grid = SensorCalGrid_Read();
+        float tof_us;
+        float distance_mm;
+        float usable_height_mm = GetUsableLevelHeightMm();
+        if (grid.high_m * 1000.0f > usable_height_mm) {
+            ModBus_SetParameter_Int(MB_ADDR_CAL_COMMAND_RESULT, CAL_RESULT_GEOMETRY);
+            ModBus_SetParameter_Int(MB_ADDR_CAL_COMMAND_DETAIL, (uint16_t)usable_height_mm);
+            command_succeeded = 0U;
+        } else if (GetStableCalibrationSample(&tof_us, &distance_mm) == 0U) {
+            command_succeeded = 0U;
+        } else if (!SensorCalGrid_Capture(cmd, tof_us)) {
+            ModBus_SetParameter_Int(MB_ADDR_CAL_COMMAND_RESULT, CAL_RESULT_POINT_REJECTED);
+            command_succeeded = 0U;
+        } else {
+            requires_eeprom_commit = 1U;
+        }
+        if (command_succeeded == 0U) {
+            USART2_Print("[CAL] GRID FAIL\r\n");
+        }
+    } else switch (cmd) {
         case 3: {
             float waveguide_len = ModBus_GetWaveguideLength();
             USART2_Print("[CAL] L=");
@@ -1361,6 +1396,20 @@ void Process_Calibration_Command(uint16_t cmd)
             USART2_Print("[CFG] SAVE\r\n");
             break;
 
+        case 230:
+            /* ПМП-201Е: подтверждаем выход для клиентской программы. */
+            ModBus_SetParameter_Float(MB_ADDR_COMMAND_PARAM, 0.0f);
+            break;
+
+        case 231: {
+            /* ПМП-201Е: пароль передаётся как float32 через 3002–3003. */
+            float entered = ModBus_GetParameter_Float(MB_ADDR_COMMAND_PARAM);
+            float stored = ModBus_GetParameter_Float(MB_ADDR_ADMIN_PASS);
+            ModBus_SetParameter_Float(MB_ADDR_COMMAND_PARAM, 0.0f);
+            command_succeeded = (isfinite(entered) && entered == stored) ? 1U : 0U;
+            break;
+        }
+
         case 4:
             USART2_Print("[CAL] CMD04\r\n");
             break;
@@ -1483,39 +1532,20 @@ static void Update_Poll_Period_From_Modbus(void)
     last_frequency_hz = frequency_value;
 }
 
-static uint32_t GetMeasurementTimeoutMs(void)
-{
-    float length_m = ModBus_GetWaveguideLength();
-    float speed_m_s = ModBus_GetMaterialWaveSpeed();
-    float expected_ms;
-    uint32_t timeout_ms;
-
-    if (!isfinite(length_m) || length_m <= 0.0f) length_m = MODBUS_DEFAULT_WAVEGUIDE_LENGTH_M;
-    if (!isfinite(speed_m_s) || speed_m_s < 100.0f) speed_m_s = MODBUS_DEFAULT_MATERIAL_WAVE_SPEED_MPS;
-
-    expected_ms = (length_m / speed_m_s) * 1000.0f +
-                  ELECTRONICS_DELAY_US / 1000.0f;
-    timeout_ms = (uint32_t)ceilf(expected_ms + MEAS_TIMEOUT_MARGIN_MS);
-
-    if (timeout_ms < MEAS_TIMEOUT_MIN_MS) timeout_ms = MEAS_TIMEOUT_MIN_MS;
-    if (timeout_ms > MEAS_TIMEOUT_MAX_MS) timeout_ms = MEAS_TIMEOUT_MAX_MS;
-    return timeout_ms;
-}
-
 /* ==========================================================================
 ОБРАБОТКА РЕЗУЛЬТАТОВ ИЗМЕРЕНИЯ
 ========================================================================== */
 /**
  * @brief Читает float32 непосредственно из быстрого Modbus-снимка.
  *
- * Снимок 1000..1007 хранит слова в документированном порядке ПМП-201Е:
+ * Снимок 1000..1013 хранит слова в документированном порядке ПМП-201Е:
  * младшее слово по базовому адресу, старшее — по следующему. Отладочная
  * консоль обязана показывать именно тот уровень и процент, которые реально
  * читает внешняя утилита, поэтому для печати выполняется обратная сборка
  * float32 из опубликованных слов, а не используется промежуточная локальная
  * переменная расчёта.
  *
- * @param base_address Базовый адрес float32 в диапазоне 1000..1007.
+ * @param base_address Базовый адрес float32 в диапазоне 1000..1013.
  * @param value        Указатель для результата.
  * @return true, если оба слова атомарно прочитаны из снимка.
  */
@@ -1540,9 +1570,7 @@ void Process_Measurement_Results(float tof_us,
 {
     float waveguide_len_m;
     float waveguide_len_mm;
-    float cal_low_mm;
-    float cal_high_mm;
-    float level_percent = 0.0f;
+    float level_percent;
     float tank_height;
     float tank_volume;
     float tank_geom_raw;
@@ -1572,31 +1600,27 @@ void Process_Measurement_Results(float tof_us,
         CalculateWaveSpeedFromThreePoints(&calculated_wave_speed);
     corrected_tof_us = CorrectTofForElectronicsDelay(tof_us);
     distance_from_top_raw_mm = DistanceFromRawTofMm(tof_us);
-    cal_low_mm = ModBus_GetParameter_Float(MB_ADDR_CAL_LOW_LVL) * 1000.0f;
-    cal_high_mm = ModBus_GetParameter_Float(MB_ADDR_CAL_HIGH_LVL) * 1000.0f;
-    if (!isfinite(cal_high_mm) || cal_high_mm > usable_height_mm) {
-        cal_high_mm = usable_height_mm;
+    (void)InterpolateCalibratedLevel(tof_us);
+    sensor_cal_mode = last_sensor_cal_mode;
+    float nominal_upper_mm = GetNominalUpperLevelMm(usable_height_mm);
+    float upper_limit_mm = nominal_upper_mm +
+        (sensor_cal_mode == 5U ? LEVEL_OVERRUN_LIMIT_MM : 0.0f);
+    if (!(nominal_upper_mm > 0.0f &&
+          position_mm >= 0.0f && position_mm <= upper_limit_mm)) {
+        if (!MeasurementSnapshot_HoldLevel(HAL_GetTick())) {
+            ModBus_PublishLiveMeasurements(NAN, current_temperature, NAN, NAN,
+                current_measurement_status & (uint16_t)~MEASUREMENT_STATUS_VALID);
+        }
+        return;
     }
-
-    if (!isfinite(position_mm) || position_mm < 0.0f) position_mm = 0.0f;
-    if (position_mm > waveguide_len_mm) position_mm = waveguide_len_mm;
-
-    /* position_mm уже является уровнем, отсчитанным от дна. Поэтому
-     * процент заполнения возрастает вместе с position_mm. Повторно
-     * инвертировать значение нельзя: это и было причиной показания около
-     * 97 % при фактически почти пустом метровом звукопроводе. */
-    if (isfinite(cal_low_mm) && isfinite(cal_high_mm) &&
-        cal_high_mm > cal_low_mm) {
-        level_percent =
-            ((position_mm - cal_low_mm) /
-             (cal_high_mm - cal_low_mm)) * 100.0f;
-    } else if (usable_height_mm > 0.0f) {
-        level_percent = position_mm / usable_height_mm * 100.0f;
+    /* Обновляем признак только по подтверждённому уровню. При потере
+     * сигнала сохраняем последнее состояние до следующего измерения. */
+    bool overflow = MeasurementStatistics_OverflowActive(
+        level_overflow_active, position_mm, nominal_upper_mm, LEVEL_OVERRUN_ALARM_MM);
+    if (overflow != level_overflow_active) {
+        level_overflow_active = overflow;
+        PublishMeasurementError();
     }
-
-    if (level_percent < 0.0f) level_percent = 0.0f;
-    if (level_percent > 100.0f) level_percent = 100.0f;
-
     tank_height = ModBus_GetParameter_Float(MB_ADDR_TANK_HEIGHT);
     tank_volume = ModBus_GetParameter_Float(MB_ADDR_TANK_VOLUME);
     tank_geom_raw = ModBus_GetParameter_Float(MB_ADDR_TANK_GEOM);
@@ -1606,18 +1630,10 @@ void Process_Measurement_Results(float tof_us,
         tank_type = (GradTankType_t)((int)tank_geom_raw);
     }
 
-    if (tank_type == GRAD_TYPE_BY_TABLE && Grad_IsValid()) {
-        volume_m3 = Grad_InterpolateVolume(position_mm / 1000.0f);
-    } else {
-        volume_m3 = Grad_CalculateVolume(tank_type,
-                                         position_mm / 1000.0f,
-                                         tank_height,
-                                         tank_volume);
-    }
-    if (!isfinite(volume_m3) || volume_m3 < 0.0f) volume_m3 = 0.0f;
-
-    /* Самый первый шаг — публикация готового снимка в RAM. Обработчик
-     * Modbus читает 1000..1007 непосредственно из этого снимка. */
+    volume_m3 = Grad_CalculateVolume(tank_type, position_mm / 1000.0f,
+                                     tank_height, tank_volume);
+    level_percent = MeasurementStatistics_LevelPercent(position_mm, nominal_upper_mm);
+    /* Обработчик Modbus читает 1000..1013 из одного снимка. */
     ModBus_PublishLiveMeasurements(position_mm,
                                    current_temperature,
                                    level_percent,
@@ -1636,23 +1652,18 @@ void Process_Measurement_Results(float tof_us,
     /* DistTopCal — удобная для линейки координата от электроники, полученная
      * из уже откалиброванного уровня. DistRaw оставлен отдельно для оценки
      * исходной модели скорости и задержки электронного тракта. */
-    distance_from_top_cal_mm = waveguide_len_mm - published_level_mm;
+    distance_from_top_cal_mm =
+        waveguide_len_mm - LOWER_INVALID_ZONE_MM - published_level_mm;
     if (distance_from_top_cal_mm < 0.0f) distance_from_top_cal_mm = 0.0f;
     if (distance_from_top_cal_mm > waveguide_len_mm) {
         distance_from_top_cal_mm = waveguide_len_mm;
     }
     sensor_cal_mask = ModBus_GetParameter_Int(MB_ADDR_SENSOR_CAL_MASK);
-    (void)InterpolateCalibratedLevel(tof_us);
-    sensor_cal_mode = last_sensor_cal_mode;
-
     ModBus_SetParameter_Int(MB_ADDR_LEVEL_INT,
                             (uint16_t)(int16_t)position_mm);
     ModBus_SetParameter_Int(MB_ADDR_TEMP_INT,
-                            (uint16_t)(int16_t)(current_temperature * 100.0f));
-    ModBus_SetParameter_Int(MB_ADDR_PERCENT_INT,
-                            (uint16_t)(int16_t)(level_percent * 100.0f));
-    ModBus_SetParameter_Int(MB_ADDR_VOLUME_INT,
-                            (uint16_t)(volume_m3 * 100.0f));
+                            isfinite(current_temperature) ?
+                            (uint16_t)(int16_t)(current_temperature * 100.0f) : 0x8000U);
 
     /* Если запрос уже принят, ответ формируется до отладочного текста. */
     ModBus_Process();
@@ -1671,7 +1682,9 @@ void Process_Measurement_Results(float tof_us,
         USART2_BufPrintFloat(distance_from_top_raw_mm);
         USART2_BufPrint(" | M=");
         USART2_BufPrintInt((uint16_t)(sensor_cal_mask & SENSOR_CAL_FULL_MASK));
-        if (sensor_cal_mode == 4U) {
+        if (sensor_cal_mode == 5U) {
+            USART2_BufPrint(" C=GRID");
+        } else if (sensor_cal_mode == 4U) {
             USART2_BufPrint(" C=3P+B");
         } else if (sensor_cal_mode == 3U) {
             USART2_BufPrint(" C=3P");
@@ -1694,15 +1707,8 @@ void Process_Measurement_Results(float tof_us,
         USART2_BufPrint(" | cc=");
         USART2_BufPrintFloat(wave_speed);
         USART2_BufPrint("");
-#if (EMERGENCY_SINGLE_PULSE_DEBUG_MODE != 0U)
-        USART2_BufPrint(" | EMG1P");
-#else
-        if (capture_coil_fault_active != 0U) {
-            USART2_BufPrint(" | 1P CF");
-        } else {
-            USART2_BufPrint(" | PAIR");
-        }
-#endif
+        USART2_BufPrint(" | PS=");
+        USART2_BufPrintInt(ModBus_GetParameter_Int(MB_ADDR_PULSE_STATE));
         USART2_BufPrint("\r\n");
         USART2_BufFlush();
     }
@@ -1719,13 +1725,22 @@ int main(void)
     MX_USART1_UART_Init();
 #if (USART2_DEBUG_ENABLED != 0U)
     MX_USART2_UART_Init();
+    USART2_BufInit();
+    USART2_BufPrint("[FW] v");
+    USART2_BufPrintInt(FIRMWARE_VERSION);
+    USART2_BufPrint(".");
+    USART2_BufPrintInt(FIRMWARE_VERSION_MINOR);
+    USART2_BufPrint("\r\n");
+#ifdef FW_EEPROM_DIAGNOSTICS
+    USART2_BufPrint("[FWUP] EEPROM ACK POLL FIX\r\n");
+#endif
+    USART2_BufFlush();
 #endif
     MX_ADC1_Init();
     MX_ADC2_Init();
 
     if (MX_I2C2_Init() == HAL_OK) {
         USART2_Print("[I2C] OK\r\n");
-        current_temperature = 0.0f;
     } else {
         USART2_Print("[I2C] ERR\r\n");
     }
@@ -1765,9 +1780,7 @@ int main(void)
     current_measurement_status = MEASUREMENT_STATUS_VALID;
 
     ModBus_UpdateFirmwareVersion(FIRMWARE_VERSION);
-#if (EMERGENCY_SINGLE_PULSE_DEBUG_MODE != 0U)
-    USART2_Print("[DBG] EMERGENCY 1P MODE\r\n");
-#endif
+    ModBus_SetParameter_Int(MB_ADDR_FW_VERSION_MINOR, FIRMWARE_VERSION_MINOR);
     TempSensors_Init();
     Grad_Init();
 
@@ -1821,6 +1834,9 @@ int main(void)
         float tof_probe =
             ModBus_GetParameter_Float(MB_ADDR_SENSOR_CAL_520);
 
+        if (SensorCalGrid_Enabled()) {
+            tof_probe = ModBus_GetParameter_Float(MB_ADDR_SENSOR_GRID_TOF(0U));
+        }
         (void)InterpolateCalibratedLevel(tof_probe);
 
         USART2_BufPrint("[CAL] EE m=");
@@ -1835,7 +1851,9 @@ int main(void)
         USART2_BufPrintFloat(tof_780);
         USART2_BufPrint("\r\n");
 
-        if (last_sensor_cal_mode == 4U) {
+        if (last_sensor_cal_mode == 5U) {
+            USART2_BufPrint("[CAL] MODE=GRID\r\n");
+        } else if (last_sensor_cal_mode == 4U) {
             USART2_BufPrint("[CAL] MODE=3P+B\r\n");
         } else if (last_sensor_cal_mode == 3U &&
                    (cal_mask & SENSOR_CAL_STORAGE_TAG_MASK) == SENSOR_CAL_STORAGE_TAG &&
@@ -1853,6 +1871,7 @@ int main(void)
     uint32_t last_temp_read_time = 0;
     uint32_t last_voltage_read_time = 0;
     uint32_t last_measure_error_time = 0;
+    uint32_t last_valid_level_ms = 0U;
     uint8_t blue_led_state = 0;
     uint8_t red_led_state = 0;
 
@@ -1886,12 +1905,6 @@ int main(void)
             red_led_state = 0U;
         }
 
-        if ((uint32_t)(now - last_temp_read_time) >= 2000U &&
-            !ModBus_CommunicationIsBusy()) {
-            Read_Temperature();
-            last_temp_read_time = HAL_GetTick();
-        }
-
         {
             uint16_t cmd = ModBus_GetParameter_Int(MB_ADDR_COMMAND);
             /* 0/85/90/99 являются кодами результата, а не номерами команд. */
@@ -1906,7 +1919,7 @@ int main(void)
         }
 
         if ((uint32_t)(now - last_measure_time) >= current_poll_period_ms) {
-            uint32_t measurement;
+            float measurement;
             float raw_tof_us;
             float raw_position_mm;
             float position_mm;
@@ -1918,16 +1931,9 @@ int main(void)
             signal_captured = 0U;
 
             measurement = measure_time_of_flight();
-            if (measurement > 0U && !tof_timeout) {
-                /* measure_time_of_flight() выполняет один физический запуск.
-                 * После заполнения скользящего окна возвращается робастное
-                 * среднее 11->5;
-                 * при первоначальном заполнении возвращается текущий t1.
-                 * Дополнительный EMA намеренно не применяется. */
-                raw_tof_us = (float)measurement * TOF_TICK_US;
-
-                /* Отдельный калибровочный ToF обновляется внутри
-                 * measure_time_of_flight() только по устойчивому MEAN. */
+            if (measurement > 0.0f && !tof_timeout) {
+                /* Фильтр возвращает оценку ToF в тактах с дробной частью. */
+                raw_tof_us = measurement * TOF_TICK_US;
 
                 raw_position_mm = Calculate_Position(raw_tof_us);
 
@@ -1937,9 +1943,9 @@ int main(void)
                  * последовательными результатами. Сырой ToF для команд
                  * 11/12/13 остаётся неизменным и хранится до этого фильтра.
                  */
-                position_mm = ConfirmMeasuredLevel(raw_position_mm);
-
-                if (position_mm >= 0.0f && isfinite(position_mm)) {
+                if (isfinite(raw_position_mm)) {
+                    position_mm = ConfirmMeasuredLevel(raw_position_mm);
+                    last_valid_level_ms = HAL_GetTick();
                     signal_captured = 1U;
                     measurement_processed = true;
 
@@ -1951,10 +1957,44 @@ int main(void)
                     red_led_state = 1U;
                     led_red_off_time = HAL_GetTick();
                 }
-            } else if ((uint32_t)(now - last_measure_error_time) >= 1000U) {
+            } else if (tof_timeout != 0U &&
+                       (uint32_t)(now - last_measure_error_time) >= 1000U) {
                 last_measure_error_time = now;
                 USART2_Print("[MEAS] NOPULSE\r\n");
             }
+            if (signal_captured == 0U) {
+                pending_level_count = 0U;
+                pending_spike_reported = 0U;
+            }
+            /* Время удержания состояния фильтра и время выдачи последнего
+             * достоверного снимка Modbus ограничиваются независимо. */
+            uint32_t hold_ms = MEASUREMENT_STATISTICS_HOLD_MS;
+            if (t1_filter_pending && 6U * current_poll_period_ms > hold_ms) {
+                hold_ms = 6U * current_poll_period_ms;
+            }
+            if (signal_captured == 0U) {
+                uint32_t failure_ms = HAL_GetTick();
+                bool hold_filter = measurement == 0.0f && MeasurementStatistics_CanHold(
+                    tof_timeout == 0U, published_level_initialized != 0U,
+                    failure_ms - last_valid_level_ms, hold_ms);
+                if (!hold_filter) {
+                    filtered_tof_ticks = NAN;
+                    edge_filtered_level_mm = NAN;
+                    published_level_initialized = 0U;
+                }
+                if (!MeasurementSnapshot_HoldLevel(failure_ms)) {
+                    ModBus_PublishLiveMeasurements(NAN, current_temperature, NAN, NAN,
+                        current_measurement_status & (uint16_t)~MEASUREMENT_STATUS_VALID);
+                }
+            }
+        }
+
+        ModBus_Process();
+        now = HAL_GetTick();
+        if ((uint32_t)(now - last_temp_read_time) >= 2000U &&
+            !ModBus_CommunicationIsBusy()) {
+            Read_Temperature();
+            last_temp_read_time = HAL_GetTick();
         }
 
         now = HAL_GetTick();
@@ -2056,7 +2096,7 @@ void TIM3_InputCapture_Init(void)
     TIM3->CCER = TIM_CCER_CC4E; /* CC4P=0, CC4NP=0: rising edge only */
     TIM3->DIER = 0;
     TIM3->SR = 0;
-    TIM3->CR1 = TIM_CR1_CEN;
+    TIM3->CR1 = TIM_CR1_OPM;
 }
 
 /**
@@ -2097,6 +2137,7 @@ void generate_pulse_and_measure(void)
     tof_measurement_done = 0U;
     tof_timeout = 0U;
     capture_count = 0U;
+    capture_overrun = false;
 
     for (i = 0U; i < MAX_CAPTURED_PULSES; ++i) {
         captured_pulses[i] = 0U;
@@ -2105,12 +2146,13 @@ void generate_pulse_and_measure(void)
     /* Сначала переводим аналоговый ключ в исходное состояние. */
     HAL_GPIO_WritePin(SWITCH_PORT, SWITCH_PIN, GPIO_PIN_RESET);
 
-    /* Счетчик обнуляется непосредственно перед импульсом PB5. Благодаря этому
-     * BLANKING_WINDOW_TICKS отсчитывает именно первые 80 мкс после отправки,
-     * а не время выполнения подготовительного кода. */
+    /* TIM3 останавливается в конце окна без перехода на новый цикл захвата. */
+    uint32_t window_end = capture_max_tof_ticks + CAPTURE_SECOND_PULSE_TIMEOUT_TICKS;
     TIM3->CR1 &= ~TIM_CR1_CEN;
+    TIM3->ARR = window_end < UINT16_MAX ? window_end : UINT16_MAX;
     TIM3->SR = 0U;
     TIM3->CNT = 0U;
+    TIM3->DIER |= TIM_DIER_CC4IE;
     __DSB();
     TIM3->CR1 |= TIM_CR1_CEN;
     __DSB();
@@ -2216,27 +2258,29 @@ static void WaitForNextExcitationSlot(void)
     excitation_time_initialized = 1U;
 }
 
-/**
- * @brief Устанавливает или снимает аварию катушки фиксации.
- *
- * Авария означает, что первый входной импульс присутствует и уровень можно
- * измерять, но второй подтверждающий импульс отсутствует либо пришел вне
- * диапазона 14...26 мкс. При аварии расчет продолжается по времени первого
- * импульса, а в Modbus-регистр 2416 записывается код 0x0101.
- *
- * Функция печатает сообщение только при изменении состояния, поэтому USART2
- * не заполняется одинаковыми строками на каждом запуске.
- */
+/* Переполнение имеет приоритет в регистре 2416. В снимке остаются оба флага. */
+static void PublishMeasurementError(void)
+{
+    uint16_t code = MEASUREMENT_ERROR_NONE;
+    if (capture_coil_fault_active != 0U) {
+        code = MEASUREMENT_ERROR_CAPTURE_COIL;
+    }
+    if (level_overflow_active) {
+        current_measurement_status |= MEASUREMENT_STATUS_OVERFLOW;
+        code = MEASUREMENT_ERROR_OVERFLOW;
+    } else {
+        current_measurement_status &= (uint16_t)~MEASUREMENT_STATUS_OVERFLOW;
+    }
+    ModBus_SetParameter_Int(MB_ADDR_ERROR_CODE, code);
+}
+
+/* Отмечает нарушение обязательной проверки пары. */
 static void UpdateCaptureCoilFault(uint8_t fault_active)
 {
-#if (EMERGENCY_SINGLE_PULSE_DEBUG_MODE != 0U)
-    /* В аварийной стендовой сборке отсутствие второго импульса ожидаемо. */
-    fault_active = 0U;
-#else
     fault_active = (fault_active != 0U) ? 1U : 0U;
-#endif
 
-    current_measurement_status = MEASUREMENT_STATUS_VALID;
+    current_measurement_status &= (uint16_t)~(MEASUREMENT_STATUS_SINGLE_PULSE |
+                                             MEASUREMENT_STATUS_COIL_FAULT);
     if (fault_active != 0U) {
         current_measurement_status |=
             MEASUREMENT_STATUS_SINGLE_PULSE |
@@ -2248,17 +2292,14 @@ static void UpdateCaptureCoilFault(uint8_t fault_active)
     }
 
     capture_coil_fault_active = fault_active;
+    PublishMeasurementError();
 
     if (fault_active != 0U) {
-        ModBus_SetParameter_Int(MB_ADDR_ERROR_CODE,
-                                MEASUREMENT_ERROR_CAPTURE_COIL);
         if (!ModBus_CommunicationIsBusy()) {
             USART2_Print(
                 "[COIL] ERR\r\n");
         }
     } else {
-        ModBus_SetParameter_Int(MB_ADDR_ERROR_CODE,
-                                MEASUREMENT_ERROR_NONE);
         if (!ModBus_CommunicationIsBusy()) {
             USART2_Print(
                 "[COIL] OK\r\n");
@@ -2266,24 +2307,9 @@ static void UpdateCaptureCoilFault(uint8_t fault_active)
     }
 }
 
-/**
- * @brief Добавляет новый ToF в скользящее окно из 20 запусков.
- *
- * После заполнения окна самый старый элемент заменяется новым. Одновременно
- * ведется количество запусков, где использовался только первый импульс.
- * Пока хотя бы один такой запуск остается в последних 20 измерениях, авария
- * катушки остается активной. Для снятия аварии нужно полное окно корректных пар подряд.
- */
-static void AddMeasurementToWindow(uint32_t tof_ticks,
-                                   uint8_t used_single_pulse)
+/* Сохраняет только допущенные режимом отсчёты. */
+static void AddMeasurementToWindow(uint32_t tof_ticks, bool unconfirmed)
 {
-#if (EMERGENCY_SINGLE_PULSE_DEBUG_MODE != 0U)
-    /* PAIR/1P не участвует в аварийной отладке: окно содержит только t1. */
-    used_single_pulse = 0U;
-#else
-    used_single_pulse = (used_single_pulse != 0U) ? 1U : 0U;
-#endif
-
     if (measurement_window_count == MEASUREMENT_REQUIRED_SAMPLES) {
         if (measurement_pair_fallback[measurement_window_index] != 0U &&
             measurement_fallback_count > 0U) {
@@ -2294,9 +2320,9 @@ static void AddMeasurementToWindow(uint32_t tof_ticks,
     }
 
     measurement_window[measurement_window_index] = tof_ticks;
-    measurement_pair_fallback[measurement_window_index] = used_single_pulse;
+    measurement_pair_fallback[measurement_window_index] = unconfirmed;
 
-    if (used_single_pulse != 0U) {
+    if (unconfirmed) {
         ++measurement_fallback_count;
     }
 
@@ -2304,16 +2330,14 @@ static void AddMeasurementToWindow(uint32_t tof_ticks,
     if (measurement_window_index >= MEASUREMENT_REQUIRED_SAMPLES) {
         measurement_window_index = 0U;
     }
-
-    UpdateCaptureCoilFault(measurement_fallback_count > 0U);
 }
 
 /**
  * @brief Выполняет один физический запуск измерительного тракта.
  *
  * Штатный режим:
- *  - после защитного окна 80 мкс фиксируется первый импульс t1;
- *  - второй импульс t2 подтверждает пару, если t2-t1 = 14...26 мкс;
+ *  - после защитного окна фиксируется первый импульс t1;
+ *  - второй импульс t2 подтверждает пару, если t2-t1 = 12...26 мкс;
  *  - для расчета ToF всегда используется t1.
  *
  * Аварийный режим:
@@ -2324,47 +2348,25 @@ static void AddMeasurementToWindow(uint32_t tof_ticks,
  */
 static LaunchResult_t MeasureSingleLaunch(void)
 {
-    LaunchResult_t result = {0U, LAUNCH_NO_INPUT_PULSE};
-    uint32_t start_wait;
-    uint32_t timeout_ms;
-
-    /* Этот вызов является единственной точкой ограничения частоты PB5. */
+    LaunchResult_t result = {0};
+    /* Ограничение частоты обслуживает Modbus до запуска. Во время захвата
+     * USART1 принимает байты через IRQ, а ответ RS-485 ждёт конца окна. */
     WaitForNextExcitationSlot();
-
-    TIM3->SR = 0U;
-    TIM3->DIER |= TIM_DIER_CC4IE;
     generate_pulse_and_measure();
 
-    start_wait = HAL_GetTick();
-    timeout_ms = GetMeasurementTimeoutMs();
-
-    while (tof_measurement_done == 0U && tof_timeout == 0U) {
-        ModBus_Process();
-
-        /* Если первый импульс уже зафиксирован, не ждем полный миллисекундный
-         * таймаут. После 26 мкс + 5 мкс второй импульс считается пропавшим.
-         * Первый импульс при этом остается полноценным измерением ToF. */
-        if (capture_count == 1U) {
-            uint32_t elapsed_ticks =
-                (uint16_t)((uint16_t)TIM3->CNT -
-                           (uint16_t)captured_pulses[0]);
-
-            if (elapsed_ticks > CAPTURE_SECOND_PULSE_TIMEOUT_TICKS) {
-                TIM3->DIER &= ~TIM_DIER_CC4IE;
-                tof_measurement_done = 1U;
-                break;
-            }
-        }
-
-        if ((uint32_t)(HAL_GetTick() - start_wait) >= timeout_ms) {
-            tof_timeout = 1U;
+    while (tof_measurement_done == 0U && tof_timeout == 0U &&
+           (TIM3->SR & TIM_SR_UIF) == 0U) {
+        if (capture_count == 1U &&
+            (uint16_t)(TIM3->CNT - captured_pulses[0]) > CAPTURE_SECOND_PULSE_TIMEOUT_TICKS) {
             break;
         }
-        __NOP();
     }
 
     TIM3->DIER &= ~TIM_DIER_CC4IE;
     TIM3->CR1 &= ~TIM_CR1_CEN;
+    const uint32_t capture_flags = TIM3->SR;
+    capture_overrun = capture_overrun ||
+        (capture_flags & (TIM_SR_CC4OF | TIM_SR_UIF)) == TIM_SR_CC4OF;
     TIM3->SR = 0U;
 
     /* Сохраняем проверенную последовательность управления аналоговым ключом. */
@@ -2376,7 +2378,7 @@ static LaunchResult_t MeasureSingleLaunch(void)
     HAL_GPIO_WritePin(SWITCH_PORT, SWITCH_PIN, GPIO_PIN_RESET);
 
     /* Без первого импульса расстояние определить невозможно. */
-    if (capture_count == 0U ||
+    if (capture_overrun || capture_count == 0U ||
         captured_pulses[0] < BLANKING_WINDOW_TICKS ||
         captured_pulses[0] > capture_max_tof_ticks) {
         return result;
@@ -2385,18 +2387,9 @@ static LaunchResult_t MeasureSingleLaunch(void)
     result.tof_ticks = captured_pulses[0];
     tof_timeout = 0U;
 
-#if (EMERGENCY_SINGLE_PULSE_DEBUG_MODE != 0U)
-    /*
-     * Аварийная отладка: первый валидный t1 является достаточным результатом.
-     * quality оставляем SINGLE только как диагностический факт; рабочее окно
-     * и калибровка при этом не требуют PAIR.
-     */
-    result.quality = LAUNCH_SINGLE_PULSE_NO_SECOND;
-    return result;
-#else
     if (capture_count >= 2U) {
-        uint32_t interval_ticks =
-            captured_pulses[1] - captured_pulses[0];
+        result.second_ticks = (uint16_t)captured_pulses[1];
+        uint32_t interval_ticks = (uint32_t)result.second_ticks - result.tof_ticks;
 
         if (interval_ticks >= MIN_CLICK_WIDTH_TICKS &&
             interval_ticks <= MAX_CLICK_WIDTH_TICKS) {
@@ -2410,9 +2403,13 @@ static LaunchResult_t MeasureSingleLaunch(void)
         /* Второй импульс физически не появился. Продолжаем по одному t1. */
         result.quality = LAUNCH_SINGLE_PULSE_NO_SECOND;
     }
-#endif
-
     return result;
+}
+
+uint16_t ReadPulseTraceWord(uint16_t offset)
+{
+    const MeasurementPulseSample_t *sample = &pulse_window.samples[offset / 2U];
+    return offset % 2U == 0U ? sample->first_ticks : sample->second_ticks;
 }
 
 /**
@@ -2423,31 +2420,71 @@ static LaunchResult_t MeasureSingleLaunch(void)
  *
  * После заполнения окна из 20 запусков выполняются медианный MAD-фильтр и
  * адаптивная линейная аппроксимация. При неподвижном уровне используется
- * робастное среднее, при движении — оценка на конце временного окна.
+ * робастное среднее, при быстром движении — оценка по последним отсчётам.
+ * Ноль при tof_timeout == 0 означает отказ статистики после захвата импульса.
  */
-uint32_t measure_time_of_flight(void)
+float measure_time_of_flight(void)
 {
     LaunchResult_t launch;
     MeasurementStatisticsResult_t statistics;
     uint32_t ordered_samples[MEASUREMENT_REQUIRED_SAMPLES];
     uint8_t i;
-    uint8_t used_single_pulse;
-
+    t1_filter_pending = false;
+    uint16_t mode = ModBus_GetParameter_Int(MB_ADDR_PULSE_MODE);
+    if (mode != pulse_mode) {
+        pulse_window = (MeasurementPulseWindow_t){.sequence = pulse_window.sequence};
+        t1_filter = (MeasurementT1Filter_t){0};
+        measurement_window_count = 0U;
+        measurement_window_index = 0U;
+        measurement_fallback_count = 0U;
+        filtered_tof_ticks = NAN;
+        pulse_mode = mode;
+    }
     PrepareCaptureWindow();
     launch = MeasureSingleLaunch();
 
+    bool valid_pair = launch.quality == LAUNCH_VALID_PAIR;
+    MeasurementPulseSample_t sample = {
+        (uint16_t)launch.tof_ticks, launch.second_ticks, valid_pair
+    };
+    uint16_t state = MeasurementStatistics_UpdatePulseWindow(
+        &pulse_window, sample, mode, HAL_GetTick());
+    uint16_t valid_pairs = 0U;
+    for (i = 0U; i < MEASUREMENT_PULSE_WINDOW_COUNT; ++i) {
+        valid_pairs += pulse_window.samples[i].valid_pair;
+    }
+    ModBus_SetParameter_Int(MB_ADDR_PULSE_STATE, state);
+    ModBus_SetParameter_Int(MB_ADDR_PULSE_VALID_PAIRS, valid_pairs);
+    ModBus_SetParameter_Int(MB_ADDR_PULSE_SEQUENCE, pulse_window.sequence);
+
+    bool require_pair = state == MEASUREMENT_PULSE_STATE_PAIR;
+    UpdateCaptureCoilFault(require_pair && !valid_pair && launch.tof_ticks != 0U);
+    if (require_pair && measurement_fallback_count != 0U) {
+        measurement_window_count = 0U;
+        measurement_window_index = 0U;
+        measurement_fallback_count = 0U;
+        filtered_tof_ticks = NAN;
+    }
+    uint32_t accepted_ticks = launch.tof_ticks;
+    if (mode == MEASUREMENT_PULSE_MODE_SINGLE) {
+        MeasurementT1Decision_t decision = MeasurementStatistics_FilterT1(
+            &t1_filter, &pulse_window, &accepted_ticks);
+        t1_filter_pending = launch.tof_ticks != 0U && decision == MEASUREMENT_T1_PENDING;
+        if (decision == MEASUREMENT_T1_STEP) {
+            measurement_window_count = 0U;
+            measurement_window_index = 0U;
+            measurement_fallback_count = 0U;
+            filtered_tof_ticks = NAN;
+        }
+    }
     if (launch.tof_ticks == 0U) {
         tof_timeout = 1U;
-        return 0U;
+        return 0.0f;
     }
-
-#if (EMERGENCY_SINGLE_PULSE_DEBUG_MODE != 0U)
-    used_single_pulse = 0U;
-#else
-    used_single_pulse =
-        (launch.quality == LAUNCH_VALID_PAIR) ? 0U : 1U;
-#endif
-    AddMeasurementToWindow(launch.tof_ticks, used_single_pulse);
+    if ((require_pair && !valid_pair) || t1_filter_pending) {
+        return 0.0f;
+    }
+    AddMeasurementToWindow(accepted_ticks, !valid_pair);
 
     /*
      * При частоте по умолчанию 10 Гц окно заполняется примерно за две секунды.
@@ -2455,7 +2492,7 @@ uint32_t measure_time_of_flight(void)
      */
     if (measurement_window_count < MEASUREMENT_REQUIRED_SAMPLES) {
         tof_timeout = 0U;
-        return launch.tof_ticks;
+        return (float)accepted_ticks;
     }
 
     /*
@@ -2472,7 +2509,7 @@ uint32_t measure_time_of_flight(void)
         ordered_samples[i] = measurement_window[source_index];
     }
 
-    if (!MeasurementStatistics_Calculate(
+    if (!MeasurementStatistics_Track(
             ordered_samples,
             MEASUREMENT_REQUIRED_SAMPLES,
             MEASUREMENT_MAX_SPREAD_TICKS,
@@ -2480,8 +2517,6 @@ uint32_t measure_time_of_flight(void)
             MEASUREMENT_APPROX_SLOPE_LOW_MILLI_TICKS,
             MEASUREMENT_APPROX_SLOPE_HIGH_MILLI_TICKS,
             &statistics)) {
-        tof_timeout = 1U;
-
         if (!ModBus_CommunicationIsBusy()) {
             USART2_BufInit();
             USART2_BufPrint("[STAT] REJ u=");
@@ -2501,7 +2536,7 @@ uint32_t measure_time_of_flight(void)
             USART2_BufPrint("\r\n");
             USART2_BufFlush();
         }
-        return 0U;
+        return 0.0f;
     }
 
     tof_timeout = 0U;
@@ -2524,7 +2559,8 @@ uint32_t measure_time_of_flight(void)
         USART2_BufPrint(" tr=");
         USART2_BufPrintFloat(trend_us_per_second);
         USART2_BufPrint(" ap=");
-        USART2_BufPrint(statistics.regression_used != 0U ? "LIN" : "MEAN");
+        USART2_BufPrint(statistics.recent_window_used ? "RECENT" :
+                       (statistics.regression_used != 0U ? "LIN" : "MEAN"));
         USART2_BufPrint(" p=");
         USART2_BufPrintInt(
             MEASUREMENT_REQUIRED_SAMPLES - measurement_fallback_count);
@@ -2538,7 +2574,9 @@ uint32_t measure_time_of_flight(void)
         USART2_BufFlush();
     }
 
-    return statistics.mean_ticks;
+    filtered_tof_ticks = MeasurementStatistics_SmoothEstimate(
+        filtered_tof_ticks, &statistics, current_poll_period_ms);
+    return filtered_tof_ticks;
 }
 
 void Read_Temperature(void)
@@ -2548,13 +2586,7 @@ void Read_Temperature(void)
     float sep_level = ModBus_GetParameter_Float(MB_ADDR_LEVEL_SEP);
     TempSensors_CalculateAverages(level_m, sep_level);
 
-    TempSensorsState_t *state = TempSensors_GetState();
-
-    /* Обновляем общую температуру только валидным результатом датчиков. */
-    if (isfinite(state->avg_liquid_temp)) {
-        current_temperature = state->avg_liquid_temp;
-    }
-    /* Если датчики не дали значение - оставляем текущую температуру */
+    current_temperature = TempSensors_GetState()->avg_liquid_temp;
 }
 
 static void DelayWithModBusService(uint32_t delay_ms)
@@ -2617,12 +2649,12 @@ uint32_t Read_ADC_Single(ADC_HandleTypeDef *hadc, uint32_t channel, uint32_t sam
     sConfig.Rank = ADC_REGULAR_RANK_1;
     sConfig.SamplingTime = sampling_time;
 
-    if (HAL_ADC_ConfigChannel(hadc, &sConfig) != HAL_OK) return 0;
+    if (HAL_ADC_ConfigChannel(hadc, &sConfig) != HAL_OK) return UINT32_MAX;
 
-    HAL_ADC_Start(hadc);
-    if (HAL_ADC_PollForConversion(hadc, 10) != HAL_OK) {
+    if (HAL_ADC_Start(hadc) != HAL_OK) return UINT32_MAX;
+    if (HAL_ADC_PollForConversion(hadc, 1U) != HAL_OK) {
         HAL_ADC_Stop(hadc);
-        return 0;
+        return UINT32_MAX;
     }
 
     uint32_t val = HAL_ADC_GetValue(hadc);
@@ -2635,6 +2667,8 @@ uint32_t Read_ADC_Average(ADC_HandleTypeDef *hadc, uint32_t channel, uint32_t sa
     uint32_t sum = 0, valid = 0;
     for (uint8_t i = 0; i < samples; i++) {
         uint32_t v = Read_ADC_Single(hadc, channel, sampling_time);
+        ModBus_Process();
+        if (v == UINT32_MAX) break;
         if (v > 100 && v < 4000) {
             sum += v;
             valid++;

@@ -3,7 +3,7 @@
  * @brief   Хранилище параметров AT24C64 с CRC32 и фоновой постраничной записью.
  */
 #include "params_storage.h"
-#include "at24c64.h"
+#include "AT24C64.h"
 #include <string.h>
 
 #define PARAMS_STORAGE_MAGIC        0x4D425053UL /* "MBPS" */

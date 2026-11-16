@@ -1,0 +1,2 @@
+../Core/Src/measurement_statistics.c:11:13:SortAscending.constprop	16	static
+../Core/Src/measurement_statistics.c:51:6:MeasurementStatistics_Calculate	232	static

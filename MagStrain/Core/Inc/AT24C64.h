@@ -13,8 +13,8 @@ extern "C" {
 #include <stdint.h>
 
 #define AT24C64_DEFAULT_ADDRESS      (0x51U << 1)
-#define AT24C64_SIZE_BYTES           8192U
-#define AT24C64_PAGE_SIZE_BYTES      32U
+#define AT24C64_SIZE_BYTES           65536UL
+#define AT24C64_PAGE_SIZE_BYTES      32U /* Conservative write chunk for the existing 100 kHz timing. */
 #define AT24C64_READY_TIMEOUT_MS     25U
 #define AT24C64_IO_TIMEOUT_MS        100U
 

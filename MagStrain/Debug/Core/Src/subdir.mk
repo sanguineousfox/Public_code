@@ -7,6 +7,8 @@
 C_SRCS += \
 ../Core/Src/AT24C64.c \
 ../Core/Src/config.c \
+../Core/Src/debug_boot_image.c \
+../Core/Src/fw_update.c \
 ../Core/Src/graduation.c \
 ../Core/Src/i2c_config.c \
 ../Core/Src/lm75b.c \
@@ -28,6 +30,8 @@ C_SRCS += \
 OBJS += \
 ./Core/Src/AT24C64.o \
 ./Core/Src/config.o \
+./Core/Src/debug_boot_image.o \
+./Core/Src/fw_update.o \
 ./Core/Src/graduation.o \
 ./Core/Src/i2c_config.o \
 ./Core/Src/lm75b.o \
@@ -49,6 +53,8 @@ OBJS += \
 C_DEPS += \
 ./Core/Src/AT24C64.d \
 ./Core/Src/config.d \
+./Core/Src/debug_boot_image.d \
+./Core/Src/fw_update.d \
 ./Core/Src/graduation.d \
 ./Core/Src/i2c_config.d \
 ./Core/Src/lm75b.d \
@@ -70,12 +76,12 @@ C_DEPS += \
 
 # Each subdirectory must supply rules for building sources it contributes
 Core/Src/%.o Core/Src/%.su: ../Core/Src/%.c Core/Src/subdir.mk
-	arm-none-eabi-gcc "$<" -mcpu=cortex-m3 -std=gnu11 -g -DDEBUG -DUSE_HAL_DRIVER -DSTM32F103xB -c -I../Drivers/CMSIS/Device/ST/STM32F1xx/Include -I../Drivers/CMSIS/Include -I../Core/Inc -I../Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -I../Drivers/STM32F1xx_HAL_Driver/Inc -Os -ffunction-sections -fdata-sections -Wall -fstack-usage -MMD -MP -MF"$(@:%.o=%.d)" -MT"$@" --specs=nano.specs -mfloat-abi=soft -mthumb -o "$@"
+	arm-none-eabi-gcc "$<" -mcpu=cortex-m3 -std=gnu11 -g -DDEBUG -DUSE_HAL_DRIVER -DSTM32F103xB -DFW_CUBEIDE_BOOT_IMAGE -DFW_EEPROM_DIAGNOSTICS -c -I../Drivers/CMSIS/Device/ST/STM32F1xx/Include -I../Drivers/CMSIS/Include -I../Core/Inc -I../Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -I../Drivers/STM32F1xx_HAL_Driver/Inc -Os -ffunction-sections -fdata-sections -Wall -fstack-usage -MMD -MP -MF"$(@:%.o=%.d)" -MT"$@" --specs=nano.specs -mfloat-abi=soft -mthumb -o "$@"
 
 clean: clean-Core-2f-Src
 
 clean-Core-2f-Src:
-	-$(RM) ./Core/Src/AT24C64.d ./Core/Src/AT24C64.o ./Core/Src/AT24C64.su ./Core/Src/config.d ./Core/Src/config.o ./Core/Src/config.su ./Core/Src/graduation.d ./Core/Src/graduation.o ./Core/Src/graduation.su ./Core/Src/i2c_config.d ./Core/Src/i2c_config.o ./Core/Src/i2c_config.su ./Core/Src/lm75b.d ./Core/Src/lm75b.o ./Core/Src/lm75b.su ./Core/Src/main.d ./Core/Src/main.o ./Core/Src/main.su ./Core/Src/measurement_filter.d ./Core/Src/measurement_filter.o ./Core/Src/measurement_filter.su ./Core/Src/measurement_snapshot.d ./Core/Src/measurement_snapshot.o ./Core/Src/measurement_snapshot.su ./Core/Src/measurement_statistics.d ./Core/Src/measurement_statistics.o ./Core/Src/measurement_statistics.su ./Core/Src/modbus.d ./Core/Src/modbus.o ./Core/Src/modbus.su ./Core/Src/params_storage.d ./Core/Src/params_storage.o ./Core/Src/params_storage.su ./Core/Src/rs485.d ./Core/Src/rs485.o ./Core/Src/rs485.su ./Core/Src/stm32f1xx_hal_msp.d ./Core/Src/stm32f1xx_hal_msp.o ./Core/Src/stm32f1xx_hal_msp.su ./Core/Src/stm32f1xx_it.d ./Core/Src/stm32f1xx_it.o ./Core/Src/stm32f1xx_it.su ./Core/Src/syscalls.d ./Core/Src/syscalls.o ./Core/Src/syscalls.su ./Core/Src/sysmem.d ./Core/Src/sysmem.o ./Core/Src/sysmem.su ./Core/Src/system_stm32f1xx.d ./Core/Src/system_stm32f1xx.o ./Core/Src/system_stm32f1xx.su ./Core/Src/temp_sensors.d ./Core/Src/temp_sensors.o ./Core/Src/temp_sensors.su ./Core/Src/utils.d ./Core/Src/utils.o ./Core/Src/utils.su
+	-$(RM) ./Core/Src/AT24C64.d ./Core/Src/AT24C64.o ./Core/Src/AT24C64.su ./Core/Src/config.d ./Core/Src/config.o ./Core/Src/config.su ./Core/Src/debug_boot_image.d ./Core/Src/debug_boot_image.o ./Core/Src/debug_boot_image.su ./Core/Src/fw_update.d ./Core/Src/fw_update.o ./Core/Src/fw_update.su ./Core/Src/graduation.d ./Core/Src/graduation.o ./Core/Src/graduation.su ./Core/Src/i2c_config.d ./Core/Src/i2c_config.o ./Core/Src/i2c_config.su ./Core/Src/lm75b.d ./Core/Src/lm75b.o ./Core/Src/lm75b.su ./Core/Src/main.d ./Core/Src/main.o ./Core/Src/main.su ./Core/Src/measurement_filter.d ./Core/Src/measurement_filter.o ./Core/Src/measurement_filter.su ./Core/Src/measurement_snapshot.d ./Core/Src/measurement_snapshot.o ./Core/Src/measurement_snapshot.su ./Core/Src/measurement_statistics.d ./Core/Src/measurement_statistics.o ./Core/Src/measurement_statistics.su ./Core/Src/modbus.d ./Core/Src/modbus.o ./Core/Src/modbus.su ./Core/Src/params_storage.d ./Core/Src/params_storage.o ./Core/Src/params_storage.su ./Core/Src/rs485.d ./Core/Src/rs485.o ./Core/Src/rs485.su ./Core/Src/stm32f1xx_hal_msp.d ./Core/Src/stm32f1xx_hal_msp.o ./Core/Src/stm32f1xx_hal_msp.su ./Core/Src/stm32f1xx_it.d ./Core/Src/stm32f1xx_it.o ./Core/Src/stm32f1xx_it.su ./Core/Src/syscalls.d ./Core/Src/syscalls.o ./Core/Src/syscalls.su ./Core/Src/sysmem.d ./Core/Src/sysmem.o ./Core/Src/sysmem.su ./Core/Src/system_stm32f1xx.d ./Core/Src/system_stm32f1xx.o ./Core/Src/system_stm32f1xx.su ./Core/Src/temp_sensors.d ./Core/Src/temp_sensors.o ./Core/Src/temp_sensors.su ./Core/Src/utils.d ./Core/Src/utils.o ./Core/Src/utils.su
 
 .PHONY: clean-Core-2f-Src
 

@@ -2,7 +2,7 @@
  * @file    at24c64.c
  * @brief   Низкоуровневый драйвер EEPROM AT24C64 через I2C2.
  */
-#include "at24c64.h"
+#include "AT24C64.h"
 #include "i2c_config.h"
 #include <stddef.h>
 
@@ -113,6 +113,8 @@ HAL_StatusTypeDef AT24C64_Init(uint8_t device_address)
 
     __HAL_RCC_GPIOB_CLK_ENABLE();
 
+    /* Set the output latch before switching PB8 to output mode. */
+    AT24C64_SetWriteProtect(GPIO_PIN_SET);
     gpio.Pin = AT24C64_WP_PIN;
     gpio.Mode = GPIO_MODE_OUTPUT_PP;
     gpio.Pull = GPIO_NOPULL;
@@ -120,7 +122,6 @@ HAL_StatusTypeDef AT24C64_Init(uint8_t device_address)
     HAL_GPIO_Init(AT24C64_WP_PORT, &gpio);
 
     write_cycle_active = 0U;
-    AT24C64_SetWriteProtect(GPIO_PIN_SET);
     return AT24C64_IsReady(device_address);
 }
 
@@ -194,8 +195,14 @@ HAL_StatusTypeDef AT24C64_WriteBytes(uint8_t device_address,
             break;
         }
 
-        /* WP остаётся в нуле на всём внутреннем цикле записи. */
-        status = AT24C64_IsReady(device_address);
+        /* EEPROM may NACK during its internal write cycle. The HAL timeout
+         * applies to each probe, so space the probes over a time window. */
+        uint32_t started = HAL_GetTick();
+        do {
+            status = HAL_I2C_IsDeviceReady(&hi2c2, device_address, 1U, 1U);
+            if (status == HAL_OK) break;
+            HAL_Delay(1U);
+        } while ((uint32_t)(HAL_GetTick() - started) < AT24C64_READY_TIMEOUT_MS);
         if (status != HAL_OK) {
             break;
         }

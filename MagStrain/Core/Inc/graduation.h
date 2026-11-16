@@ -17,6 +17,10 @@ extern "C" {
 #define GRAD_MAGIC               0x47524144UL
 #define GRAD_FORMAT_VERSION      2U
 
+/* Расчётный профиль вертикальной бочки: 209 л, внутренний диаметр 572 мм. */
+#define GRAD_OIL_DRUM_VOLUME_M3  0.209f
+#define GRAD_OIL_DRUM_HEIGHT_M   0.81332542f
+
 typedef enum {
     GRAD_TYPE_VERTICAL = 0,
     GRAD_TYPE_HORIZ_FLAT = 1,

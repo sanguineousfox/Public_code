@@ -1,0 +1,9 @@
+../Core/Src/fw_update.c:57:13:Read	8	static
+../Core/Src/fw_update.c:63:13:Write	8	static
+../Core/Src/fw_update.c:11:10:FW_Crc	12	static
+../Core/Src/fw_update.c:20:6:FW_VectorsValid	0	static
+../Core/Src/fw_update.c:26:6:FW_HeaderValid	8	static
+../Core/Src/fw_update.c:107:6:FW_Active	0	static
+../Core/Src/fw_update.c:108:10:FW_Read	0	static
+../Core/Src/fw_update.c:124:6:FW_Process	176	static
+../Core/Src/fw_update.c:142:9:FW_Write	296	static

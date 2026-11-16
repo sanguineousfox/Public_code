@@ -1,0 +1,2 @@
+../Core/Src/measurement_filter.c:63:6:MeasurementFilter_Init	0	static
+../Core/Src/measurement_filter.c:72:7:MeasurementFilter_Update	72	static

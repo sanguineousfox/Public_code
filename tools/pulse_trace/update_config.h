@@ -1,0 +1,16 @@
+#ifndef MAGSTRAIN_WINDOWS_TRACE_CONFIG_H
+#define MAGSTRAIN_WINDOWS_TRACE_CONFIG_H
+
+#ifndef FW_WINDOWS_PORT
+#define FW_WINDOWS_PORT 3
+#endif
+
+#ifndef FW_TRACE_MINUTES
+#define FW_TRACE_MINUTES 3
+#endif
+
+#define FW_STRING_IMPL(value) #value
+#define FW_STRING(value) FW_STRING_IMPL(value)
+#define FW_PORT_NAME "COM" FW_STRING(FW_WINDOWS_PORT)
+
+#endif
